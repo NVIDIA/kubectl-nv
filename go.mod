@@ -3,7 +3,6 @@ module github.com/NVIDIA/kubectl-nv
 go 1.22.0
 
 require (
-	github.com/NVIDIA/gpu-operator v1.8.3-0.20240306211651-7b521f7a2794
 	github.com/mattn/go-isatty v0.0.20
 	github.com/openshift/client-go v0.0.0-20240215090359-b71f6f2731f5
 	github.com/urfave/cli/v2 v2.27.1
@@ -18,8 +17,6 @@ require (
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20230124172434-306776ec8161 // indirect
 	github.com/MakeNowJust/heredoc v1.0.0 // indirect
-	github.com/NVIDIA/k8s-kata-manager v0.0.0-20230620232711-08b57feb9b5a // indirect
-	github.com/NVIDIA/k8s-operator-libs v0.0.0-20230811202718-cd051ba8bafe // indirect
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.3 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -60,14 +57,12 @@ require (
 	github.com/openshift/api v0.0.0-20240214213616-e741d64e9f22 // indirect
 	github.com/peterbourgon/diskv v2.0.1+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring v0.65.2 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/spf13/cobra v1.8.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/xlab/treeprint v1.2.0 // indirect
 	github.com/xrash/smetrics v0.0.0-20201216005158-039620a65673 // indirect
 	go.starlark.net v0.0.0-20231121155337-90ade8b19d09 // indirect
-	golang.org/x/mod v0.15.0 // indirect
 	golang.org/x/net v0.19.0 // indirect
 	golang.org/x/oauth2 v0.15.0 // indirect
 	golang.org/x/sync v0.5.0 // indirect
@@ -84,7 +79,6 @@ require (
 	k8s.io/klog/v2 v2.110.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20240103195357-a9f8850cb432 // indirect
 	k8s.io/utils v0.0.0-20240102154912-e7106e64919e // indirect
-	sigs.k8s.io/controller-runtime v0.16.3 // indirect
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/kustomize/api v0.16.0 // indirect
 	sigs.k8s.io/kustomize/kyaml v0.16.0 // indirect
