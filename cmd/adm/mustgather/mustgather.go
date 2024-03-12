@@ -26,7 +26,6 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 
-	gpuv1 "github.com/NVIDIA/gpu-operator/api/v1"
 	"github.com/NVIDIA/kubectl-nv/internal/logger"
 
 	v1 "k8s.io/api/core/v1"
@@ -266,22 +265,13 @@ func (m command) run(opts *options) error {
 	}
 
 	// Get clusterPolicy CR
-	instance := &gpuv1.ClusterPolicy{}
-	err = clientset.RESTClient().Get().AbsPath("/apis/nvidia.com/v1/clusterpolicies/cluster-policy").Do(context.Background()).Into(instance)
+	data, err := clientset.RESTClient().Get().AbsPath("/apis/nvidia.com/v1/clusterpolicies/cluster-policy").Do(context.Background()).Raw()
 	if err != nil {
 		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting clusterPolicy: %v\n", err)); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		if _, ferr := os.Create(filepath.Join(opts.artifactDir, "cluster_policy.missing")); ferr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, ferr)
-		}
-		return err
-	}
-
-	data, err := yaml.Marshal(instance)
-	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling clusterPolicy: %v\n", err)); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
