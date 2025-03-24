@@ -26,13 +26,14 @@ import (
 	"github.com/urfave/cli/v2"
 	"gopkg.in/yaml.v2"
 
-	gpuv1 "github.com/NVIDIA/gpu-operator/api/v1"
 	"github.com/NVIDIA/kubectl-nv/internal/logger"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -266,19 +267,26 @@ func (m command) run(opts *options) error {
 	}
 
 	// Get clusterPolicy CR
-	instance := &gpuv1.ClusterPolicy{}
-	err = clientset.RESTClient().Get().AbsPath("/apis/nvidia.com/v1/clusterpolicies/cluster-policy").Do(context.Background()).Into(instance)
+	dynClient, err := dynamic.NewForConfig(config)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting clusterPolicy: %v\n", err)); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-		}
-		if _, ferr := os.Create(filepath.Join(opts.artifactDir, "cluster_policy.missing")); ferr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, ferr)
-		}
-		return err
+		return fmt.Errorf("error creating dynamic client: %w", err)
 	}
 
-	data, err := yaml.Marshal(instance)
+	// Define GVR for ClusterPolicy
+	gvr := schema.GroupVersionResource{
+		Group:    "nvidia.com",
+		Version:  "v1",
+		Resource: "clusterpolicies",
+	}
+
+	// Get CR named "cluster-policy"
+	cr, err := dynClient.Resource(gvr).Namespace(namespace).Get(context.TODO(), "cluster-policy", metav1.GetOptions{})
+	if err != nil {
+		_ = os.WriteFile(filepath.Join(opts.artifactDir, "cluster_policy.missing"), []byte{}, 0644)
+		return fmt.Errorf("error getting clusterPolicy: %w", err)
+	}
+
+	data, err := yaml.Marshal(cr.Object)
 	if err != nil {
 		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling clusterPolicy: %v\n", err)); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
