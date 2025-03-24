@@ -7,7 +7,7 @@ require (
 	github.com/NVIDIA/gpu-operator v1.11.1
 	github.com/mattn/go-isatty v0.0.20
 	github.com/openshift/client-go v0.0.0-20240215090359-b71f6f2731f5
-	github.com/urfave/cli/v2 v2.27.5
+	github.com/urfave/cli/v2 v2.27.6
 	gopkg.in/yaml.v2 v2.4.0
 	k8s.io/api v0.32.3
 	k8s.io/apimachinery v0.32.3
