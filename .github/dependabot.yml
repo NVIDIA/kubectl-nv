@@ -22,3 +22,15 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+
+  - package-ecosystem: "docker"
+    target-branch: main
+    directories:
+    # CUDA image
+    - "/deployments/container"
+    # Golang version
+    - "/deployments/devel"
+    schedule:
+      interval: "daily"
+    labels:
+    - dependencies
