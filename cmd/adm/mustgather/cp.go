@@ -102,7 +102,7 @@ func (t *TarPipe) initReadFrom(n uint64) {
 	}
 
 	go func() {
-		defer t.outStream.Close()
+		defer t.outStream.Close() // nolint: errcheck
 		if err := t.o.execute(options); err != nil {
 			t.outStream.CloseWithError(err)
 		}
@@ -156,7 +156,7 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 		destFileName := dest.Join(newRemotePath(header.Name[len(prefix):]))
 
 		if !isRelative(dest, destFileName) {
-			fmt.Fprintf(o.IOStreams.ErrOut, "warning: file %q is outside target destination, skipping\n", destFileName)
+			fmt.Fprintf(o.ErrOut, "warning: file %q is outside target destination, skipping\n", destFileName) // nolint: errcheck
 			continue
 		}
 
@@ -172,20 +172,20 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 
 		if mode&os.ModeSymlink != 0 {
 			if !symlinkWarningPrinted && len(o.ExecParentCmdName) > 0 {
-				fmt.Fprintf(o.IOStreams.ErrOut,
+				_, _ = fmt.Fprintf(o.ErrOut,
 					"warning: skipping symlink: %q -> %q (consider using \"%s exec -n %q %q -- tar cf - %q | tar xf -\")\n",
 					destFileName, header.Linkname, o.ExecParentCmdName, ns, pod, src)
 				symlinkWarningPrinted = true
 				continue
 			}
-			fmt.Fprintf(o.IOStreams.ErrOut, "warning: skipping symlink: %q -> %q\n", destFileName, header.Linkname)
+			fmt.Fprintf(o.ErrOut, "warning: skipping symlink: %q -> %q\n", destFileName, header.Linkname) // nolint: errcheck
 			continue
 		}
 		outFile, err := os.Create(destFileName.String())
 		if err != nil {
 			return err
 		}
-		defer outFile.Close()
+		defer outFile.Close() // nolint: errcheck
 		if _, err := io.Copy(outFile, tarReader); err != nil {
 			return err
 		}
