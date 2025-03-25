@@ -134,24 +134,24 @@ func (m command) run(opts *options) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer logFile.Close() // nolint: errcheck
 	errLogFile, err := os.Create(filepath.Join(opts.artifactDir, "must-gather.stderr.log"))
 	if err != nil {
 		return err
 	}
-	defer errLogFile.Close()
+	defer errLogFile.Close() // nolint: errcheck
 
 	// Create the Kubernetes client
 	config, err := clientcmd.BuildConfigFromFlags("", opts.kubeconfig)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating Kubernetes rest config: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating Kubernetes rest config: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
 	err = setKubernetesDefaults(config)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error Setting up Kubernetes rest config: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error Setting up Kubernetes rest config: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -159,7 +159,7 @@ func (m command) run(opts *options) error {
 
 	clientset, err := createKubernetesClient(opts.kubeconfig)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating Kubernetes client: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating Kubernetes client: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -170,15 +170,15 @@ func (m command) run(opts *options) error {
 	if isOpenShift {
 		oversionFile, err := os.Create(filepath.Join(opts.artifactDir, "openshift_version.yaml"))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating openshift_version.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error creating openshift_version.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		defer oversionFile.Close()
+		defer oversionFile.Close() // nolint: errcheck
 		_, err = oversionFile.WriteString(oversion)
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing openshift_version.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error writing openshift_version.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -189,7 +189,7 @@ func (m command) run(opts *options) error {
 	if isOpenShift {
 		machines, err := getOpenShiftMachines(opts.kubeconfig)
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting machines: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error getting machines: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -197,16 +197,16 @@ func (m command) run(opts *options) error {
 
 		machinesFile, err := os.Create(filepath.Join(opts.artifactDir, "machines.yaml"))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating machines.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error creating machines.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		defer machinesFile.Close()
+		defer machinesFile.Close() // nolint: errcheck
 
 		_, err = machinesFile.Write(machines)
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing machines.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error writing machines.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -214,7 +214,7 @@ func (m command) run(opts *options) error {
 	} else {
 		nodes, err := clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting nodes: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error getting nodes: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -222,16 +222,16 @@ func (m command) run(opts *options) error {
 
 		nodesFile, err := os.Create(filepath.Join(opts.artifactDir, "nodes.yaml"))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating nodes.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error creating nodes.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		defer nodesFile.Close()
+		defer nodesFile.Close() // nolint: errcheck
 
 		data, err := yaml.Marshal(nodes)
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling nodes: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error marshalling nodes: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -239,7 +239,7 @@ func (m command) run(opts *options) error {
 
 		_, err = nodesFile.Write(data)
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing nodes.yaml: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error writing nodes.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -262,7 +262,7 @@ func (m command) run(opts *options) error {
 		return err
 	}
 	operatorNamespace := podList.Items[0].Namespace
-	if _, lerr := logFile.WriteString(fmt.Sprintf("Operator namespace: %s\n", operatorNamespace)); lerr != nil {
+	if _, lerr := fmt.Fprintf(logFile, "Operator namespace: %s\n", operatorNamespace); lerr != nil {
 		fmt.Printf("Error writing to log file: %v\n", lerr)
 	}
 
@@ -288,7 +288,7 @@ func (m command) run(opts *options) error {
 
 	data, err := yaml.Marshal(cr.Object)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling clusterPolicy: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(logFile, "Error marshalling clusterPolicy: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -296,16 +296,16 @@ func (m command) run(opts *options) error {
 
 	clusterPolicyFile, err := os.Create(filepath.Join(opts.artifactDir, "cluster_policy.yaml"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating cluster_policy.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(logFile, "Error creating cluster_policy.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer clusterPolicyFile.Close()
+	defer clusterPolicyFile.Close() // nolint: errcheck
 
 	_, err = clusterPolicyFile.Write(data)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing cluster_policy.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(logFile, "Error writing cluster_policy.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -322,12 +322,12 @@ func (m command) run(opts *options) error {
 			LabelSelector: label,
 		})
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error could not find nodes with NVIDIA PCI labels: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error getting nodes with NVIDIA PCI label: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 				return err
 			}
 		} else if errors.IsNotFound(err) {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error could not find nodes with NVIDIA PCI label: %v\n", label)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error getting nodes with NVIDIA PCI label: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 				return err
 			}
@@ -337,7 +337,7 @@ func (m command) run(opts *options) error {
 	}
 
 	if len(gpuNodes.Items) == 0 {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error could not find nodes with NVIDIA PCI labels: %v\n", gpuPciLabelSelector)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "No nodes found with NVIDIA PCI label\n"); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -345,16 +345,16 @@ func (m command) run(opts *options) error {
 
 	gpuNodesFile, err := os.Create(filepath.Join(opts.artifactDir, "gpu_nodes.yaml"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating gpu_nodes.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating gpu_nodes.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer gpuNodesFile.Close()
+	defer gpuNodesFile.Close() // nolint: errcheck
 
 	data, err = yaml.Marshal(gpuNodes)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling gpuNodes: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error marshalling gpuNodes: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -362,7 +362,7 @@ func (m command) run(opts *options) error {
 
 	_, err = gpuNodesFile.Write(data)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing gpu_nodes.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error writing gpu_nodes.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -371,7 +371,7 @@ func (m command) run(opts *options) error {
 	// Get the GPU Operands pods
 	operandsPodList, err := clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pods: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -379,16 +379,16 @@ func (m command) run(opts *options) error {
 
 	gpuOperandPods, err := os.Create(filepath.Join(opts.artifactDir, "gpu_operand_pods.yaml"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating gpu_operand_pods.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating gpu_operand_pods.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer gpuOperandPods.Close()
+	defer gpuOperandPods.Close() // nolint: errcheck
 
 	data, err = yaml.Marshal(operandsPodList)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling podList: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error marshalling podList: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -396,7 +396,7 @@ func (m command) run(opts *options) error {
 
 	_, err = gpuOperandPods.Write(data)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing gpu_operand_pods.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error writing gpu_operand_pods.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			return err
 		}
@@ -408,13 +408,13 @@ func (m command) run(opts *options) error {
 		LabelSelector: "app=gpu-operator",
 	})
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pods: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
 	if len(gpuOperatorPods.Items) == 0 {
-		if _, lerr := errLogFile.WriteString("Error could not find GPU Operator pod\n"); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "No pods found with label app=gpu-operator\n"); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -423,16 +423,16 @@ func (m command) run(opts *options) error {
 
 	gpuOperatorPodsFile, err := os.Create(filepath.Join(opts.artifactDir, "gpu_operator_pod.yaml"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating gpu_operator_pod.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating gpu_operator_pod.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer gpuOperatorPodsFile.Close()
+	defer gpuOperatorPodsFile.Close() // nolint: errcheck
 
 	data, err = yaml.Marshal(gpuOperatorPod)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling podList: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error marshalling gpuOperatorPod: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -440,7 +440,7 @@ func (m command) run(opts *options) error {
 
 	_, err = gpuOperatorPodsFile.Write(data)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing gpu_operator_pod.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error writing gpu_operator_pod.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -449,23 +449,23 @@ func (m command) run(opts *options) error {
 	// Get the GPU Operator logs
 	gpuOperatorLogs, err := os.Create(filepath.Join(opts.artifactDir, "gpu_operator_logs.log"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating gpu_operator_logs.log: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating gpu_operator_logs.log: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer gpuOperatorLogs.Close()
+	defer gpuOperatorLogs.Close() // nolint: errcheck
 
 	podLogOpts := v1.PodLogOptions{}
 	req := clientset.CoreV1().Pods(operatorNamespace).GetLogs(gpuOperatorPod.Name, &podLogOpts)
 	podLogs, err := req.Stream(context.Background())
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pod logs: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pod logs: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer podLogs.Close()
+	defer podLogs.Close() // nolint: errcheck
 
 	buf := make([]byte, 4096)
 	for {
@@ -475,7 +475,7 @@ func (m command) run(opts *options) error {
 		}
 		_, err = gpuOperatorLogs.Write(buf[:n])
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing pod logs: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error writing pod logs: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -485,12 +485,12 @@ func (m command) run(opts *options) error {
 	// Get previous GPU Operator logs
 	gpuOperatorLogs, err = os.Create(filepath.Join(opts.artifactDir, "gpu_operator_logs_previous.log"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating gpu_operator_logs_previous.log: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating gpu_operator_logs_previous.log: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer gpuOperatorLogs.Close()
+	defer gpuOperatorLogs.Close() // nolint: errcheck
 
 	podLogOpts = v1.PodLogOptions{
 		Previous: true,
@@ -498,20 +498,20 @@ func (m command) run(opts *options) error {
 	req = clientset.CoreV1().Pods(operatorNamespace).GetLogs(gpuOperatorPod.Name, &podLogOpts)
 	podLogs, err = req.Stream(context.Background())
 	if err != nil || podLogs == nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pod logs: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pod logs: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			return err
 		}
 		// If no previous logs, available, write a message to the log file
 		_, err = gpuOperatorLogs.WriteString("No previous logs available\n")
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing pod logs: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error writing to gpu_operator_logs_previous.log: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
 	} else {
-		defer podLogs.Close()
+		defer podLogs.Close() // nolint: errcheck
 	}
 
 	// If no previous logs, available, podLogs will be empty
@@ -524,7 +524,7 @@ func (m command) run(opts *options) error {
 			}
 			_, err = gpuOperatorLogs.Write(buf[:n])
 			if err != nil {
-				if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing pod logs: %v\n", err)); lerr != nil {
+				if _, lerr := fmt.Fprintf(errLogFile, "Error writing pod logs: %v\n", err); lerr != nil {
 					err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 				}
 				return err
@@ -536,23 +536,23 @@ func (m command) run(opts *options) error {
 	for _, pod := range operandsPodList.Items {
 		operandLogs, err := os.Create(filepath.Join(opts.artifactDir, fmt.Sprintf("%s_logs.log", pod.Name)))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating %s_logs.log: %v\n", pod.Name, err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error creating %s_logs.log: %v\n", pod.Name, err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		defer operandLogs.Close()
+		defer operandLogs.Close() // nolint: errcheck
 
 		podLogOpts := v1.PodLogOptions{}
 		req := clientset.CoreV1().Pods(operatorNamespace).GetLogs(pod.Name, &podLogOpts)
 		podLogs, err := req.Stream(context.Background())
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pod logs: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error getting pod logs: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		defer podLogs.Close()
+		defer podLogs.Close() // nolint: errcheck
 
 		buf := make([]byte, 4096)
 		for {
@@ -562,7 +562,7 @@ func (m command) run(opts *options) error {
 			}
 			_, err = operandLogs.Write(buf[:n])
 			if err != nil {
-				if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing pod logs: %v\n", err)); lerr != nil {
+				if _, lerr := fmt.Fprintf(errLogFile, "Error writing pod logs: %v\n", err); lerr != nil {
 					err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 				}
 				return err
@@ -573,7 +573,7 @@ func (m command) run(opts *options) error {
 	// Get DaemonSets
 	daemonSets, err := clientset.AppsV1().DaemonSets(operatorNamespace).List(context.Background(), metav1.ListOptions{})
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting daemonSets: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting daemonSets: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -581,16 +581,16 @@ func (m command) run(opts *options) error {
 
 	daemonSetsFile, err := os.Create(filepath.Join(opts.artifactDir, "daemonsets.yaml"))
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error creating daemonsets.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error creating daemonsets.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer daemonSetsFile.Close()
+	defer daemonSetsFile.Close() // nolint: errcheck
 
 	data, err = yaml.Marshal(daemonSets)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error marshalling daemonSets: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error marshalling daemonSets: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -598,7 +598,7 @@ func (m command) run(opts *options) error {
 
 	_, err = daemonSetsFile.Write(data)
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error writing daemonsets.yaml: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error writing daemonsets.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -614,7 +614,7 @@ func (m command) run(opts *options) error {
 	} else {
 		outpipe = *nullFile
 	}
-	defer nullFile.Close()
+	defer nullFile.Close() // nolint: errcheck
 
 	iostream := genericiooptions.IOStreams{In: os.Stdin, Out: &outpipe, ErrOut: os.Stderr}
 	o := NewCopyOptions(iostream)
@@ -626,7 +626,7 @@ func (m command) run(opts *options) error {
 		LabelSelector: "app=nvidia-driver-daemonset",
 	})
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pods: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -637,7 +637,7 @@ func (m command) run(opts *options) error {
 
 		outLog, errLog, err := executeRemoteCommand(&nvidiaDriverDaemonSetPod, "cd /tmp && nvidia-bug-report.sh")
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error executing remote command on NVIDIA Driver DaemonSet: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error executing remote command on NVIDIA Driver DaemonSet: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			if _, lerr := errLogFile.WriteString(errLog); lerr != nil {
@@ -658,7 +658,7 @@ func (m command) run(opts *options) error {
 			return err
 		}
 		if err = o.copyFromPod(srcSpec, destSpec); err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error copying from NVIDIA Driver DaemonSet: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error copying from NVIDIA Driver DaemonSet: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
@@ -670,7 +670,7 @@ func (m command) run(opts *options) error {
 		LabelSelector: "app=nvidia-vgpu-manager-daemonset",
 	})
 	if err != nil {
-		if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error getting pods: %v\n", err)); lerr != nil {
+		if _, lerr := fmt.Fprintf(errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -680,7 +680,7 @@ func (m command) run(opts *options) error {
 		nvidiaVGPUDaemonSetPod := nvidiaVGPUDaemonSetPods.Items[0]
 		outLog, errLog, err := executeRemoteCommand(&nvidiaVGPUDaemonSetPod, "cd /tmp && nvidia-bug-report.sh")
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error executing remote command on NVIDIA vGPU Manager DaemonSet: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error executing remote command on NVIDIA vGPU Manager DaemonSet: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			if _, lerr := errLogFile.WriteString(errLog); lerr != nil {
@@ -694,20 +694,20 @@ func (m command) run(opts *options) error {
 
 		srcSpec, err := extractFileSpec(fmt.Sprintf("%s/%s:/tmp/nvidia-bug-report.log.gz", nvidiaVGPUDaemonSetPod.Namespace, nvidiaVGPUDaemonSetPod.Name))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error extracting file spec: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error extracting file spec: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
 		destSpec, err := extractFileSpec(filepath.Join(opts.artifactDir, "nvidia-bug-report-nvidiaVGPUDaemonSetPod.log.gz"))
 		if err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error extracting file spec: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error extracting file spec: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
 		if err = o.copyFromPod(srcSpec, destSpec); err != nil {
-			if _, lerr := errLogFile.WriteString(fmt.Sprintf("Error copying from NVIDIA vGPU Manager DaemonSet: %v\n", err)); lerr != nil {
+			if _, lerr := fmt.Fprintf(errLogFile, "Error copying from NVIDIA vGPU Manager DaemonSet: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
 			return err
