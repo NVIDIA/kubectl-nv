@@ -34,5 +34,9 @@ jobs:
         id: version
         run: echo "version=$(echo $GITHUB_SHA | cut -c1-8)" >> "$GITHUB_OUTPUT"
 
+  docs-check:
+    uses: ./.github/workflows/docs_check.yaml
+    secrets: inherit
+
   golang:
     uses: ./.github/workflows/golang.yaml

@@ -25,22 +25,31 @@ on:
       - release-*
 
 jobs:
-  check:
+  variables:
     runs-on: ubuntu-latest
+    outputs:
+      GOLANG_VERSION: ${{ steps.go_version.outputs.GOLANG_VERSION }}
     steps:
     - uses: actions/checkout@v4
       name: Checkout code
 
     - name: Get Golang version
-      id: vars
+      id: go_version
       run: |
         GOLANG_VERSION=$(./hack/golang-version.sh)
-        echo "GOLANG_VERSION=${GOLANG_VERSION##GOLANG_VERSION := }" >> $GITHUB_ENV
+        echo "GOLANG_VERSION=${GOLANG_VERSION##GOLANG_VERSION := }" >> $GITHUB_OUTPUT
+
+  check:
+    runs-on: ubuntu-latest
+    needs: variables
+    steps:
+    - uses: actions/checkout@v4
+      name: Checkout code
 
     - name: Install Go
       uses: actions/setup-go@v5
       with:
-        go-version: ${{ env.GOLANG_VERSION }}
+        go-version: ${{ needs.variables.outputs.GOLANG_VERSION }}
 
     - name: Lint
       uses: golangci/golangci-lint-action@v8
@@ -56,6 +65,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
+    needs: variables
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -69,6 +79,28 @@ jobs:
       - name: Install Go
         uses: actions/setup-go@v5
         with:
-          go-version: ${{ env.GOLANG_VERSION }}
+          go-version: ${{ needs.variables.outputs.GOLANG_VERSION }}
 
       - run: make build
+
+  test:
+    name: Unit test
+    runs-on: ubuntu-latest
+    needs: variables
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.variables.outputs.GOLANG_VERSION }}
+  
+      - run: make coverage
+        name: Run unit tests and generate coverage report
+  
+      - name: Upload to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: coverage.out

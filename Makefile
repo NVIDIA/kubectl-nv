@@ -10,6 +10,7 @@
 # limitations under the License.
 .PHONY: build fmt verify release
 
+CONTAINER_RUN_CMD ?= docker run
 GO_CMD ?= go
 GO_FMT ?= gofmt
 GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
@@ -25,6 +26,12 @@ build:
 
 fmt:
 	@$(GO_FMT) -w -l $$(find . -name '*.go')
+
+COVERAGE_FILE := coverage.out
+test:
+	go test -coverprofile=$(COVERAGE_FILE) ./cmd/... ./internal/...
+coverage: test
+	go tool cover -func=$(COVERAGE_FILE)
 
 verify:
 	@out=`$(GO_FMT) -w -l -d $$(find . -name '*.go')`; \
@@ -74,3 +81,11 @@ release:
 			GOOS=$$os GOARCH=$$arch $(GO_CMD) build -o bin/$(BINARY_NAME)-$$os-$$arch cmd/main.go; \
 		done; \
 	done
+
+mdlint:
+	${CONTAINER_RUN_CMD} \
+	--rm \
+	--volume "${PWD}:/workdir:ro,z" \
+	--workdir /workdir \
+	ruby:slim \
+	/workdir/hack/mdlint.sh
