@@ -15,7 +15,14 @@
 name: Docs
 
 on:
-  workflow_call:
+  workflow_call: {}
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
+      - release-*
 
 jobs:
   lint:
