@@ -29,6 +29,7 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/internal/logger"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -271,8 +272,17 @@ func (g *Gatherer) gatherNodeInfo() error {
 			return err
 		}
 	} else {
-		// Retrieve nodes using the Kubernetes clientset.
-		nodes, err := g.clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+		listFunc := func(opts metav1.ListOptions) (v1.NodeList, string, error) {
+			nl, err := g.clientset.CoreV1().Nodes().List(context.Background(), opts)
+			if err != nil {
+				return v1.NodeList{}, "", err
+			}
+			return *nl, nl.Continue, nil
+		}
+		appendFunc := func(all *v1.NodeList, page v1.NodeList) {
+			all.Items = append(all.Items, page.Items...)
+		}
+		nodes, err := listAllPaginated[v1.NodeList](500, "", listFunc, appendFunc)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting nodes: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -314,13 +324,17 @@ func (g *Gatherer) gatherNodeInfo() error {
 // It returns the operator namespace as a string and an error if any.
 func (g *Gatherer) gatherOperatorNamespace() (string, error) {
 	labelSelector := "app=gpu-operator"
-	// Using an empty namespace to list pods across all namespaces.
-	namespace := ""
-
-	// Retrieve the list of pods matching the label selector.
-	podList, err := g.clientset.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
-		LabelSelector: labelSelector,
-	})
+	listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+		pl, err := g.clientset.CoreV1().Pods("").List(context.TODO(), opts)
+		if err != nil {
+			return v1.PodList{}, "", err
+		}
+		return *pl, pl.Continue, nil
+	}
+	appendFunc := func(all *v1.PodList, page v1.PodList) {
+		all.Items = append(all.Items, page.Items...)
+	}
+	pods, err := listAllPaginated[v1.PodList](500, labelSelector, listFunc, appendFunc)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -328,8 +342,7 @@ func (g *Gatherer) gatherOperatorNamespace() (string, error) {
 		return "", err
 	}
 
-	// Check if any pods were found.
-	if len(podList.Items) == 0 {
+	if len(pods.Items) == 0 {
 		if _, lerr := fmt.Fprintf(g.logFile, "No pods found with label %s\n", labelSelector); lerr != nil {
 			if _, lerr2 := fmt.Fprintf(g.errLogFile, "Error writing to log file: %v\n", lerr); lerr2 != nil {
 				return "", fmt.Errorf("%v + error writing to stderr log file: %v", lerr, lerr2)
@@ -338,8 +351,7 @@ func (g *Gatherer) gatherOperatorNamespace() (string, error) {
 		return "", fmt.Errorf("no pods found with label %s", labelSelector)
 	}
 
-	// Extract the operator namespace from the first pod.
-	operatorNamespace := podList.Items[0].Namespace
+	operatorNamespace := pods.Items[0].Namespace
 	if _, lerr := fmt.Fprintf(g.logFile, "Operator namespace: %s\n", operatorNamespace); lerr != nil {
 		if _, lerr2 := fmt.Fprintf(g.errLogFile, "Error writing to log file: %v\n", lerr); lerr2 != nil {
 			return "", fmt.Errorf("%v + error writing to stderr log file: %v", lerr, lerr2)
@@ -449,28 +461,31 @@ func (g *Gatherer) gatherGPUOperatorCRDs() error {
 
 // gatherGPUNodes collects nodes that have NVIDIA PCI labels and writes the result as YAML to a file.
 func (g *Gatherer) gatherGPUNodes() error {
-	// Define the label selectors for nodes with NVIDIA PCI cards.
 	gpuPciLabelSelectors := []string{
 		"feature.node.kubernetes.io/pci-10de.present",
 		"feature.node.kubernetes.io/pci-0302_10de.present",
 		"feature.node.kubernetes.io/pci-0300_10de.present",
 	}
-
-	// Initialize an empty NodeList to collect GPU nodes.
 	var gpuNodes v1.NodeList
-
-	// Iterate over each label selector and append found nodes.
+	appendFunc := func(all *v1.NodeList, page v1.NodeList) {
+		all.Items = append(all.Items, page.Items...)
+	}
 	for _, label := range gpuPciLabelSelectors {
-		nodes, err := g.clientset.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
-			LabelSelector: label,
-		})
+		listFunc := func(opts metav1.ListOptions) (v1.NodeList, string, error) {
+			nl, err := g.clientset.CoreV1().Nodes().List(context.Background(), opts)
+			if err != nil {
+				return v1.NodeList{}, "", err
+			}
+			return *nl, nl.Continue, nil
+		}
+		nl, err := listAllPaginated[v1.NodeList](500, label, listFunc, appendFunc)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting nodes with NVIDIA PCI label '%s': %v\n", label, err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 			}
 			return err
 		}
-		gpuNodes.Items = append(gpuNodes.Items, nodes.Items...)
+		gpuNodes.Items = append(gpuNodes.Items, nl.Items...)
 	}
 
 	// If no GPU nodes were found, log and return an error.
@@ -517,8 +532,17 @@ func (g *Gatherer) gatherGPUNodes() error {
 // the GPU operator pods (filtered with label "app=gpu-operator") to "gpu_operator_pod.yaml".
 // It returns a PodInfo struct containing both pod lists.
 func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
-	// Retrieve all pods from the operatorNamespace as GPU operand pods.
-	operandsPodList, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), metav1.ListOptions{})
+	listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+		pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
+		if err != nil {
+			return v1.PodList{}, "", err
+		}
+		return *pl, pl.Continue, nil
+	}
+	appendFunc := func(all *v1.PodList, page v1.PodList) {
+		all.Items = append(all.Items, page.Items...)
+	}
+	operandsPodList, err := listAllPaginated[v1.PodList](500, "", listFunc, appendFunc)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -553,9 +577,14 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 	}
 
 	// Retrieve GPU operator pods using the label selector "app=gpu-operator".
-	operatorPodList, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), metav1.ListOptions{
-		LabelSelector: "app=gpu-operator",
-	})
+	listFuncOp := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+		pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
+		if err != nil {
+			return v1.PodList{}, "", err
+		}
+		return *pl, pl.Continue, nil
+	}
+	operatorPodList, err := listAllPaginated[v1.PodList](500, "app=gpu-operator", listFuncOp, appendFunc)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting GPU operator pods: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -597,8 +626,8 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 
 	// Return the pod info struct containing both operands and operator pods.
 	podInfo := &PodInfo{
-		OperandPods:  operandsPodList,
-		OperatorPods: operatorPodList,
+		OperandPods:  &operandsPodList,
+		OperatorPods: &operatorPodList,
 	}
 	return podInfo, nil
 }
@@ -777,8 +806,17 @@ func writeStringToFile(file *os.File, s string) error {
 
 // gatherDaemonSets collects daemon sets from the operatorNamespace and writes the result to "daemonsets.yaml".
 func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
-	// Retrieve DaemonSets from the operator namespace.
-	daemonSets, err := g.clientset.AppsV1().DaemonSets(operatorNamespace).List(context.Background(), metav1.ListOptions{})
+	listFunc := func(opts metav1.ListOptions) (appsv1.DaemonSetList, string, error) {
+		ds, err := g.clientset.AppsV1().DaemonSets(operatorNamespace).List(context.Background(), opts)
+		if err != nil {
+			return appsv1.DaemonSetList{}, "", err
+		}
+		return *ds, ds.Continue, nil
+	}
+	appendFunc := func(all *appsv1.DaemonSetList, page appsv1.DaemonSetList) {
+		all.Items = append(all.Items, page.Items...)
+	}
+	daemonSets, err := listAllPaginated[appsv1.DaemonSetList](500, "", listFunc, appendFunc)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting daemonSets: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
@@ -822,7 +860,7 @@ func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
 // to generate a bug report, and then copies the resulting file from the pod
 // to the artifact directory.
 func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error {
-	// Attempt to open /dev/null for output redirection.
+	// Restore CopyOptions initialization
 	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
 	var outpipe *os.File
 	if err != nil {
@@ -831,8 +869,6 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 		outpipe = nullFile
 		defer nullFile.Close() // Only close if opened successfully.
 	}
-
-	// Initialize IOStreams and copy options.
 	iostream := genericiooptions.IOStreams{
 		In:     os.Stdin,
 		Out:    outpipe,
@@ -842,18 +878,22 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 	o.Clientset = g.clientset
 	o.ClientConfig = g.config
 
-	// Define the labels to try.
 	labels := []string{
 		"app=nvidia-driver-daemonset",
 		"app=nvidia-vgpu-manager-daemonset",
 	}
-
-	// Iterate over the labels.
+	appendFunc := func(all *v1.PodList, page v1.PodList) {
+		all.Items = append(all.Items, page.Items...)
+	}
 	for _, label := range labels {
-		// List pods matching the current label.
-		podList, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), metav1.ListOptions{
-			LabelSelector: label,
-		})
+		listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+			pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
+			if err != nil {
+				return v1.PodList{}, "", err
+			}
+			return *pl, pl.Continue, nil
+		}
+		podList, err := listAllPaginated[v1.PodList](500, label, listFunc, appendFunc)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pods for label %s: %v\n", label, err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
@@ -998,3 +1038,27 @@ func (m *command) fail() {
 	m.logger.Fail <- struct{}{}
 	m.logger.Wg.Wait()
 }
+
+// listAllPaginated fetches all items from a paginated List call.
+// selector: label selector string (can be empty)
+// listFunc: function that takes ListOptions and returns a list and error
+func listAllPaginated[T any](limit int64, selector string, listFunc func(metav1.ListOptions) (T, string, error), appendFunc func(*T, T)) (T, error) {
+	var all T
+	var cont string
+	for {
+		opts := metav1.ListOptions{Limit: limit, Continue: cont, LabelSelector: selector}
+		page, next, err := listFunc(opts)
+		if err != nil {
+			return all, err
+		}
+		appendFunc(&all, page)
+		if next == "" {
+			break
+		}
+		cont = next
+	}
+	return all, nil
+}
+
+// TODO(P2): For long-lived or repeated resource access, use shared informers/caches instead of direct polling.
+// See: https://pkg.go.dev/k8s.io/client-go/informers
