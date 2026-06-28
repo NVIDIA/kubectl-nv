@@ -3,7 +3,7 @@ module github.com/NVIDIA/kubectl-nv
 go 1.24.1
 
 require (
-	github.com/mattn/go-isatty v0.0.20
+	github.com/mattn/go-isatty v0.0.22
 	github.com/openshift/client-go v0.0.0-20240215090359-b71f6f2731f5
 	github.com/urfave/cli/v2 v2.27.7
 	gopkg.in/yaml.v2 v2.4.0
