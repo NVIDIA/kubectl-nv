@@ -187,6 +187,56 @@ func TestGatherPodLogsPerContainerWithTimestamps(t *testing.T) {
 	}
 }
 
+// TestGatherPodLogsPrefixesEveryLine pins the prefix to every line of the
+// stream, not just the first, and pins that a final line the container emitted
+// without a trailing newline still reaches the artifact. A log ends mid-line
+// whenever the container was killed partway through a write, which is exactly
+// the case being diagnosed.
+func TestGatherPodLogsPrefixesEveryLine(t *testing.T) {
+	const namespace = "gpu-operator"
+	const operandName = "nvidia-container-toolkit-daemonset-k7m2p"
+
+	// Two complete lines and a third cut off without a trailing newline.
+	const streamed = "first line\nsecond line\ntruncated tail"
+
+	operandPod := podWithContainers(namespace, operandName, nil, []string{"toolkit"})
+	operatorPod := podWithContainers(namespace, "gpu-operator-7d9f6c4b8-x2kqs", nil, []string{"gpu-operator"})
+
+	artifactDir := t.TempDir()
+	logFile, errLogFile := scratchLogFiles(t)
+
+	g := &Gatherer{
+		opts:       &Options{ArtifactDir: artifactDir},
+		logFile:    logFile,
+		errLogFile: errLogFile,
+		streamPodLogs: func(_ context.Context, _, podName string, opts *v1.PodLogOptions) (io.ReadCloser, error) {
+			if podName != operandName {
+				return io.NopCloser(strings.NewReader("")), nil
+			}
+			return io.NopCloser(strings.NewReader(streamed)), nil
+		},
+	}
+
+	podInfo := &PodInfo{
+		OperatorPods: &v1.PodList{Items: []v1.Pod{operatorPod}},
+		OperandPods:  &v1.PodList{Items: []v1.Pod{operandPod}},
+	}
+	if err := g.gatherPodLogs(podInfo, namespace); err != nil {
+		t.Fatalf("gatherPodLogs: %v", err)
+	}
+
+	prefix := fmt.Sprintf("[pod/%s/toolkit] ", operandName)
+	want := prefix + "first line\n" + prefix + "second line\n" + prefix + "truncated tail"
+
+	data, err := os.ReadFile(filepath.Join(artifactDir, operandName+"_toolkit.log"))
+	if err != nil {
+		t.Fatalf("reading toolkit log: %v", err)
+	}
+	if string(data) != want {
+		t.Errorf("toolkit log holds %q, want %q", string(data), want)
+	}
+}
+
 // TestGatherPodLogsKeepsPreviousLogsPlaceholder pins the existing handling of a
 // container that has never restarted: the previous-log file is still written,
 // carrying the placeholder rather than failing the whole collection.
