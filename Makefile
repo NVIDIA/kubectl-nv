@@ -8,7 +8,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-.PHONY: build fmt verify release
+.PHONY: build fmt verify test coverage lint ci-lint vendor mod-tidy mod-vendor mod-verify check-vendor licenses release-snapshot mdlint
 
 CONTAINER_RUN_CMD ?= docker run
 GO_CMD ?= go
@@ -43,6 +43,11 @@ verify:
 ci-lint:
 	golangci-lint run --timeout 10m
 
+lint:
+	golangci-lint run --timeout 10m
+	bash hack/lint-words_test.sh
+	bash hack/lint-words.sh
+
 vendor:  | mod-tidy mod-vendor mod-verify
 
 mod-tidy:
@@ -72,15 +77,8 @@ check-vendor: vendor
 licenses:
 	go-licenses csv $(MODULE)/...
 
-release:
-	@rm -rf bin
-	@mkdir -p bin
-	@for os in linux darwin; do \
-		for arch in amd64 arm64; do \
-			echo "Building $$os-$$arch"; \
-			GOOS=$$os GOARCH=$$arch $(GO_CMD) build -o bin/$(BINARY_NAME)-$$os-$$arch cmd/main.go; \
-		done; \
-	done
+release-snapshot:
+	goreleaser release --snapshot --clean --skip=sbom
 
 mdlint:
 	${CONTAINER_RUN_CMD} \
