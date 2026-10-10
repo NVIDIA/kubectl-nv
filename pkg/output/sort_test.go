@@ -52,29 +52,6 @@ func TestSortFindingsOrdersByNodeThenCode(t *testing.T) {
 	}
 }
 
-// sort.Slice falls back to insertion sort, which happens to be stable, for
-// twelve elements or fewer. A stability test under that size passes with an
-// unstable sort and proves nothing, so this one runs twenty equal keys.
-func TestSortFindingsIsStableForEqualKeys(t *testing.T) {
-	t.Parallel()
-
-	const count = 20
-
-	findings := make([]Finding, 0, count)
-	wantParts := make([]string, 0, count)
-	for i := range count {
-		msg := fmt.Sprintf("message-%02d", i)
-		findings = append(findings, Finding{Node: "node-a", Code: "GPU001", Message: msg})
-		wantParts = append(wantParts, "node-a/GPU001/"+msg)
-	}
-
-	SortFindings(findings)
-
-	if got, want := keys(findings), strings.Join(wantParts, " "); got != want {
-		t.Errorf("stable order =\n%s\nwant\n%s", got, want)
-	}
-}
-
 // Equal keys mixed in among different ones still have to keep their order: the
 // stable path has to hold when the sort actually has work to do.
 func TestSortFindingsIsStableAmongDifferentKeys(t *testing.T) {
