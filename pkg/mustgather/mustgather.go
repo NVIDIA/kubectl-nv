@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/yaml"
@@ -878,6 +879,9 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 	// driver pod and a vGPU manager pod, and each pass must see what the previous
 	// one already wrote.
 	taken := make(map[string]bool)
+	// found counts the pods the labels matched, so that a cluster running no
+	// driver at all can be told apart from one whose collection failed.
+	found := 0
 	for _, label := range labels {
 		listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
 			pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
@@ -893,9 +897,18 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 			}
 			return err
 		}
+		found += len(podList.Items)
 		if err := g.collectBugReports(label, podList.Items, taken); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	// A cluster installed with driver.enabled=false, or one running a
+	// preinstalled driver on the host, has no pod to ask for a bug report. That
+	// is a complete gather, not a failed one, but the bundle then holds no
+	// nvidia-bug-report file and the reader has to be told why rather than left
+	// to guess whether the collector broke.
+	if found == 0 {
+		g.note("no driver pods found (labels %s); skipping nvidia-bug-report", strings.Join(labels, ", "))
 	}
 	return errors.Join(errs...)
 }
