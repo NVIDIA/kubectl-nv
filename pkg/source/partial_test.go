@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,11 +34,15 @@ import (
 
 // TestNodesForbiddenResourceSlicesIsPartial covers the RBAC case the exit-code
 // contract depends on: a reader denied resourceslices still gets the nodes the
-// label and capacity rules found, and the error says which resource was lost.
+// capacity rule found, and the error says which resource was lost. The answer
+// is incomplete rather than wrong, because a slice-only GPU node is invisible
+// without that list.
 func TestNodesForbiddenResourceSlicesIsPartial(t *testing.T) {
 	counter := newCallCounter()
 	nodes := []corev1.Node{
-		{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1"},
+			Status: corev1.NodeStatus{Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "hinted-1", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "plain-1"}},
 	}
 
@@ -66,6 +71,40 @@ func TestNodesForbiddenResourceSlicesIsPartial(t *testing.T) {
 	}
 	if !apierrors.IsForbidden(errors.Unwrap(pe)) {
 		t.Errorf("unwrapped error = %v, want a Forbidden API error", errors.Unwrap(pe))
+	}
+}
+
+// TestHintedNodesForbiddenResourceSlicesIsPartial pins the same contract on
+// the other half of the classification. Without the slice list a hinted node
+// may really be a GPU node, so the caller has to be told.
+func TestHintedNodesForbiddenResourceSlicesIsPartial(t *testing.T) {
+	counter := newCallCounter()
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "hinted-1", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "plain-1"}},
+	}
+
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
+	cs.PrependReactor("list", "resourceslices", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("list", "resourceslices")
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceslices"},
+			"", errors.New("not allowed"))
+	})
+
+	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).HintedNodes(context.Background())
+
+	gotNames := names(got)
+	if len(gotNames) != 1 || gotNames[0] != "hinted-1" {
+		t.Fatalf("hinted nodes = %v, want [hinted-1]", gotNames)
+	}
+	var pe *PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want *PartialError", err, err)
+	}
+	if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
+		t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
 	}
 }
 
@@ -108,5 +147,13 @@ func TestNodesListFailureIsFatal(t *testing.T) {
 	}
 	if len(pe.Resources) != 1 || pe.Resources[0] != "nodes" {
 		t.Errorf("PartialError.Resources = %v, want [nodes]", pe.Resources)
+	}
+
+	hinted, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).HintedNodes(context.Background())
+	if err == nil {
+		t.Fatal("HintedNodes() error = nil, want an error when nodes cannot be listed")
+	}
+	if len(hinted) != 0 {
+		t.Errorf("hinted nodes = %v, want none", names(hinted))
 	}
 }

@@ -58,18 +58,25 @@ func (c *callCounter) get(verb, res string) int {
 	return c.counts[verb+" "+res]
 }
 
-// fixture is the cluster the fake client serves, plus the GPU node names the
+// fixture is the cluster the fake client serves, plus the two node sets the
 // test derived independently of the package under test.
 type fixture struct {
-	nodes    []corev1.Node
-	slices   []resourcev1.ResourceSlice
-	wantGPUs []string
+	nodes      []corev1.Node
+	slices     []resourcev1.ResourceSlice
+	wantGPUs   []string
+	wantHinted []string
 }
 
-// buildFixture lays out 1200 nodes. Every fourth node is a GPU node, and the
-// rule that makes it one rotates through the four discovery rules, so each
-// rule is exercised 75 times. The expected set is accumulated here by hand so
-// that the assertion does not re-run the package's own filter.
+// buildFixture lays out 1200 nodes plus three named edge cases.
+//
+// Membership is capacity or a ResourceSlice; the two NVIDIA labels are hints
+// and never make a node a GPU node on their own. Every fourth node is a GPU
+// node and the rule that makes it one rotates, so each membership rule is
+// exercised with and without a hint label alongside it. Of the rest, half
+// carry a hint label and so are hinted, and half carry nothing.
+//
+// The expected sets are accumulated here by hand so that the assertions do
+// not re-run the classifier under test.
 func buildFixture(total int) fixture {
 	f := fixture{}
 	for i := 0; i < total; i++ {
@@ -82,62 +89,84 @@ func buildFixture(total int) fixture {
 				Capacity: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("64")},
 			},
 		}
-		if i%4 == 0 {
+		switch i % 4 {
+		case 0:
 			switch (i / 4) % 4 {
 			case 0:
-				n.Labels["feature.node.kubernetes.io/pci-10de.present"] = "true"
-			case 1:
-				n.Labels["nvidia.com/gpu.present"] = "true"
-			case 2:
 				n.Status.Capacity["nvidia.com/gpu"] = resource.MustParse("8")
+			case 1:
+				// Capacity with a hint label alongside it: still a GPU node,
+				// and the hint must not put it in both sets.
+				n.Labels["feature.node.kubernetes.io/pci-10de.present"] = "true"
+				n.Status.Capacity["nvidia.com/gpu"] = resource.MustParse("8")
+			case 2:
+				f.slices = append(f.slices, gpuSliceFor(n.Name))
 			case 3:
-				name := n.Name
-				f.slices = append(f.slices, resourcev1.ResourceSlice{
-					ObjectMeta: metav1.ObjectMeta{Name: "slice-" + name},
-					Spec: resourcev1.ResourceSliceSpec{
-						Driver:   "gpu.nvidia.com",
-						NodeName: &name,
-						Pool:     resourcev1.ResourcePool{Name: name, ResourceSliceCount: 1},
-					},
-				})
+				n.Labels["nvidia.com/gpu.present"] = "true"
+				f.slices = append(f.slices, gpuSliceFor(n.Name))
 			}
 			f.wantGPUs = append(f.wantGPUs, n.Name)
+		case 1:
+			// A hint and nothing to back it: the device plugin never
+			// published anything here.
+			n.Labels["nvidia.com/gpu.present"] = "true"
+			f.wantHinted = append(f.wantHinted, n.Name)
+		case 2:
+			// The other hint label, with the extended resource present but
+			// at zero, which is what a crash-looping device plugin leaves
+			// behind.
+			n.Labels["feature.node.kubernetes.io/pci-10de.present"] = "true"
+			n.Status.Capacity["nvidia.com/gpu"] = resource.MustParse("0")
+			f.wantHinted = append(f.wantHinted, n.Name)
 		}
 		f.nodes = append(f.nodes, n)
 	}
 
-	// A node that two rules agree on must still be returned once.
-	both := corev1.Node{
+	// The Mokka control plane: the simulated-GPU DaemonSet tolerates every
+	// taint, so node-feature-discovery labelled the control plane even though
+	// nothing allocatable ever appeared there. It is a hint, not a GPU node.
+	controlPlane := corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-both-rules",
+			Name: "node-control-plane",
 			Labels: map[string]string{
+				"node-role.kubernetes.io/control-plane":       "",
 				"feature.node.kubernetes.io/pci-10de.present": "true",
 				"nvidia.com/gpu.present":                      "true",
 			},
 		},
-		Status: corev1.NodeStatus{
-			Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("4")},
-		},
 	}
-	f.nodes = append(f.nodes, both)
-	f.wantGPUs = append(f.wantGPUs, both.Name)
+	f.nodes = append(f.nodes, controlPlane)
+	f.wantHinted = append(f.wantHinted, controlPlane.Name)
 
-	// A node carried only by a ResourceSlice for a foreign DRA driver is not a
-	// GPU node, so it is deliberately absent from wantGPUs.
+	// A node carried only by a ResourceSlice for a foreign DRA driver belongs
+	// to neither set, so it is absent from both expectations.
 	other := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-other-driver"}}
-	otherName := other.Name
 	f.nodes = append(f.nodes, other)
 	f.slices = append(f.slices, resourcev1.ResourceSlice{
 		ObjectMeta: metav1.ObjectMeta{Name: "slice-other-driver"},
 		Spec: resourcev1.ResourceSliceSpec{
 			Driver:   "other.example.com",
-			NodeName: &otherName,
-			Pool:     resourcev1.ResourcePool{Name: otherName, ResourceSliceCount: 1},
+			NodeName: ptr(other.Name),
+			Pool:     resourcev1.ResourcePool{Name: other.Name, ResourceSliceCount: 1},
 		},
 	})
 
 	sort.Strings(f.wantGPUs)
+	sort.Strings(f.wantHinted)
 	return f
+}
+
+func ptr(s string) *string { return &s }
+
+func gpuSliceFor(node string) resourcev1.ResourceSlice {
+	return resourcev1.ResourceSlice{
+		ObjectMeta: metav1.ObjectMeta{Name: "slice-" + node},
+		Spec: resourcev1.ResourceSliceSpec{
+			Driver:   "gpu.nvidia.com",
+			NodeName: ptr(node),
+			Pool:     resourcev1.ResourcePool{Name: node, ResourceSliceCount: 1},
+		},
+	}
 }
 
 // pagingNodeReactor serves nodes from items honouring Limit and Continue. The
@@ -205,7 +234,30 @@ func names(nodes []corev1.Node) []string {
 	return out
 }
 
-func TestLiveNodesUnionAndPagination(t *testing.T) {
+// assertNames compares a node slice against an expected, already sorted list
+// of names.
+func assertNames(t *testing.T, what string, got []corev1.Node, want []string) {
+	t.Helper()
+	gotNames := names(got)
+	if len(gotNames) != len(want) {
+		t.Fatalf("%s returned %d nodes, want %d (first few: got %v, want %v)",
+			what, len(gotNames), len(want), head(gotNames), head(want))
+	}
+	for i := range want {
+		if gotNames[i] != want[i] {
+			t.Fatalf("%s[%d] = %q, want %q", what, i, gotNames[i], want[i])
+		}
+	}
+}
+
+func head(s []string) []string {
+	if len(s) > 5 {
+		return s[:5]
+	}
+	return s
+}
+
+func TestLiveNodesMembershipAndPagination(t *testing.T) {
 	f := buildFixture(1200)
 	counter := newCallCounter()
 
@@ -217,9 +269,8 @@ func TestLiveNodesUnionAndPagination(t *testing.T) {
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
 
-	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
-
-	got, err := NewLive(cs, dyn).Nodes(context.Background())
+	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	got, err := live.Nodes(context.Background())
 	if err != nil {
 		t.Fatalf("Nodes() error = %v, want nil", err)
 	}
@@ -235,55 +286,138 @@ func TestLiveNodesUnionAndPagination(t *testing.T) {
 		t.Errorf("per-object Get calls = %d, want 0", gets)
 	}
 
-	gotNames := names(got)
-	if len(gotNames) != len(f.wantGPUs) {
-		t.Fatalf("got %d GPU nodes, want %d", len(gotNames), len(f.wantGPUs))
-	}
-	for i := range gotNames {
-		if gotNames[i] != f.wantGPUs[i] {
-			t.Fatalf("GPU node %d = %q, want %q", i, gotNames[i], f.wantGPUs[i])
-		}
-	}
+	assertNames(t, "Nodes()", got, f.wantGPUs)
 
-	for _, n := range gotNames {
+	for _, n := range names(got) {
 		if n == "node-other-driver" {
 			t.Errorf("node-other-driver was returned; a ResourceSlice for driver other.example.com must not count")
+		}
+		if n == "node-control-plane" {
+			t.Errorf("node-control-plane was returned; both hint labels with no allocatable GPU is not membership")
 		}
 	}
 }
 
-func TestLiveNodesSortedAndDeduplicated(t *testing.T) {
+func TestLiveHintedNodes(t *testing.T) {
+	f := buildFixture(1200)
+	counter := newCallCounter()
+
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("get", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("get", action.GetResource().Resource)
+		return true, nil, fmt.Errorf("per-object Get is forbidden in this source")
+	})
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
+	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
+
+	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	got, err := live.HintedNodes(context.Background())
+	if err != nil {
+		t.Fatalf("HintedNodes() error = %v, want nil", err)
+	}
+
+	if n := counter.get("list", "nodes"); n != 3 {
+		t.Errorf("list nodes calls = %d, want 3; one paginated list has to serve the whole classification", n)
+	}
+	if n := counter.get("get", "nodes"); n != 0 {
+		t.Errorf("per-object Get calls = %d, want 0", n)
+	}
+
+	assertNames(t, "HintedNodes()", got, f.wantHinted)
+}
+
+// TestLiveNodesAndHintedAreDisjoint is the invariant the two health rules rest
+// on: a node is a GPU node or a hinted node, never both and never neither by
+// accident.
+func TestLiveNodesAndHintedAreDisjoint(t *testing.T) {
+	f := buildFixture(1200)
+	counter := newCallCounter()
+
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
+	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
+	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+
+	gpus, err := live.Nodes(context.Background())
+	if err != nil {
+		t.Fatalf("Nodes() error = %v", err)
+	}
+	hinted, err := live.HintedNodes(context.Background())
+	if err != nil {
+		t.Fatalf("HintedNodes() error = %v", err)
+	}
+
+	inGPU := map[string]bool{}
+	for _, n := range names(gpus) {
+		if inGPU[n] {
+			t.Fatalf("Nodes() returned %q twice", n)
+		}
+		inGPU[n] = true
+	}
+	seenHint := map[string]bool{}
+	for _, n := range names(hinted) {
+		if seenHint[n] {
+			t.Fatalf("HintedNodes() returned %q twice", n)
+		}
+		seenHint[n] = true
+		if inGPU[n] {
+			t.Errorf("%q is in both Nodes() and HintedNodes()", n)
+		}
+	}
+
+	// 300 of the 1200 are GPU nodes by one of the two membership rules; 600
+	// carry a hint with nothing behind it, and the control plane makes 601.
+	if len(gpus) != 300 {
+		t.Errorf("len(Nodes()) = %d, want 300", len(gpus))
+	}
+	if len(hinted) != 601 {
+		t.Errorf("len(HintedNodes()) = %d, want 601", len(hinted))
+	}
+}
+
+func TestLiveClassificationEdgeCases(t *testing.T) {
 	counter := newCallCounter()
 	nodes := []corev1.Node{
-		{ObjectMeta: metav1.ObjectMeta{Name: "zeta", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "mid", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
+		// Sorting is checked here too: the input is deliberately unordered.
+		{ObjectMeta: metav1.ObjectMeta{Name: "zeta-capacity"},
+			Status: corev1.NodeStatus{Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("4")}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "alpha-slice-only"}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:   "mid-label-only",
+			Labels: map[string]string{"nvidia.com/gpu.present": "true"},
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name:   "beta-both-rules",
+			Labels: map[string]string{"feature.node.kubernetes.io/pci-10de.present": "true"},
+		},
+			Status: corev1.NodeStatus{Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "gamma-plain"}},
 	}
-	// "mid" is named by two ResourceSlices as well as its label.
-	mid := "mid"
+	// beta-both-rules is named by a slice as well as carrying capacity, and
+	// alpha-slice-only has nothing but the slice.
 	slices := []resourcev1.ResourceSlice{
-		{ObjectMeta: metav1.ObjectMeta{Name: "s1"}, Spec: resourcev1.ResourceSliceSpec{Driver: "gpu.nvidia.com", NodeName: &mid}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "s2"}, Spec: resourcev1.ResourceSliceSpec{Driver: "gpu.nvidia.com", NodeName: &mid}},
+		gpuSliceFor("alpha-slice-only"),
+		gpuSliceFor("beta-both-rules"),
+		// A second slice for the same node must not duplicate it.
+		gpuSliceFor("beta-both-rules"),
 	}
 
 	cs := fake.NewSimpleClientset()
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(slices, counter))
+	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
 
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).Nodes(context.Background())
+	gpus, err := live.Nodes(context.Background())
 	if err != nil {
-		t.Fatalf("Nodes() error = %v, want nil", err)
+		t.Fatalf("Nodes() error = %v", err)
 	}
-	want := []string{"alpha", "mid", "zeta"}
-	gotNames := names(got)
-	if len(gotNames) != len(want) {
-		t.Fatalf("got %v, want %v", gotNames, want)
+	assertNames(t, "Nodes()", gpus, []string{"alpha-slice-only", "beta-both-rules", "zeta-capacity"})
+
+	hinted, err := live.HintedNodes(context.Background())
+	if err != nil {
+		t.Fatalf("HintedNodes() error = %v", err)
 	}
-	for i := range want {
-		if gotNames[i] != want[i] {
-			t.Fatalf("got %v, want %v", gotNames, want)
-		}
-	}
+	assertNames(t, "HintedNodes()", hinted, []string{"mid-label-only"})
 }
 
 func TestLiveResourceSlicesFilterDriver(t *testing.T) {

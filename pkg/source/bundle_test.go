@@ -63,24 +63,64 @@ func TestBundleNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nodes() error = %v, want nil", err)
 	}
-	// gpu-capacity-only is absent on purpose: must-gather writes the capacity
-	// through yaml.v2, which drops the amount, so the capacity rule cannot
-	// fire against a bundle. plain-worker matches no rule at all.
-	want := []string{"gpu-label-pci", "gpu-label-present"}
-	gotNames := names(got)
-	if len(gotNames) != len(want) {
-		t.Fatalf("Nodes() = %v, want %v", gotNames, want)
-	}
-	for i := range want {
-		if gotNames[i] != want[i] {
-			t.Fatalf("Nodes() = %v, want %v", gotNames, want)
-		}
+	// Membership is capacity alone offline, because must-gather collects no
+	// ResourceSlices. control-plane-1 carries both hint labels and no GPU
+	// capacity, and worker-broken-plugin carries a hint and a zero quantity;
+	// neither is a GPU node.
+	want := []string{"worker-capacity", "worker-capacity-no-label"}
+	assertNames(t, "Nodes()", got, want)
+
+	// The native format must carry the amount, not just the suffix: this is
+	// the whole point of the switch away from the lowercased yaml.v2 dump.
+	q := got[0].Status.Capacity["nvidia.com/gpu"]
+	if q.Value() != 4 {
+		t.Errorf("worker-capacity nvidia.com/gpu = %s, want 4", q.String())
 	}
 	if lv := got[0].Labels["feature.node.kubernetes.io/pci-10de.present"]; lv != "true" {
-		t.Errorf("round trip lost the discovery label: got %q, want \"true\"", lv)
+		t.Errorf("round trip lost a label: got %q, want \"true\"", lv)
 	}
-	if rv := got[1].ResourceVersion; rv != "1002" {
+	if rv := got[0].ResourceVersion; rv != "1002" {
 		t.Errorf("round trip lost metadata: resourceVersion = %q, want \"1002\"", rv)
+	}
+}
+
+func TestBundleHintedNodes(t *testing.T) {
+	b, err := NewBundle(filepath.Join("testdata", "bundle-min"))
+	if err != nil {
+		t.Fatalf("NewBundle() error = %v", err)
+	}
+	got, err := b.HintedNodes(context.Background())
+	if err != nil {
+		t.Fatalf("HintedNodes() error = %v, want nil", err)
+	}
+	assertNames(t, "HintedNodes()", got, []string{"control-plane-1", "worker-broken-plugin"})
+
+	// The zero quantity has to survive as a zero, not go missing: a health
+	// rule reads it to say "gpu.present but nothing allocatable".
+	q, ok := got[1].Status.Capacity["nvidia.com/gpu"]
+	if !ok {
+		t.Fatal("worker-broken-plugin lost its nvidia.com/gpu capacity entry")
+	}
+	if q.Value() != 0 {
+		t.Errorf("worker-broken-plugin nvidia.com/gpu = %s, want 0", q.String())
+	}
+}
+
+// TestBundleRejectsLegacyFormat pins that the retired gopkg.in/yaml.v2 dump is
+// no longer understood. Its keys are lowercased Go field names and match no
+// json tag, so nothing decodes out of it and the bundle reports no nodes
+// rather than quietly half-reading one.
+func TestBundleRejectsLegacyFormat(t *testing.T) {
+	b, err := NewBundle(filepath.Join("testdata", "bundle-legacy"))
+	if err != nil {
+		t.Fatalf("NewBundle() error = %v", err)
+	}
+	got, err := b.Nodes(context.Background())
+	if err != nil {
+		t.Fatalf("Nodes() error = %v, want nil", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("Nodes() = %v, want none: the lowercased yaml.v2 format is not supported", names(got))
 	}
 }
 
@@ -173,6 +213,7 @@ func TestBundleMissingFilesArePartial(t *testing.T) {
 		want string
 	}{
 		{"nodes", func() (int, error) { n, err := b.Nodes(context.Background()); return len(n), err }, "nodes.yaml"},
+		{"hinted nodes", func() (int, error) { n, err := b.HintedNodes(context.Background()); return len(n), err }, "nodes.yaml"},
 		{"pods", func() (int, error) { p, err := b.Pods(context.Background(), "", ""); return len(p), err }, "gpu_operand_pods.yaml"},
 		{"clusterpolicies", func() (int, error) { c, err := b.ClusterPolicies(context.Background()); return len(c), err }, "cluster_policy.yaml"},
 	}

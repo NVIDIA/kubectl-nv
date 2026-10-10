@@ -1,55 +1,42 @@
-# gatherPodInfo marshals a corev1.PodList with gopkg.in/yaml.v2 into
-# gpu_operand_pods.yaml.
-typemeta:
-  kind: ""
-  apiversion: ""
-listmeta:
-  selflink: ""
-  resourceversion: ""
-  continue: ""
+# Kubernetes-native YAML, as "kubectl get pods -n gpu-operator -o yaml" prints.
+apiVersion: v1
+kind: List
+metadata:
+  resourceVersion: ""
 items:
-- typemeta:
-    kind: ""
-    apiversion: ""
-  objectmeta:
+- apiVersion: v1
+  kind: Pod
+  metadata:
     name: gpu-operator-5d9f8-abcde
     namespace: gpu-operator
-    uid: ""
-    resourceversion: "2001"
-    creationtimestamp: null
+    resourceVersion: "2001"
     labels:
       app: gpu-operator
   spec:
-    nodename: gpu-label-pci
+    nodeName: worker-capacity
   status:
     phase: Running
-- typemeta:
-    kind: ""
-    apiversion: ""
-  objectmeta:
+- apiVersion: v1
+  kind: Pod
+  metadata:
     name: nvidia-device-plugin-daemonset-xyz12
     namespace: gpu-operator
-    uid: ""
-    resourceversion: "2002"
-    creationtimestamp: null
+    resourceVersion: "2002"
     labels:
       app: nvidia-device-plugin-daemonset
   spec:
-    nodename: gpu-label-present
+    nodeName: worker-broken-plugin
   status:
-    phase: Running
-- typemeta:
-    kind: ""
-    apiversion: ""
-  objectmeta:
+    phase: CrashLoopBackOff
+- apiVersion: v1
+  kind: Pod
+  metadata:
     name: unrelated-pod
     namespace: default
-    uid: ""
-    resourceversion: "2003"
-    creationtimestamp: null
+    resourceVersion: "2003"
     labels:
       app: unrelated
   spec:
-    nodename: plain-worker
+    nodeName: plain-worker
   status:
     phase: Running
