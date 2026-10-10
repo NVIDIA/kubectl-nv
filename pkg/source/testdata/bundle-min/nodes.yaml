@@ -88,6 +88,21 @@ items:
 - apiVersion: v1
   kind: Node
   metadata:
+    name: worker-slice-only
+    resourceVersion: "1006"
+    labels:
+      kubernetes.io/os: linux
+  spec: {}
+  status:
+    capacity:
+      cpu: "64"
+      pods: "110"
+    allocatable:
+      cpu: "64"
+      pods: "110"
+- apiVersion: v1
+  kind: Node
+  metadata:
     name: plain-worker
     resourceVersion: "1005"
     labels:

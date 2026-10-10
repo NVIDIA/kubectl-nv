@@ -64,11 +64,13 @@ func TestBundleNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Nodes() error = %v, want nil", err)
 	}
-	// Membership is capacity alone offline, because must-gather collects no
-	// ResourceSlices. control-plane-1 carries both hint labels and no GPU
-	// capacity, and worker-broken-plugin carries a hint and a zero quantity;
-	// neither is a GPU node.
-	want := []string{"worker-capacity", "worker-capacity-no-label"}
+	// Both membership rules fire offline now that must-gather writes
+	// resourceslices.yaml: worker-slice-only has neither a label nor
+	// capacity and is a GPU node purely by its slice. control-plane-1
+	// carries both hint labels and no GPU capacity, worker-broken-plugin
+	// carries a hint and a zero quantity, and plain-worker is named only by
+	// a slice for a foreign driver; none of the three is a GPU node.
+	want := []string{"worker-capacity", "worker-capacity-no-label", "worker-slice-only"}
 	assertNames(t, "Nodes()", got, want)
 
 	// The native format must carry the amount, not just the suffix: this is
@@ -192,21 +194,90 @@ func TestBundleClusterPolicies(t *testing.T) {
 	}
 }
 
-func TestBundleResourceSlicesArePartial(t *testing.T) {
+func TestBundleResourceSlices(t *testing.T) {
 	b, err := NewBundle(filepath.Join("testdata", "bundle-min"))
 	if err != nil {
 		t.Fatalf("NewBundle() error = %v", err)
 	}
 	got, err := b.ResourceSlices(context.Background())
-	if len(got) != 0 {
-		t.Errorf("ResourceSlices() returned %d items, want 0", len(got))
+	if err != nil {
+		t.Fatalf("ResourceSlices() error = %v, want nil", err)
 	}
-	var pe *PartialError
-	if !errors.As(err, &pe) {
-		t.Fatalf("error = %v (%T), want *PartialError", err, err)
+	if len(got) != 1 {
+		sliceNames := make([]string, 0, len(got))
+		for i := range got {
+			sliceNames = append(sliceNames, got[i].Name)
+		}
+		t.Fatalf("ResourceSlices() = %v, want exactly the gpu.nvidia.com slice", sliceNames)
 	}
-	if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
-		t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
+	if got[0].Spec.Driver != "gpu.nvidia.com" {
+		t.Errorf("driver = %q, want gpu.nvidia.com", got[0].Spec.Driver)
+	}
+	if got[0].Spec.NodeName == nil || *got[0].Spec.NodeName != "worker-slice-only" {
+		t.Errorf("nodeName = %v, want worker-slice-only", got[0].Spec.NodeName)
+	}
+	if got[0].Spec.Pool.ResourceSliceCount != 1 {
+		t.Errorf("pool.resourceSliceCount = %d, want 1", got[0].Spec.Pool.ResourceSliceCount)
+	}
+}
+
+// TestBundleWithoutResourceSlices covers a bundle gathered before B3, or one
+// where the slice read was denied. The capacity rule still answers, but one of
+// the two membership rules could not be evaluated at all, so every method that
+// depends on it says so. worker-slice-only is the node that proves the point:
+// without the file it falls out of both sets rather than into the wrong one.
+func TestBundleWithoutResourceSlices(t *testing.T) {
+	b, err := NewBundle(filepath.Join("testdata", "bundle-no-slices"))
+	if err != nil {
+		t.Fatalf("NewBundle() error = %v", err)
+	}
+
+	cases := []struct {
+		name string
+		call func() ([]string, error)
+		want []string
+	}{
+		{"Nodes", func() ([]string, error) {
+			n, err := b.Nodes(context.Background())
+			return names(n), err
+		}, []string{"worker-capacity", "worker-capacity-no-label"}},
+		{"HintedNodes", func() ([]string, error) {
+			n, err := b.HintedNodes(context.Background())
+			return names(n), err
+		}, []string{"control-plane-1", "worker-broken-plugin"}},
+		{"ResourceSlices", func() ([]string, error) {
+			s, err := b.ResourceSlices(context.Background())
+			out := make([]string, 0, len(s))
+			for i := range s {
+				out = append(out, s[i].Name)
+			}
+			return out, err
+		}, []string{}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := c.call()
+			if len(got) != len(c.want) {
+				t.Fatalf("%s() = %v, want %v", c.name, got, c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Fatalf("%s() = %v, want %v", c.name, got, c.want)
+				}
+			}
+			var pe *PartialError
+			if !errors.As(err, &pe) {
+				t.Fatalf("%s() error = %v (%T), want *PartialError", c.name, err, err)
+			}
+			if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
+				t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
+			}
+			for _, n := range got {
+				if n == "worker-slice-only" {
+					t.Errorf("worker-slice-only was classified without the slice file")
+				}
+			}
+		})
 	}
 }
 
@@ -221,6 +292,8 @@ func TestBundleMissingFilesArePartial(t *testing.T) {
 		call func() (int, error)
 		want string
 	}{
+		// nodes.yaml is read first, so its absence is what gets reported
+		// even though resourceslices.yaml is missing too.
 		{"nodes", func() (int, error) { n, err := b.Nodes(context.Background()); return len(n), err }, "nodes.yaml"},
 		{"hinted nodes", func() (int, error) { n, err := b.HintedNodes(context.Background()); return len(n), err }, "nodes.yaml"},
 		{"pods", func() (int, error) { p, err := b.Pods(context.Background(), "", ""); return len(p), err }, "gpu_operand_pods.yaml"},
