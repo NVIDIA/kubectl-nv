@@ -75,15 +75,32 @@ func paginate[T any](
 	}
 }
 
-// Nodes lists every node once and filters client-side. A label match and a
-// capacity match cannot be expressed as one server-side selector (selectors
-// are an AND of terms, and capacity is not selectable at all), so the union of
-// the discovery rules has to be computed here. There is no per-node Get.
+// Nodes returns the GPU nodes. See source.go for what makes a node one.
+func (l *Live) Nodes(ctx context.Context) ([]corev1.Node, error) {
+	gpus, _, err := l.classify(ctx)
+	return gpus, err
+}
+
+// HintedNodes returns the nodes that carry an NVIDIA discovery label without
+// backing it with capacity or a ResourceSlice.
+func (l *Live) HintedNodes(ctx context.Context) ([]corev1.Node, error) {
+	_, hinted, err := l.classify(ctx)
+	return hinted, err
+}
+
+// classify lists every node once and sorts them into the two sets
+// client-side. One paginated list serves the whole classification: neither
+// rule is expressible as a server-side selector (selectors are an AND of
+// terms, and capacity is not selectable at all), and there is no per-node Get,
+// which on a 1200-node cluster would be 1200 round trips for data the list
+// already carried.
 //
 // A node list that fails is fatal. A ResourceSlice list that fails is not: the
-// three remaining rules still produce an answer, so the nodes are returned
-// with a PartialError naming resourceslices.
-func (l *Live) Nodes(ctx context.Context) ([]corev1.Node, error) {
+// capacity rule still answers for most of the cluster, so both sets are
+// returned with a PartialError naming resourceslices. The answer is then
+// incomplete in a known direction, because a node that is a GPU node only by
+// its slice looks hinted, or looks like nothing at all.
+func (l *Live) classify(ctx context.Context) (gpus, hinted []corev1.Node, err error) {
 	nodes, err := paginate(ctx, "", func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Node, string, error) {
 		nl, err := l.clientset.CoreV1().Nodes().List(ctx, opts)
 		if err != nil {
@@ -92,17 +109,17 @@ func (l *Live) Nodes(ctx context.Context) ([]corev1.Node, error) {
 		return nl.Items, nl.Continue, nil
 	})
 	if err != nil {
-		return nil, &PartialError{Resources: []string{"nodes"}, Err: fmt.Errorf("list nodes: %w", err)}
+		return nil, nil, &PartialError{Resources: []string{"nodes"}, Err: fmt.Errorf("list nodes: %w", err)}
 	}
 
 	// The slices are taken unfiltered: sliceNodeNames is the one place that
 	// decides which driver counts.
 	slices, sliceErr := l.listResourceSlices(ctx)
-	selected := selectGPUNodes(nodes, sliceNodeNames(slices))
+	gpus, hinted = classifyNodes(nodes, sliceNodeNames(slices))
 	if sliceErr != nil {
-		return selected, &PartialError{Resources: []string{"resourceslices"}, Err: sliceErr}
+		return gpus, hinted, &PartialError{Resources: []string{"resourceslices"}, Err: sliceErr}
 	}
-	return selected, nil
+	return gpus, hinted, nil
 }
 
 // Pods lists the pods in namespace matching selector. An empty namespace means

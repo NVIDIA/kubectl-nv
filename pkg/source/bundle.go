@@ -24,16 +24,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"sigs.k8s.io/yaml"
 )
 
 // File names written by cmd/adm/mustgather. gatherNodeInfo writes nodes.yaml,
 // gatherPodInfo writes gpu_operand_pods.yaml, and gatherCRs writes
-// cluster_policy.yaml. All three go through gopkg.in/yaml.v2.
+// cluster_policy.yaml.
 const (
 	fileNodes                    = "nodes.yaml"
 	fileOperandPods              = "gpu_operand_pods.yaml"
@@ -56,10 +56,16 @@ func (e *MissingBundleError) Error() string {
 // whether the path was absent or merely unreadable.
 func (e *MissingBundleError) Unwrap() error { return e.Err }
 
-// Bundle reads a must-gather directory in the layout must-gather writes
-// today. The files carry gopkg.in/yaml.v2 output, which ignores the json tags
-// on the Kubernetes API types and lowercases the Go field names instead, so
-// they are decoded with the same library rather than with sigs.k8s.io/yaml.
+// Bundle reads a must-gather directory. The files carry Kubernetes-native
+// YAML: the json field names, with quantities as the strings the API serves,
+// which is what "kubectl get -o yaml" prints and what gpu-operator's
+// hack/must-gather.sh writes. They are decoded with sigs.k8s.io/yaml, the same
+// path the API machinery uses, so a quantity keeps its amount.
+//
+// An earlier must-gather marshalled the API types with gopkg.in/yaml.v2, which
+// ignores the json tags, lowercases the Go field names and cannot see the
+// unexported fields of resource.Quantity, so every capacity amount was lost on
+// the way out. That format is not read: no release ever shipped it.
 type Bundle struct {
 	dir string
 }
@@ -94,18 +100,29 @@ func (b *Bundle) readYAML(name string, out any) error {
 
 // Nodes returns the GPU nodes recorded in nodes.yaml.
 //
-// Only the label rules can fire offline. must-gather marshals the node list
-// with yaml.v2, which cannot see the unexported fields of
-// resource.Quantity, so a capacity entry survives as its format and loses its
-// amount; and must-gather collects no ResourceSlices at all. The same
-// selectGPUNodes the live path uses is still what decides, so the rules stay
-// in one place.
+// Only the capacity rule can fire offline, because must-gather collects no
+// ResourceSlices: a node that is a GPU node solely by its slice is reported as
+// hinted, or not at all. The same classifyNodes the live path uses is what
+// decides, so the rule lives in one place.
 func (b *Bundle) Nodes(ctx context.Context) ([]corev1.Node, error) {
+	gpus, _, err := b.classify()
+	return gpus, err
+}
+
+// HintedNodes returns the nodes in nodes.yaml that carry an NVIDIA discovery
+// label without backing it with capacity.
+func (b *Bundle) HintedNodes(ctx context.Context) ([]corev1.Node, error) {
+	_, hinted, err := b.classify()
+	return hinted, err
+}
+
+func (b *Bundle) classify() (gpus, hinted []corev1.Node, err error) {
 	var list corev1.NodeList
 	if err := b.readYAML(fileNodes, &list); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return selectGPUNodes(list.Items, nil), nil
+	gpus, hinted = classifyNodes(list.Items, nil)
+	return gpus, hinted, nil
 }
 
 // Pods returns the operand pods recorded in gpu_operand_pods.yaml, filtered by
@@ -149,53 +166,17 @@ func (b *Bundle) ResourceSlices(ctx context.Context) ([]resourcev1.ResourceSlice
 }
 
 // ClusterPolicies returns the single ClusterPolicy recorded in
-// cluster_policy.yaml. must-gather writes the unstructured object map, so this
-// file carries the real API field names rather than lowercased Go ones.
+// cluster_policy.yaml.
 func (b *Bundle) ClusterPolicies(ctx context.Context) ([]unstructured.Unstructured, error) {
-	var raw map[any]any
-	if err := b.readYAML(fileClusterPolicy, &raw); err != nil {
+	var obj map[string]any
+	if err := b.readYAML(fileClusterPolicy, &obj); err != nil {
 		return nil, err
 	}
-	obj, ok := normalizeYAMLMap(raw).(map[string]any)
-	if !ok {
+	if len(obj) == 0 {
 		return nil, &PartialError{
 			Resources: []string{fileClusterPolicy},
 			Err:       errors.New("content is not a Kubernetes object"),
 		}
 	}
 	return []unstructured.Unstructured{{Object: obj}}, nil
-}
-
-// normalizeYAMLMap converts the map[interface{}]interface{} values yaml.v2
-// produces into the map[string]interface{} that unstructured.Unstructured
-// requires. A key that is not a string is dropped: the Kubernetes object model
-// has no place for it, and keeping it would make the object fail every
-// accessor that walks it.
-func normalizeYAMLMap(v any) any {
-	switch t := v.(type) {
-	case map[any]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			key, ok := k.(string)
-			if !ok {
-				continue
-			}
-			out[key] = normalizeYAMLMap(val)
-		}
-		return out
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			out[k] = normalizeYAMLMap(val)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i := range t {
-			out[i] = normalizeYAMLMap(t[i])
-		}
-		return out
-	default:
-		return v
-	}
 }

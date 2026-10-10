@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -107,20 +108,28 @@ func TestBundleHintedNodes(t *testing.T) {
 }
 
 // TestBundleRejectsLegacyFormat pins that the retired gopkg.in/yaml.v2 dump is
-// no longer understood. Its keys are lowercased Go field names and match no
-// json tag, so nothing decodes out of it and the bundle reports no nodes
-// rather than quietly half-reading one.
+// no longer understood, and that it is rejected loudly rather than
+// half-decoded. Its lowercased keys match no json tag, and the capacity it
+// writes is a map where the API serves a quantity string, which the native
+// decoder refuses outright.
 func TestBundleRejectsLegacyFormat(t *testing.T) {
 	b, err := NewBundle(filepath.Join("testdata", "bundle-legacy"))
 	if err != nil {
 		t.Fatalf("NewBundle() error = %v", err)
 	}
 	got, err := b.Nodes(context.Background())
-	if err != nil {
-		t.Fatalf("Nodes() error = %v, want nil", err)
-	}
 	if len(got) != 0 {
 		t.Errorf("Nodes() = %v, want none: the lowercased yaml.v2 format is not supported", names(got))
+	}
+	var pe *PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want *PartialError", err, err)
+	}
+	if len(pe.Resources) != 1 || pe.Resources[0] != "nodes.yaml" {
+		t.Fatalf("PartialError.Resources = %v, want [nodes.yaml]", pe.Resources)
+	}
+	if !strings.Contains(pe.Error(), "quantities must match") {
+		t.Errorf("error = %q, want it to name the quantity that could not be decoded", pe.Error())
 	}
 }
 
