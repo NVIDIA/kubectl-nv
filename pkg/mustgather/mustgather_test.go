@@ -2,7 +2,6 @@ package mustgather
 
 import (
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -35,7 +34,7 @@ func TestNewGatherer(t *testing.T) {
 		opts := &Options{ArtifactDir: t.TempDir()}
 		broken := stubFactory{err: errors.New("no cluster today")}
 
-		g, err := NewGatherer(opts, broken, io.Discard)
+		g, err := NewGatherer(opts, broken, discardProgress{})
 		if err == nil {
 			g.Close()
 			t.Fatal("expected an error when the factory cannot build a client")
@@ -49,7 +48,7 @@ func TestNewGatherer(t *testing.T) {
 		badDir := filepath.Join(t.TempDir(), "notexist", string([]byte{0}))
 		opts := &Options{ArtifactDir: badDir}
 
-		if _, err := NewGatherer(opts, working, io.Discard); err == nil {
+		if _, err := NewGatherer(opts, working, discardProgress{}); err == nil {
 			t.Error("expected an error for a bad artifact dir")
 		}
 	})
@@ -61,7 +60,7 @@ func TestNewGatherer(t *testing.T) {
 			FetchPodFile: func(*v1.Pod, string) error { called = true; return nil },
 		}
 
-		g, err := NewGatherer(opts, working, io.Discard)
+		g, err := NewGatherer(opts, working, discardProgress{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

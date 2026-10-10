@@ -42,6 +42,7 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/root"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // writeVerbs are the API verbs this plugin must never issue. kubectl-nv is a
@@ -223,7 +224,7 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 			o.FetchPodFile = func(pod *v1.Pod, destPath string) error {
 				return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 			}
-			return mustgather.Run(o, f, io.Discard)
+			return mustgather.Run(o, f, output.NewLogger(genericiooptions.NewTestIOStreamsDiscard(), output.LoggerOptions{}))
 		},
 	})
 }

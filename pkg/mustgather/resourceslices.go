@@ -86,7 +86,7 @@ func (g *Gatherer) gatherResourceSlices() error {
 	}
 
 	path := filepath.Join(g.opts.ArtifactDir, "resourceslices.yaml")
-	file, err := createArtifactFile(path)
+	file, err := g.createArtifact(path)
 	if err != nil {
 		return g.logError("error creating resourceslices.yaml: %v", err)
 	}

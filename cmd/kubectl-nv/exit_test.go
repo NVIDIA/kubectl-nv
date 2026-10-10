@@ -120,3 +120,22 @@ func TestPanicBecomesAnExitCode(t *testing.T) {
 		})
 	}
 }
+
+// TestFlagErrorsAreUsageErrorsOnTheirOwn covers the mapping that does not go
+// through the usage flag. A command is free to silence its own usage, and a
+// mistyped flag on it is still the user's to fix, not a failed run.
+func TestFlagErrorsAreUsageErrorsOnTheirOwn(t *testing.T) {
+	out := &bytes.Buffer{}
+	streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: out, ErrOut: out}
+
+	tree := root.NewCommand("test", root.Deps{Streams: streams})
+	tree.AddCommand(&cobra.Command{
+		Use:          "quiet",
+		SilenceUsage: true,
+		RunE:         func(*cobra.Command, []string) error { return nil },
+	})
+
+	if got := run([]string{"quiet", "--bogus"}, streams, tree); got != output.ExitUsage {
+		t.Errorf("exit code = %d, want %d\n%s", got, output.ExitUsage, out.String())
+	}
+}

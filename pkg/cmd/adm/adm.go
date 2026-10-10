@@ -65,15 +65,15 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 				opts.ArtifactDir = defaultArtifactDir(time.Now())
 			}
 
-			out := o.Streams.ErrOut
-			fmt.Fprintf(out, "Using kubeconfig: %s\n", o.KubeconfigDisplay())
-			fmt.Fprintf(out, "Collecting cluster information into %s\n", opts.ArtifactDir)
+			log := o.Log()
+			log.Infof("Using kubeconfig: %s", o.KubeconfigDisplay())
+			log.Infof("Collecting cluster information into %s", opts.ArtifactDir)
 
 			if err := run(opts); err != nil {
 				return err
 			}
 
-			fmt.Fprintf(out, "Please send the contents of %s to NVIDIA support\n", opts.ArtifactDir)
+			log.Infof("Please send the contents of %s to NVIDIA support", opts.ArtifactDir)
 			return nil
 		},
 	}

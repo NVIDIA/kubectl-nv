@@ -33,6 +33,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/scheme"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // Factory hands a command the clients it needs. There is one implementation
@@ -54,6 +56,20 @@ type Options struct {
 	// Debug reports whether debug-level logging was asked for, by --debug, -d or
 	// the DEBUG environment variable.
 	Debug bool
+
+	// Logger is where commands report progress. It writes to the error stream
+	// only, so stdout stays the command's own output.
+	Logger *output.Logger
+}
+
+// Log returns where this command reports progress, making a plain one over the
+// error stream when the root has not set one, so that a command built by hand
+// in a test still has somewhere to write.
+func (o *Options) Log() *output.Logger {
+	if o.Logger == nil {
+		o.Logger = output.NewLogger(o.Streams, output.LoggerOptions{})
+	}
+	return o.Logger
 }
 
 // KubeconfigDisplay names the kubeconfig the clients will be built from, for

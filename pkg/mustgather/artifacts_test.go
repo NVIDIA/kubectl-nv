@@ -83,7 +83,7 @@ func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string
 	g, err := NewGatherer(opts, stubFactory{
 		clientset: fake.NewSimpleClientset(objects...),
 		config:    offlineConfig(),
-	}, os.Stderr)
+	}, discardProgress{})
 	if err != nil {
 		t.Fatalf("NewGatherer: %v", err)
 	}

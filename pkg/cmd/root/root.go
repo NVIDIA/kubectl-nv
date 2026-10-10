@@ -29,6 +29,7 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/adm"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // debugEnvVar is read when --debug is not given, so that the environment
@@ -87,6 +88,12 @@ func NewCommand(version string, d Deps) *cobra.Command {
 				return err
 			}
 			o.Debug = debug
+
+			noColor, err := c.Flags().GetBool("no-color")
+			if err != nil {
+				return err
+			}
+			o.Logger = output.NewLogger(o.Streams, output.LoggerOptions{NoColor: noColor})
 			return nil
 		},
 		// Without a subcommand there is nothing to do but show what is on offer.
@@ -101,11 +108,17 @@ func NewCommand(version string, d Deps) *cobra.Command {
 
 	cmd.AddConfigFlags(root.PersistentFlags(), configFlags)
 	root.PersistentFlags().BoolP("debug", "d", false, "Enable debug-level logging")
+	root.PersistentFlags().Bool("no-color", false, "Never colorize the progress output")
+
+	// Flags the user got wrong are the user's to fix, and exit 2 says so.
+	root.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return output.WrapUsageError(err, "%s", c.CommandPath())
+	})
 
 	runMustGather := d.MustGather
 	if runMustGather == nil {
 		runMustGather = func(opts *mustgather.Options) error {
-			return mustgather.Run(opts, o.Factory, o.Streams.ErrOut)
+			return mustgather.Run(opts, o.Factory, o.Logger)
 		}
 	}
 
@@ -144,7 +157,9 @@ func resolveDebug(c *cobra.Command) (bool, error) {
 	}
 	debug, err := strconv.ParseBool(value)
 	if err != nil {
-		return false, fmt.Errorf("could not parse %s=%q as a boolean: %w", debugEnvVar, value, err)
+		// The environment is part of the command line as far as the user is
+		// concerned, so a value that cannot be read is a usage error.
+		return false, output.WrapUsageError(err, "could not parse %s=%q as a boolean", debugEnvVar, value)
 	}
 	return debug, nil
 }
