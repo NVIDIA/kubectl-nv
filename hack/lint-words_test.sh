@@ -204,26 +204,41 @@ printf 'package main\n\nfunc main() {}\n' > "${r18}/main.go"
 git -C "${r18}" add main.go > /dev/null 2>&1 || exit 2
 run_case "clean git tree" 0 "${r18}"
 
-# 19. Matching stays case-insensitive in a git tree, not only when walking.
+# 19. Tracked Go sources are scanned in a git tree.
 r19="$(new_repo)"
-printf 'metadata:\n  description: "%s node"\n' "${BANNED_GPU}" > "${r19}/config.yaml"
-git -C "${r19}" add config.yaml > /dev/null 2>&1 || exit 2
-run_case "tracked banned device phrase in a git tree" 1 "${r19}"
+printf 'package main\n\n// Range 1 %s 9.\nfunc main() {}\n' "${EN_DASH}" > "${r19}/main.go"
+git -C "${r19}" add main.go > /dev/null 2>&1 || exit 2
+run_case "tracked en dash in .go in a git tree" 1 "${r19}"
+
+# 20. A git tree with nothing in scope has nothing to report. The checker must
+# reach that answer, not fall through to scanning the whole tree.
+r20="$(new_repo)"
+git -C "${r20}" rm -q --cached clean.md > /dev/null 2>&1 || exit 2
+printf 'A loose sentence %s with a long dash.\n' "${EM_DASH}" > "${r20}/loose.md"
+printf 'nothing: in scope\n' > "${r20}/notes.txt"
+git -C "${r20}" add notes.txt > /dev/null 2>&1 || exit 2
+run_case "git tree with no tracked file in scope" 0 "${r20}"
+
+# 21. Matching stays case-insensitive in a git tree, not only when walking.
+r21="$(new_repo)"
+printf 'metadata:\n  description: "%s node"\n' "${BANNED_GPU}" > "${r21}/config.yaml"
+git -C "${r21}" add config.yaml > /dev/null 2>&1 || exit 2
+run_case "tracked banned device phrase in a git tree" 1 "${r21}"
 
 #
 # Failure to run is not success.
 #
 
-# 20. A root that is not there cannot be reported clean.
+# 22. A root that is not there cannot be reported clean.
 run_case "root does not exist" 2 "${WORK}/no-such-directory"
 
-# 21. A file in the index but missing from disk makes grep fail. A checker that
+# 23. A file in the index but missing from disk makes grep fail. A checker that
 # cannot read what it was told to read has not found the tree clean.
-r21="$(new_repo)"
-printf '# Notes\n\nNothing forbidden here.\n' > "${r21}/gone.md"
-git -C "${r21}" add gone.md > /dev/null 2>&1 || exit 2
-rm -f "${r21}/gone.md"
-run_case "tracked file missing from disk" 2 "${r21}"
+r23="$(new_repo)"
+printf '# Notes\n\nNothing forbidden here.\n' > "${r23}/gone.md"
+git -C "${r23}" add gone.md > /dev/null 2>&1 || exit 2
+rm -f "${r23}/gone.md"
+run_case "tracked file missing from disk" 2 "${r23}"
 
 echo
 if [ "${failures}" -ne 0 ]; then
