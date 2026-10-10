@@ -49,7 +49,7 @@ type gpuNodeStatus struct {
 
 func (n *gpuNode) DeepCopyObject() runtime.Object {
 	clone := *n
-	n.ObjectMeta.DeepCopyInto(&clone.ObjectMeta)
+	n.DeepCopyInto(&clone.ObjectMeta)
 
 	return &clone
 }
