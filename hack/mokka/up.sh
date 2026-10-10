@@ -25,20 +25,26 @@
 #
 # Exit codes:
 #   0  the lane is up and every assertion passed
+#   1  an underlying tool failed; its own output says why
 #   2  bad usage, or an unknown profile
 #   3  a required tool is missing
 #   4  the lane cluster already exists, so nothing was touched
-#   5  the lane came up but an assertion about it failed
+#   5  the lane came up but an assertion about it did not come true in time
 #
-# Lanes are independent: this script creates and reads only kubectl-nv-<lane>,
-# and every kubectl and helm call names that cluster's context, so a kubeconfig
-# whose current context points somewhere else cannot redirect the install.
+# This script never reads or writes the caller's default kubeconfig. The lane
+# kubeconfig is written to hack/mokka/bin/kubeconfig-<lane> and every kind,
+# kubectl and helm call is pointed at it explicitly. `kind create cluster`
+# without --kubeconfig writes $KUBECONFIG or $HOME/.kube/config and switches
+# the current context there, which is how an earlier version of this script
+# clobbered a developer's kubeconfig.
 
 set -euo pipefail
+# Kubeconfigs carry cluster credentials: created mode 0600, directories 0700.
+umask 077
 
 MOKKA_PROG="up.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=hack/mokka/lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
 usage() {
@@ -56,7 +62,7 @@ PROFILE="$2"
 
 if ! mokka::valid_lane "${LANE}"; then
     usage
-    mokka::die 2 "up.sh: lane must be a DNS label (lowercase letters, digits, hyphens): '${LANE}'"
+    mokka::die 2 "up.sh: lane must be a DNS label of at most 32 characters (lowercase letters, digits, hyphens)"
 fi
 
 if ! GPU_COUNT="$(mokka::profile_gpu_count "${PROFILE}")"; then
@@ -70,13 +76,38 @@ CONTEXT="$(mokka::context "${LANE}")"
 BIN_DIR="${MOKKA_BIN_DIR:-${SCRIPT_DIR}/bin}"
 KUBECONFIG_OUT="${BIN_DIR}/kubeconfig-${LANE}"
 
+# Belt and braces alongside the explicit --kubeconfig on every call below: with
+# this set, a call that somehow lost its flag still cannot reach ~/.kube/config.
+export KUBECONFIG="${KUBECONFIG_OUT}"
+
+# A run that fails after the cluster exists leaves containers behind. Say so,
+# rather than leaving the reader to discover it from `docker ps`.
+CLUSTER_CREATED=false
+on_exit() {
+    local rc=$?
+    if [ "${rc}" -ne 0 ] && [ "${CLUSTER_CREATED}" = true ]; then
+        printf 'partial install left in %s; run hack/mokka/down.sh %s\n' \
+            "${CLUSTER}" "${LANE}" >&2
+    fi
+}
+trap on_exit EXIT
+
+# kubectl and helm, always against the lane kubeconfig and the lane context.
+k() {
+    kubectl --kubeconfig "${KUBECONFIG_OUT}" --context "${CONTEXT}" "$@"
+}
+
+h() {
+    helm --kubeconfig "${KUBECONFIG_OUT}" --kube-context "${CONTEXT}" "$@"
+}
+
 # ---------------------------------------------------------------------------
 # Refuse rather than adopt a cluster somebody else is using
 # ---------------------------------------------------------------------------
 
 if mokka::cluster_exists "${CLUSTER}"; then
-    release="$(helm list --kube-context "${CONTEXT}" --namespace "${MOKKA_NAMESPACE}" -q 2> /dev/null || true)"
-    if printf '%s' "${release}" | grep -qxF -- "${MOKKA_RELEASE}"; then
+    release="$(h list --namespace "${MOKKA_NAMESPACE}" -q 2> /dev/null || true)"
+    if printf '%s\n' "${release}" | grep -qxF -- "${MOKKA_RELEASE}"; then
         mokka::die 4 "up.sh: cluster ${CLUSTER} already exists and holds Mokka release ${MOKKA_RELEASE}; run hack/mokka/down.sh ${LANE} first"
     fi
     mokka::die 4 "up.sh: cluster ${CLUSTER} already exists; run hack/mokka/down.sh ${LANE} first"
@@ -86,22 +117,22 @@ fi
 # Cluster
 # ---------------------------------------------------------------------------
 
+mkdir -p "${BIN_DIR}"
+
 mokka::phase "create cluster ${CLUSTER}"
 kind create cluster \
     --name "${CLUSTER}" \
     --image "${MOKKA_KIND_NODE_IMAGE}" \
-    --config "${SCRIPT_DIR}/kind-mokka.yaml"
-
-mkdir -p "${BIN_DIR}"
-kind export kubeconfig --name "${CLUSTER}" --kubeconfig "${KUBECONFIG_OUT}"
+    --config "${SCRIPT_DIR}/kind-mokka.yaml" \
+    --kubeconfig "${KUBECONFIG_OUT}"
+CLUSTER_CREATED=true
 
 # ---------------------------------------------------------------------------
 # nvml-mock
 # ---------------------------------------------------------------------------
 
 mokka::phase "install ${MOKKA_RELEASE} ${MOKKA_CHART_VERSION} (profile ${PROFILE})"
-helm upgrade --install "${MOKKA_RELEASE}" "${MOKKA_CHART}" \
-    --kube-context "${CONTEXT}" \
+h upgrade --install "${MOKKA_RELEASE}" "${MOKKA_CHART}" \
     --namespace "${MOKKA_NAMESPACE}" \
     --create-namespace \
     --version "${MOKKA_CHART_VERSION}" \
@@ -113,14 +144,12 @@ helm upgrade --install "${MOKKA_RELEASE}" "${MOKKA_CHART}" \
 # ---------------------------------------------------------------------------
 
 mokka::phase "install ${GPU_OPERATOR_RELEASE} ${GPU_OPERATOR_VERSION}"
-helm repo add "${GPU_OPERATOR_REPO_NAME}" "${GPU_OPERATOR_REPO_URL}" \
-    --kube-context "${CONTEXT}" --force-update
-helm repo update "${GPU_OPERATOR_REPO_NAME}" --kube-context "${CONTEXT}"
+h repo add "${GPU_OPERATOR_REPO_NAME}" "${GPU_OPERATOR_REPO_URL}" --force-update
+h repo update "${GPU_OPERATOR_REPO_NAME}"
 # Values file only. The operator has enough interacting switches that a --set
 # spread over a command line stops being reviewable; the file carries its own
 # provenance and its own reasons.
-helm upgrade --install "${GPU_OPERATOR_RELEASE}" "${GPU_OPERATOR_CHART}" \
-    --kube-context "${CONTEXT}" \
+h upgrade --install "${GPU_OPERATOR_RELEASE}" "${GPU_OPERATOR_CHART}" \
     --namespace "${GPU_OPERATOR_NAMESPACE}" \
     --create-namespace \
     --version "${GPU_OPERATOR_VERSION}" \
@@ -128,70 +157,16 @@ helm upgrade --install "${GPU_OPERATOR_RELEASE}" "${GPU_OPERATOR_CHART}" \
     --wait --timeout "${MOKKA_HELM_TIMEOUT}"
 
 # ---------------------------------------------------------------------------
-# Wait for the operands
-# ---------------------------------------------------------------------------
-#
-# helm --wait covers the chart's own workloads, not the operands the operator
-# then creates, so the namespace is polled until every pod is either Ready or
-# Completed. An empty pod list is not readiness: it means the operator has not
-# created anything yet.
-
-mokka::phase "wait for ${GPU_OPERATOR_NAMESPACE} pods"
-deadline=$(( $(date +%s) + MOKKA_READY_TIMEOUT ))
-pods_ready=false
-last_pending=""
-while :; do
-    pods="$(kubectl --context "${CONTEXT}" --namespace "${GPU_OPERATOR_NAMESPACE}" get pods \
-        -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.phase}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
-        2> /dev/null || true)"
-
-    pending=""
-    seen=0
-    while IFS=' ' read -r name phase ready; do
-        [ -n "${name}" ] || continue
-        seen=$((seen + 1))
-        case "${phase}" in
-            Succeeded) continue ;;
-        esac
-        if [ "${ready:-}" != "True" ]; then
-            pending="${pending}${name} (${phase} Ready=${ready:-<none>})"$'\n'
-        fi
-    done <<< "${pods}"
-
-    if [ "${seen}" -gt 0 ] && [ -z "${pending}" ]; then
-        pods_ready=true
-        break
-    fi
-
-    if [ "${seen}" -eq 0 ]; then
-        last_pending="no pods in namespace ${GPU_OPERATOR_NAMESPACE}"
-    else
-        last_pending="${pending}"
-    fi
-
-    if [ "$(date +%s)" -ge "${deadline}" ]; then
-        break
-    fi
-    sleep "${MOKKA_POLL_INTERVAL}"
-done
-
-if [ "${pods_ready}" != true ]; then
-    printf '%s\n' "up.sh: ${GPU_OPERATOR_NAMESPACE} pods did not become Ready or Completed within ${MOKKA_READY_TIMEOUT}s:" >&2
-    printf '%s\n' "${last_pending}" >&2
-    exit 5
-fi
-
-# ---------------------------------------------------------------------------
-# Assert the lane looks like a GPU cluster, on EVERY worker
+# Workers
 # ---------------------------------------------------------------------------
 #
 # The operands do not tolerate the control-plane taint, so the control plane
-# never carries the GPU labels. Reading .items[0] would therefore pass or fail
-# on node ordering rather than on the thing being checked: select the workers
-# and check all of them.
+# never carries the GPU resource or the product label, even though nvml-mock
+# does run there and does label it nvidia.com/gpu.present=true. Reading
+# .items[0] would therefore pass or fail on node ordering rather than on the
+# thing being checked: select the workers and check all of them.
 
-mokka::phase "assert simulated GPUs on every worker"
-workers="$(kubectl --context "${CONTEXT}" get nodes \
+workers="$(k get nodes \
     -l '!node-role.kubernetes.io/control-plane' \
     -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}')"
 
@@ -199,44 +174,145 @@ if [ -z "${workers}" ]; then
     mokka::die 5 "up.sh: no worker nodes found in ${CLUSTER}"
 fi
 
-failures=""
 worker_count=0
 while IFS= read -r node; do
     [ -n "${node}" ] || continue
     worker_count=$((worker_count + 1))
-
-    allocatable="$(kubectl --context "${CONTEXT}" get node "${node}" \
-        -o 'jsonpath={.status.allocatable.nvidia\.com/gpu}')"
-    if [ "${allocatable}" != "${GPU_COUNT}" ]; then
-        failures="${failures}${node}: allocatable nvidia.com/gpu is '${allocatable:-<none>}', expected ${GPU_COUNT} for profile ${PROFILE}"$'\n'
-    fi
-
-    product="$(kubectl --context "${CONTEXT}" get node "${node}" \
-        -o 'jsonpath={.metadata.labels.nvidia\.com/gpu\.product}')"
-    if [ -z "${product}" ]; then
-        failures="${failures}${node}: label nvidia.com/gpu.product is absent"$'\n'
-    fi
-
-    pci="$(kubectl --context "${CONTEXT}" get node "${node}" \
-        -o 'jsonpath={.metadata.labels.feature\.node\.kubernetes\.io/pci-10de\.present}')"
-    if [ "${pci}" != "true" ]; then
-        failures="${failures}${node}: label feature.node.kubernetes.io/pci-10de.present is '${pci:-<none>}', expected true"$'\n'
-    fi
-
-    printf '[mokka] %s: nvidia.com/gpu=%s product=%s pci-10de.present=%s\n' \
-        "${node}" "${allocatable:-<none>}" "${product:-<none>}" "${pci:-<none>}"
 done <<< "${workers}"
 
-if [ -n "${failures}" ]; then
-    printf '%s\n' "up.sh: ${CLUSTER} did not come up as a ${PROFILE} lane:" >&2
+# One deadline covers both waits below: what matters to the caller is how long
+# the lane takes to become usable, not how the time splits between the two.
+DEADLINE=$(( $(date +%s) + MOKKA_READY_TIMEOUT ))
+
+# ---------------------------------------------------------------------------
+# Wait for the operand DaemonSets
+# ---------------------------------------------------------------------------
+#
+# helm --wait covers the operator's own workloads, not the operands it then
+# creates. Waiting on "every pod currently in the namespace" is satisfiable
+# before the operands exist at all, so wait on the DaemonSets by name: a
+# DaemonSet that is absent means not yet, never an error.
+
+mokka::phase "wait for operand DaemonSets"
+ds_ready=false
+ds_report=""
+while :; do
+    ds_report=""
+    all_ok=true
+    for ds in ${MOKKA_OPERAND_DAEMONSETS}; do
+        status="$(k --namespace "${GPU_OPERATOR_NAMESPACE}" get daemonset "${ds}" \
+            -o 'jsonpath={.status.desiredNumberScheduled} {.status.numberReady} {.status.updatedNumberScheduled}' \
+            2> /dev/null || true)"
+        if [ -z "${status}" ]; then
+            ds_report="${ds_report}${ds}: not found"$'\n'
+            all_ok=false
+            continue
+        fi
+        read -r desired ready updated <<< "${status}"
+        desired="${desired:-0}"
+        ready="${ready:-0}"
+        updated="${updated:-0}"
+        if [ "${desired}" -ne "${worker_count}" ] ||
+            [ "${ready}" -ne "${desired}" ] ||
+            [ "${updated}" -ne "${desired}" ]; then
+            ds_report="${ds_report}${ds}: desired=${desired} ready=${ready} updated=${updated}, want desired=ready=updated=${worker_count}"$'\n'
+            all_ok=false
+        fi
+    done
+
+    if [ "${all_ok}" = true ]; then
+        ds_ready=true
+        break
+    fi
+    if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+        break
+    fi
+    sleep "${MOKKA_POLL_INTERVAL}"
+done
+
+if [ "${ds_ready}" != true ]; then
+    printf '%s\n' "up.sh: operand DaemonSets did not roll out within ${MOKKA_READY_TIMEOUT}s:" >&2
+    printf '%s' "${ds_report}" >&2
+    exit 5
+fi
+
+# ---------------------------------------------------------------------------
+# Assert the lane looks like a GPU cluster, on EVERY worker
+# ---------------------------------------------------------------------------
+#
+# The assertions are the wait. A rolled-out device plugin has not necessarily
+# had its allocatable update observed by the API server yet, so checking once
+# and failing would be a race; checking in a loop until the deadline is the
+# same assertion with the race removed.
+
+mokka::phase "assert simulated GPUs on every worker"
+assert_ok=false
+failures=""
+summary=""
+while :; do
+    failures=""
+    summary=""
+    while IFS= read -r node; do
+        [ -n "${node}" ] || continue
+
+        allocatable="$(k get node "${node}" \
+            -o 'jsonpath={.status.allocatable.nvidia\.com/gpu}')"
+        if [ "${allocatable}" != "${GPU_COUNT}" ]; then
+            failures="${failures}${node}: allocatable nvidia.com/gpu is '${allocatable:-<none>}', expected ${GPU_COUNT} for profile ${PROFILE}"$'\n'
+        fi
+
+        product="$(k get node "${node}" \
+            -o 'jsonpath={.metadata.labels.nvidia\.com/gpu\.product}')"
+        if [ -z "${product}" ]; then
+            failures="${failures}${node}: label nvidia.com/gpu.product is absent"$'\n'
+        fi
+
+        pci="$(k get node "${node}" \
+            -o 'jsonpath={.metadata.labels.feature\.node\.kubernetes\.io/pci-10de\.present}')"
+        if [ "${pci}" != "true" ]; then
+            failures="${failures}${node}: label feature.node.kubernetes.io/pci-10de.present is '${pci:-<none>}', expected true"$'\n'
+        fi
+
+        summary="${summary}[mokka] ${node}: nvidia.com/gpu=${allocatable:-<none>} product=${product:-<none>} pci-10de.present=${pci:-<none>}"$'\n'
+    done <<< "${workers}"
+
+    if [ -z "${failures}" ]; then
+        assert_ok=true
+        break
+    fi
+    if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+        break
+    fi
+    sleep "${MOKKA_POLL_INTERVAL}"
+done
+
+printf '%s' "${summary}"
+
+if [ "${assert_ok}" != true ]; then
+    printf '%s\n' "up.sh: ${CLUSTER} did not become a ${PROFILE} lane within ${MOKKA_READY_TIMEOUT}s:" >&2
     printf '%s' "${failures}" >&2
     exit 5
 fi
 
+# ---------------------------------------------------------------------------
+# Record, do not gate
+# ---------------------------------------------------------------------------
+#
+# ClusterPolicy state is recorded for the record only. It is not a gate yet:
+# the states this deployment reaches with the operands disabled by the values
+# file have not been characterised, so failing on it would be guesswork.
+
+cp_state="$(k get clusterpolicies.nvidia.com cluster-policy \
+    -o 'jsonpath={.status.state}' 2> /dev/null || true)"
+
 mokka::phase
 
+printf '[mokka] ClusterPolicy state: %s\n' "${cp_state:-<unavailable>}"
 printf '\n'
 printf 'lane %s is up: %d workers, %s simulated GPUs each (profile %s)\n' \
     "${LANE}" "${worker_count}" "${GPU_COUNT}" "${PROFILE}"
 printf 'kubeconfig: %s\n' "${KUBECONFIG_OUT}"
 printf 'context:    %s\n' "${CONTEXT}"
+printf '\n'
+printf 'the lane is not in your default kubeconfig; reach it with\n'
+printf '  kubectl --kubeconfig %s --context %s get nodes\n' "${KUBECONFIG_OUT}" "${CONTEXT}"

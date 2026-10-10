@@ -10,8 +10,12 @@
 # anywhere in this repository. Every line that is not a comment is byte for
 # byte the upstream file. To re-check:
 #
-#   git -C <k8s-test-infra> show 4ce11e5:docs/guides/with-gpu-operator/gpu-operator-values.yaml \
-#     | grep -v '^ *#' | diff - <(grep -v '^ *#' hack/mokka/gpu-operator-values.yaml)
+#   diff <(git -C <k8s-test-infra> show \
+#            4ce11e5:docs/guides/with-gpu-operator/gpu-operator-values.yaml \
+#          | grep -v '^ *#' | grep -v '^[[:space:]]*$') \
+#        <(grep -v '^ *#' hack/mokka/gpu-operator-values.yaml | grep -v '^[[:space:]]*$')
+#
+# It prints nothing and exits 0 when this file still matches upstream.
 #
 # These values go in through helm --values and never through --set. The
 # switches below interact (cdi with toolkit, gfd with the machine-type file,
@@ -25,9 +29,6 @@
 # Upstream file follows.
 # ---------------------------------------------------------------------------
 
-# Copyright 2026 NVIDIA CORPORATION
-# SPDX-License-Identifier: Apache-2.0
-#
 # GPU Operator values for the nvml-mock "with GPU Operator" demo.
 #
 # Provenance, stated precisely because it is easy to overclaim:

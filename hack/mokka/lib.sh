@@ -17,6 +17,12 @@
 #
 # This file is sourced, not executed. Every pin lives here exactly once so that
 # a bump is one edit and a reader can see the whole version surface at a glance.
+#
+# shellcheck disable=SC2034
+# SC2034 is disabled for the whole file: every pin below is read by up.sh or
+# down.sh after they source this file, which shellcheck cannot see when it is
+# pointed at this file on its own. Linting it standalone is worth keeping, so
+# the alternative of only ever running `shellcheck -x up.sh` is not taken.
 
 # ---------------------------------------------------------------------------
 # Kind node image
@@ -59,14 +65,19 @@ GPU_OPERATOR_VERSION="v26.3.3"
 GPU_OPERATOR_RELEASE="gpu-operator"
 GPU_OPERATOR_NAMESPACE="gpu-operator"
 
+# The operand DaemonSets whose rollout decides whether the lane is usable.
+# These are the two that put nvidia.com/gpu into node allocatable and the
+# nvidia.com/* labels onto the node; the validator and dcgm-exporter do not.
+MOKKA_OPERAND_DAEMONSETS="nvidia-device-plugin-daemonset gpu-feature-discovery"
+
 # ---------------------------------------------------------------------------
 # Timings, all overridable for tests
 # ---------------------------------------------------------------------------
 # A cold pull of the nvml-mock image runs about eight minutes per node, so the
 # helm installs get a 15m wait rather than the 5m default.
 MOKKA_HELM_TIMEOUT="${MOKKA_HELM_TIMEOUT:-15m}"
-# How long to wait for every pod in the gpu-operator namespace, in seconds, and
-# how long to sleep between polls.
+# How long to wait, in seconds, for the operands to roll out and for the node
+# assertions to come true, and how long to sleep between polls.
 MOKKA_READY_TIMEOUT="${MOKKA_READY_TIMEOUT:-900}"
 MOKKA_POLL_INTERVAL="${MOKKA_POLL_INTERVAL:-10}"
 
@@ -97,9 +108,12 @@ mokka::context() {
 }
 
 # mokka::valid_lane <lane>
-# A lane becomes part of a cluster name, so it has to be a DNS label.
+# A lane becomes part of a cluster name, so it has to be a DNS label, and the
+# match is anchored against the WHOLE argument. A line-oriented check such as
+# grep accepts an embedded newline and sees only the first line, which would
+# let a second line name somebody else's cluster.
 mokka::valid_lane() {
-    printf '%s' "$1" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+    [[ $1 =~ ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]
 }
 
 # mokka::profile_gpu_count <profile>
@@ -116,9 +130,15 @@ mokka::profile_gpu_count() {
 }
 
 # mokka::cluster_exists <cluster>
-# Matches a whole line, so kubectl-nv-mokka-old is not kubectl-nv-mokka.
+# `kind get clusters` enumerates Docker containers; it is the one kind command
+# with no --kubeconfig flag and it never opens a kubeconfig. Its output is
+# captured into a variable first: under `set -o pipefail` a `grep -q` that
+# stops reading early can hand kind a SIGPIPE and fail the whole command.
+# Matched on the whole line, so kubectl-nv-mokka-old is not kubectl-nv-mokka.
 mokka::cluster_exists() {
-    kind get clusters 2> /dev/null | grep -qxF -- "$1"
+    local clusters
+    clusters="$(kind get clusters 2> /dev/null)" || return 1
+    printf '%s\n' "${clusters}" | grep -qxF -- "$1"
 }
 
 # mokka::require_tools <tool>...

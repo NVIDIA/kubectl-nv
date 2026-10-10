@@ -19,6 +19,7 @@
 #
 # Exit codes:
 #   0  the lane cluster was deleted
+#   1  kind failed to delete it; its own output says why
 #   2  bad usage, or no cluster named kubectl-nv-<lane>
 #   3  a required tool is missing
 #
@@ -26,12 +27,18 @@
 # neighbouring cluster whose name contains the lane name is left alone. There
 # is no "delete everything" mode on purpose: these clusters share a Docker
 # daemon with whatever else the developer is running.
+#
+# `kind delete cluster` rewrites a kubeconfig to drop the deleted context. It
+# is pointed at the lane kubeconfig so that it rewrites that file and never the
+# caller's default one, which an earlier version of this script left with an
+# empty current-context.
 
 set -euo pipefail
+umask 077
 
 MOKKA_PROG="down.sh"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=hack/mokka/lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 . "${SCRIPT_DIR}/lib.sh"
 
 if [ "$#" -ne 1 ]; then
@@ -42,22 +49,25 @@ fi
 LANE="$1"
 
 if ! mokka::valid_lane "${LANE}"; then
-    mokka::die 2 "down.sh: lane must be a DNS label (lowercase letters, digits, hyphens): '${LANE}'"
+    mokka::die 2 "down.sh: lane must be a DNS label of at most 32 characters (lowercase letters, digits, hyphens)"
 fi
 
 mokka::require_tools kind
 
 CLUSTER="$(mokka::cluster_name "${LANE}")"
 BIN_DIR="${MOKKA_BIN_DIR:-${SCRIPT_DIR}/bin}"
+KUBECONFIG_OUT="${BIN_DIR}/kubeconfig-${LANE}"
+
+export KUBECONFIG="${KUBECONFIG_OUT}"
 
 if ! mokka::cluster_exists "${CLUSTER}"; then
     mokka::die 2 "down.sh: no such cluster: ${CLUSTER}"
 fi
 
 mokka::phase "delete cluster ${CLUSTER}"
-kind delete cluster --name "${CLUSTER}"
+kind delete cluster --name "${CLUSTER}" --kubeconfig "${KUBECONFIG_OUT}"
 mokka::phase
 
-rm -f "${BIN_DIR}/kubeconfig-${LANE}"
+rm -f "${KUBECONFIG_OUT}"
 
 printf 'lane %s is down\n' "${LANE}"
