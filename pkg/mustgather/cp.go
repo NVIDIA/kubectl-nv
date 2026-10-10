@@ -114,11 +114,11 @@ func (t *TarPipe) Read(p []byte) (n int, err error) {
 	if err != nil {
 		if t.o.MaxTries < 0 || t.retries < t.o.MaxTries {
 			t.retries++
-			fmt.Printf("Resuming copy at %d bytes, retry %d/%d\n", t.bytesRead, t.retries, t.o.MaxTries)
+			fmt.Fprintf(t.o.ErrOut, "Resuming copy at %d bytes, retry %d/%d\n", t.bytesRead, t.retries, t.o.MaxTries)
 			t.initReadFrom(t.bytesRead + 1)
 			err = nil
 		} else {
-			fmt.Printf("Dropping out copy after %d retries\n", t.retries)
+			fmt.Fprintf(t.o.ErrOut, "Dropping out copy after %d retries\n", t.retries)
 		}
 	} else {
 		t.bytesRead += uint64(n)

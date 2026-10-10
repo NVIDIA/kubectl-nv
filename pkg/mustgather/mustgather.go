@@ -26,7 +26,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"gopkg.in/yaml.v2"
+	"sigs.k8s.io/yaml"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -124,7 +124,7 @@ func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
 	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
 	var outpipe *os.File
 	if err != nil {
-		outpipe = os.Stdout
+		outpipe = os.Stderr
 	} else {
 		outpipe = nullFile
 		defer nullFile.Close() // Only close if opened successfully.
@@ -148,7 +148,7 @@ func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
 	}
 	// Write the command output to the main log file.
 	if _, lerr := g.logFile.WriteString(outLog); lerr != nil {
-		fmt.Printf("Error writing to log file: %v\n", lerr)
+		fmt.Fprintf(g.progress, "Error writing to log file: %v\n", lerr)
 	}
 
 	// Build the source file spec from the pod:
@@ -180,20 +180,22 @@ type PodInfo struct {
 // If any step fails, any opened file resources are closed before returning.
 func NewGatherer(opts *Options, f Clients, progress io.Writer) (*Gatherer, error) {
 	// Create the ARTIFACT_DIR.
-	if err := os.MkdirAll(opts.ArtifactDir, os.ModePerm); err != nil {
+	// The bundle holds cluster data and lands under /tmp, where every account on
+	// the machine can look.
+	if err := os.MkdirAll(opts.ArtifactDir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create artifact directory: %w", err)
 	}
 
 	// Create the stdout log file.
 	logPath := filepath.Join(opts.ArtifactDir, "must-gather.log")
-	logFile, err := os.Create(logPath)
+	logFile, err := createArtifactFile(logPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create log file: %w", err)
 	}
 
 	// Create the stderr log file.
 	errLogPath := filepath.Join(opts.ArtifactDir, "must-gather.stderr.log")
-	errLogFile, err := os.Create(errLogPath)
+	errLogFile, err := createArtifactFile(errLogPath)
 	if err != nil {
 		logFile.Close()
 		return nil, fmt.Errorf("failed to create error log file: %w", err)
@@ -257,7 +259,7 @@ func (g *Gatherer) gatherOpenShiftVersion() error {
 		// Construct the file path for the OpenShift version file.
 		versionFilePath := filepath.Join(g.opts.ArtifactDir, "openshift_version.yaml")
 		// Create the file.
-		file, err := os.Create(versionFilePath)
+		file, err := createArtifactFile(versionFilePath)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating openshift_version.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -293,7 +295,7 @@ func (g *Gatherer) gatherNodeInfo() error {
 		}
 
 		// Create machines.yaml file.
-		machinesFile, err := os.Create(filepath.Join(g.opts.ArtifactDir, "machines.yaml"))
+		machinesFile, err := createArtifactFile(filepath.Join(g.opts.ArtifactDir, "machines.yaml"))
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating machines.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -328,7 +330,7 @@ func (g *Gatherer) gatherNodeInfo() error {
 		}
 
 		// Create nodes.yaml file.
-		nodesFile, err := os.Create(filepath.Join(g.opts.ArtifactDir, "nodes.yaml"))
+		nodesFile, err := createArtifactFile(filepath.Join(g.opts.ArtifactDir, "nodes.yaml"))
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating nodes.yaml: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -338,6 +340,7 @@ func (g *Gatherer) gatherNodeInfo() error {
 		defer nodesFile.Close() // Ensure file closure.
 
 		// Marshal nodes into YAML format.
+		stampNodeList(&nodes)
 		data, err := yaml.Marshal(nodes)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling nodes: %v\n", err); lerr != nil {
@@ -431,7 +434,7 @@ func (g *Gatherer) gatherGPUOperatorCRDs() error {
 	if err != nil {
 		// Write marker file to indicate missing ClusterPolicy CR.
 		missingPath := filepath.Join(g.opts.ArtifactDir, "cluster_policy.missing")
-		_ = os.WriteFile(missingPath, []byte{}, 0644)
+		_ = os.WriteFile(missingPath, []byte{}, 0o600)
 		_, lerr := fmt.Fprintf(g.errLogFile, "Error getting clusterPolicy: %v\n", err)
 		if lerr != nil {
 			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -443,7 +446,7 @@ func (g *Gatherer) gatherGPUOperatorCRDs() error {
 			return g.logError("error marshalling clusterPolicy: %v", err)
 		}
 		clusterPolicyFilePath := filepath.Join(g.opts.ArtifactDir, "cluster_policy.yaml")
-		clusterPolicyFile, err := os.Create(clusterPolicyFilePath)
+		clusterPolicyFile, err := createArtifactFile(clusterPolicyFilePath)
 		if err != nil {
 			return g.logError("error creating cluster_policy.yaml: %v", err)
 		}
@@ -467,7 +470,7 @@ func (g *Gatherer) gatherGPUOperatorCRDs() error {
 	if err != nil {
 		// Write marker file to indicate missing NvidiaDriver CR.
 		missingPath := filepath.Join(g.opts.ArtifactDir, "nvidia_driver.missing")
-		_ = os.WriteFile(missingPath, []byte{}, 0644)
+		_ = os.WriteFile(missingPath, []byte{}, 0o600)
 		_, lerr := fmt.Fprintf(g.errLogFile, "Error getting nvidiaDriver: %v\n", err)
 		if lerr != nil {
 			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -479,7 +482,7 @@ func (g *Gatherer) gatherGPUOperatorCRDs() error {
 			return g.logError("error marshalling nvidiaDriver: %v", err)
 		}
 		nvidiaDriverFilePath := filepath.Join(g.opts.ArtifactDir, "nvidia_driver.yaml")
-		nvidiaDriverFile, err := os.Create(nvidiaDriverFilePath)
+		nvidiaDriverFile, err := createArtifactFile(nvidiaDriverFilePath)
 		if err != nil {
 			return g.logError("error creating nvidia_driver.yaml: %v", err)
 		}
@@ -531,7 +534,7 @@ func (g *Gatherer) gatherGPUNodes() error {
 
 	// Create the file to store the GPU node information.
 	gpuNodesFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_nodes.yaml")
-	gpuNodesFile, err := os.Create(gpuNodesFilePath)
+	gpuNodesFile, err := createArtifactFile(gpuNodesFilePath)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_nodes.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -541,6 +544,7 @@ func (g *Gatherer) gatherGPUNodes() error {
 	defer gpuNodesFile.Close()
 
 	// Marshal the collected GPU nodes into YAML.
+	stampNodeList(&gpuNodes)
 	data, err := yaml.Marshal(gpuNodes)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling gpuNodes: %v\n", err); lerr != nil {
@@ -585,7 +589,7 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 
 	// Write the operands pod list to "gpu_operand_pods.yaml".
 	operandFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_operand_pods.yaml")
-	operandFile, err := os.Create(operandFilePath)
+	operandFile, err := createArtifactFile(operandFilePath)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operand_pods.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -594,6 +598,7 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 	}
 	defer operandFile.Close()
 
+	stampPodList(&operandsPodList)
 	data, err := yaml.Marshal(operandsPodList)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling operands pod list: %v\n", err); lerr != nil {
@@ -633,7 +638,7 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 
 	// Write the operator pod list to "gpu_operator_pod.yaml".
 	operatorFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_operator_pod.yaml")
-	operatorFile, err := os.Create(operatorFilePath)
+	operatorFile, err := createArtifactFile(operatorFilePath)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operator_pod.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -642,6 +647,7 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 	}
 	defer operatorFile.Close()
 
+	stampPodList(&operatorPodList)
 	data, err = yaml.Marshal(operatorPodList)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling GPU operator pod list: %v\n", err); lerr != nil {
@@ -730,7 +736,7 @@ func containerNames(pod *v1.Pod) []string {
 // container, and always asks for timestamps.
 func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container, fileName string, previous bool) error {
 	logPath := filepath.Join(g.opts.ArtifactDir, fileName)
-	logFile, err := os.Create(logPath)
+	logFile, err := createArtifactFile(logPath)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating %s: %v\n", fileName, err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -830,7 +836,7 @@ func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
 
 	// Create the file to store the daemon sets data.
 	daemonSetsFilePath := filepath.Join(g.opts.ArtifactDir, "daemonsets.yaml")
-	daemonSetsFile, err := os.Create(daemonSetsFilePath)
+	daemonSetsFile, err := createArtifactFile(daemonSetsFilePath)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating daemonsets.yaml: %v\n", err); lerr != nil {
 			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
@@ -840,6 +846,7 @@ func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
 	defer daemonSetsFile.Close()
 
 	// Marshal the daemonSets object into YAML.
+	stampDaemonSetList(&daemonSets)
 	data, err := yaml.Marshal(daemonSets)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling daemonSets: %v\n", err); lerr != nil {
@@ -1013,7 +1020,13 @@ func Run(opts *Options, f Clients, progress io.Writer) error {
 		return err
 	}
 
-	// 9. Run remote command on daemonset pods to generate and collect bug report.
+	// 9. Collect the DRA resource slices, when the cluster has them.
+	g.step("Gathering resource slices")
+	if err := g.gatherResourceSlices(); err != nil {
+		return err
+	}
+
+	// 10. Run remote command on daemonset pods to generate and collect bug report.
 	g.step("Gathering bug reports from the driver daemonsets")
 	if err := g.gatherBugReportFromDaemonSet(operatorNamespace); err != nil {
 		return err
@@ -1055,3 +1068,35 @@ func listAllPaginated[T any](limit int64, selector string, listFunc func(metav1.
 
 // TODO(P2): For long-lived or repeated resource access, use shared informers/caches instead of direct polling.
 // See: https://pkg.go.dev/k8s.io/client-go/informers
+
+// createArtifactFile makes one file of the bundle. Artifacts carry cluster
+// data and the bundle sits under /tmp by default, so they are readable only by
+// the user who collected them.
+func createArtifactFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+}
+
+// The typed clients strip the apiVersion and kind off the objects they decode,
+// so every artifact has to have them put back. Without them the files are not
+// what "kubectl get -o yaml" produces, and a script that reads .kind, or a
+// "kubectl apply --dry-run" against the bundle, has nothing to go on.
+func stampNodeList(l *v1.NodeList) {
+	l.APIVersion, l.Kind = "v1", "NodeList"
+	for i := range l.Items {
+		l.Items[i].APIVersion, l.Items[i].Kind = "v1", "Node"
+	}
+}
+
+func stampPodList(l *v1.PodList) {
+	l.APIVersion, l.Kind = "v1", "PodList"
+	for i := range l.Items {
+		l.Items[i].APIVersion, l.Items[i].Kind = "v1", "Pod"
+	}
+}
+
+func stampDaemonSetList(l *appsv1.DaemonSetList) {
+	l.APIVersion, l.Kind = "apps/v1", "DaemonSetList"
+	for i := range l.Items {
+		l.Items[i].APIVersion, l.Items[i].Kind = "apps/v1", "DaemonSet"
+	}
+}
