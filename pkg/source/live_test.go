@@ -315,9 +315,13 @@ func TestLivePodsPaginates(t *testing.T) {
 	counter := newCallCounter()
 	var pods []corev1.Pod
 	for i := 0; i < 1200; i++ {
+		// The label is carried because the fake clientset applies the
+		// selector to whatever the reactor returns, on top of the reactor's
+		// own behaviour.
 		pods = append(pods, corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("pod-%04d", i),
 			Namespace: "gpu-operator",
+			Labels:    map[string]string{"app": "gpu-operator"},
 		}})
 	}
 	cs := fake.NewSimpleClientset()
