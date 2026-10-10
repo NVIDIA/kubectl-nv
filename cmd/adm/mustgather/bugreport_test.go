@@ -124,6 +124,159 @@ func TestGatherBugReportCollectsEveryDriverPod(t *testing.T) {
 	}
 }
 
+// vgpuPod builds a running vGPU manager daemonset pod scheduled on the named
+// node.
+func vgpuPod(t *testing.T, namespace, name, nodeName string) *v1.Pod {
+	t.Helper()
+	pod := driverPod(t, namespace, name, nodeName)
+	pod.Labels = map[string]string{"app": "nvidia-vgpu-manager-daemonset"}
+	return pod
+}
+
+// TestGatherBugReportReportsEveryFailure pins that the error handed back names
+// every pod that failed, not just the first. An operator who reads only the
+// first name re-runs the gather believing one node is at fault, and loses the
+// evidence that the failure is cluster-wide.
+func TestGatherBugReportReportsEveryFailure(t *testing.T) {
+	const namespace = "gpu-operator"
+	const firstFailure = "nvidia-driver-daemonset-bbbbb"
+	const secondFailure = "nvidia-driver-daemonset-ddddd"
+
+	artifactDir := t.TempDir()
+	logFile, errLogFile := scratchLogFiles(t)
+
+	clientset := fake.NewClientset(
+		driverPod(t, namespace, "nvidia-driver-daemonset-aaaaa", "worker-a"),
+		driverPod(t, namespace, firstFailure, "worker-b"),
+		driverPod(t, namespace, secondFailure, "worker-d"),
+	)
+
+	g := &Gatherer{
+		opts:       &Options{ArtifactDir: artifactDir},
+		logFile:    logFile,
+		errLogFile: errLogFile,
+		clientset:  clientset,
+		fetchPodFile: recordingFetcher(map[string]bool{
+			firstFailure:  true,
+			secondFailure: true,
+		}),
+	}
+
+	err := g.gatherBugReportFromDaemonSet(namespace)
+	if err == nil {
+		t.Fatal("gatherBugReportFromDaemonSet returned nil, want an error naming both failing pods")
+	}
+	for _, failed := range []string{firstFailure, secondFailure} {
+		if !strings.Contains(err.Error(), failed) {
+			t.Errorf("error does not name failing pod %s, holds:\n%s", failed, err.Error())
+		}
+	}
+
+	// The healthy node is still collected.
+	want := []string{"nvidia-bug-report_worker-a.log.gz"}
+	got := artifactNames(t, artifactDir)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("artifact dir holds %v, want exactly %v", got, want)
+	}
+}
+
+// TestGatherBugReportCollectsVgpuAfterDriverFailure pins that a driver daemonset
+// that fails does not cost us the vGPU manager daemonset behind it. The two are
+// separate collections and a cluster running vGPU needs both.
+func TestGatherBugReportCollectsVgpuAfterDriverFailure(t *testing.T) {
+	const namespace = "gpu-operator"
+	const failingDriver = "nvidia-driver-daemonset-aaaaa"
+
+	artifactDir := t.TempDir()
+	logFile, errLogFile := scratchLogFiles(t)
+
+	clientset := fake.NewClientset(
+		driverPod(t, namespace, failingDriver, "worker-a"),
+		vgpuPod(t, namespace, "nvidia-vgpu-manager-daemonset-bbbbb", "worker-b"),
+	)
+
+	g := &Gatherer{
+		opts:         &Options{ArtifactDir: artifactDir},
+		logFile:      logFile,
+		errLogFile:   errLogFile,
+		clientset:    clientset,
+		fetchPodFile: recordingFetcher(map[string]bool{failingDriver: true}),
+	}
+
+	err := g.gatherBugReportFromDaemonSet(namespace)
+	if err == nil {
+		t.Fatal("gatherBugReportFromDaemonSet returned nil, want an error naming the failing driver pod")
+	}
+	if !strings.Contains(err.Error(), failingDriver) {
+		t.Errorf("error does not name failing pod %s, holds:\n%s", failingDriver, err.Error())
+	}
+
+	// The vGPU manager daemonset is queried after the driver one, so its report
+	// only exists if the driver failure did not end the gather.
+	want := []string{"nvidia-bug-report_worker-b.log.gz"}
+	got := artifactNames(t, artifactDir)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("artifact dir holds %v, want exactly %v", got, want)
+	}
+	content := readFileAsString(t, filepath.Join(artifactDir, "nvidia-bug-report_worker-b.log.gz"))
+	if content != "nvidia-vgpu-manager-daemonset-bbbbb" {
+		t.Errorf("worker-b report holds %q, want the vGPU manager pod's report", content)
+	}
+}
+
+// TestGatherBugReportKeepsDriverAndVgpuOnOneNode pins that a driver pod and a
+// vGPU manager pod sharing a node keep separate files. The two daemonsets are
+// collected in separate passes, so a name ledger scoped to one pass lets the
+// second pass overwrite the first node's report.
+func TestGatherBugReportKeepsDriverAndVgpuOnOneNode(t *testing.T) {
+	const namespace = "gpu-operator"
+	const vgpuName = "nvidia-vgpu-manager-daemonset-bbbbb"
+
+	artifactDir := t.TempDir()
+	logFile, errLogFile := scratchLogFiles(t)
+
+	clientset := fake.NewClientset(
+		driverPod(t, namespace, "nvidia-driver-daemonset-aaaaa", "worker-a"),
+		vgpuPod(t, namespace, vgpuName, "worker-a"),
+	)
+
+	g := &Gatherer{
+		opts:         &Options{ArtifactDir: artifactDir},
+		logFile:      logFile,
+		errLogFile:   errLogFile,
+		clientset:    clientset,
+		fetchPodFile: recordingFetcher(nil),
+	}
+
+	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
+		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	}
+
+	want := []string{
+		"nvidia-bug-report_worker-a.log.gz",
+		"nvidia-bug-report_worker-a_" + vgpuName + ".log.gz",
+	}
+	got := artifactNames(t, artifactDir)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("artifact dir holds %v, want exactly %v", got, want)
+	}
+
+	// Each file must hold its own daemonset's report, not the later pass's.
+	contents := map[string]string{
+		"nvidia-bug-report_worker-a.log.gz":                  "nvidia-driver-daemonset-aaaaa",
+		"nvidia-bug-report_worker-a_" + vgpuName + ".log.gz": vgpuName,
+	}
+	for name, wantContent := range contents {
+		data, err := os.ReadFile(filepath.Join(artifactDir, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if string(data) != wantContent {
+			t.Errorf("%s holds report of pod %q, want %q", name, string(data), wantContent)
+		}
+	}
+}
+
 // TestCollectBugReportsContinuesAfterFailure pins that one unreachable driver pod
 // does not cost the operator the reports of every node behind it, while still
 // surfacing the failure to the caller.
