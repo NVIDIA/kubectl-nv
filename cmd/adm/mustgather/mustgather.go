@@ -50,13 +50,94 @@ type Options struct {
 	Kubeconfig  string // Path to the Kubernetes configuration file.
 }
 
+// podFileFetcher runs the bug-report command inside pod and copies the resulting
+// file out of the pod to destPath on the local filesystem.
+type podFileFetcher func(pod *v1.Pod, destPath string) error
+
+// podLogStreamer opens a log stream for the given pod. The caller owns the
+// returned stream and is responsible for closing it.
+type podLogStreamer func(ctx context.Context, namespace, podName string, opts *v1.PodLogOptions) (io.ReadCloser, error)
+
 // Gatherer holds all the initialized resources needed for must-gather operations.
 type Gatherer struct {
 	opts       *Options
 	logFile    *os.File
 	errLogFile *os.File
 	config     *rest.Config
-	clientset  *kubernetes.Clientset
+	clientset  kubernetes.Interface
+
+	// fetchPodFile and streamPodLogs are injection seams for tests. When nil the
+	// Gatherer falls back to the live cluster implementations.
+	fetchPodFile  podFileFetcher
+	streamPodLogs podLogStreamer
+}
+
+// fetchBugReport copies the bug report generated inside pod to destPath, using
+// the injected fetcher when one is set.
+func (g *Gatherer) fetchBugReport(pod *v1.Pod, destPath string) error {
+	if g.fetchPodFile != nil {
+		return g.fetchPodFile(pod, destPath)
+	}
+	return g.execAndCopyBugReport(pod, destPath)
+}
+
+// podLogs opens a log stream for the given pod, using the injected streamer when
+// one is set.
+func (g *Gatherer) podLogs(ctx context.Context, namespace, podName string, opts *v1.PodLogOptions) (io.ReadCloser, error) {
+	if g.streamPodLogs != nil {
+		return g.streamPodLogs(ctx, namespace, podName, opts)
+	}
+	return g.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
+}
+
+// execAndCopyBugReport is the live-cluster podFileFetcher: it runs
+// nvidia-bug-report.sh inside the pod and copies /tmp/nvidia-bug-report.log.gz
+// out to destPath.
+func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
+	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
+	var outpipe *os.File
+	if err != nil {
+		outpipe = os.Stdout
+	} else {
+		outpipe = nullFile
+		defer nullFile.Close() // Only close if opened successfully.
+	}
+	iostream := genericiooptions.IOStreams{
+		In:     os.Stdin,
+		Out:    outpipe,
+		ErrOut: os.Stderr,
+	}
+	o := NewCopyOptions(iostream)
+	o.Clientset = g.clientset
+	o.ClientConfig = g.config
+
+	// Execute remote command to run the bug report script.
+	outLog, errLog, err := executeRemoteCommand(pod, "cd /tmp && nvidia-bug-report.sh")
+	if err != nil {
+		if _, lerr := g.errLogFile.WriteString(errLog); lerr != nil {
+			err = fmt.Errorf("%v+ error writing error output to stderr log file: %v", err, lerr)
+		}
+		return err
+	}
+	// Write the command output to the main log file.
+	if _, lerr := g.logFile.WriteString(outLog); lerr != nil {
+		fmt.Printf("Error writing to log file: %v\n", lerr)
+	}
+
+	// Build the source file spec from the pod:
+	// Format: "<namespace>/<pod-name>:/tmp/nvidia-bug-report.log.gz"
+	srcSpecStr := fmt.Sprintf("%s/%s:/tmp/nvidia-bug-report.log.gz", pod.Namespace, pod.Name)
+	srcSpec, err := extractFileSpec(srcSpecStr)
+	if err != nil {
+		return err
+	}
+
+	destSpec, err := extractFileSpec(destPath)
+	if err != nil {
+		return err
+	}
+
+	return o.copyFromPod(srcSpec, destSpec)
 }
 
 // PodInfo groups the GPU operand pods and operator pods retrieved from the cluster.
@@ -657,8 +738,7 @@ func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) err
 
 	// Get current logs from the operator pod.
 	podLogOpts := v1.PodLogOptions{}
-	req := g.clientset.CoreV1().Pods(operatorNamespace).GetLogs(operatorPod.Name, &podLogOpts)
-	stream, err := req.Stream(context.Background())
+	stream, err := g.podLogs(context.Background(), operatorNamespace, operatorPod.Name, &podLogOpts)
 	if err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pod logs for operator pod %s: %v\n", operatorPod.Name, err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -703,8 +783,7 @@ func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) err
 	defer prevLogFile.Close()
 
 	prevLogOpts := v1.PodLogOptions{Previous: true}
-	req = g.clientset.CoreV1().Pods(operatorNamespace).GetLogs(operatorPod.Name, &prevLogOpts)
-	prevStream, err := req.Stream(context.Background())
+	prevStream, err := g.podLogs(context.Background(), operatorNamespace, operatorPod.Name, &prevLogOpts)
 	if err != nil || prevStream == nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting previous logs for operator pod %s: %v\n", operatorPod.Name, err); lerr != nil {
 			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -753,8 +832,7 @@ func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) err
 		// Note: Avoid deferring inside loops; close explicitly after use.
 
 		podLogOpts := v1.PodLogOptions{}
-		req := g.clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &podLogOpts)
-		operandStream, err := req.Stream(context.Background())
+		operandStream, err := g.podLogs(context.Background(), pod.Namespace, pod.Name, &podLogOpts)
 		if err != nil {
 			operandLogFile.Close()
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting logs for operand pod %s: %v\n", pod.Name, err); lerr != nil {
@@ -860,24 +938,6 @@ func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
 // to generate a bug report, and then copies the resulting file from the pod
 // to the artifact directory.
 func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error {
-	// Restore CopyOptions initialization
-	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
-	var outpipe *os.File
-	if err != nil {
-		outpipe = os.Stdout
-	} else {
-		outpipe = nullFile
-		defer nullFile.Close() // Only close if opened successfully.
-	}
-	iostream := genericiooptions.IOStreams{
-		In:     os.Stdin,
-		Out:    outpipe,
-		ErrOut: os.Stderr,
-	}
-	o := NewCopyOptions(iostream)
-	o.Clientset = g.clientset
-	o.ClientConfig = g.config
-
 	labels := []string{
 		"app=nvidia-driver-daemonset",
 		"app=nvidia-vgpu-manager-daemonset",
@@ -900,62 +960,43 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 			}
 			return err
 		}
-		// Skip if no pod found for this label.
-		if len(podList.Items) == 0 {
-			continue
-		}
-
-		// Use the first available pod.
-		pod := podList.Items[0]
-
-		// Execute remote command to run the bug report script.
-		outLog, errLog, err := executeRemoteCommand(&pod, "cd /tmp && nvidia-bug-report.sh")
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error executing remote command on pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
-				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-			}
-			if _, lerr := g.errLogFile.WriteString(errLog); lerr != nil {
-				err = fmt.Errorf("%v+ error writing error output to stderr log file: %v", err, lerr)
-			}
+		if err := g.collectBugReports(label, podList.Items); err != nil {
 			return err
 		}
-		// Write the command output to the main log file.
-		if _, lerr := g.logFile.WriteString(outLog); lerr != nil {
-			fmt.Printf("Error writing to log file: %v\n", lerr)
-		}
+	}
+	return nil
+}
 
-		// Build the source file spec from the pod:
-		// Format: "<namespace>/<pod-name>:/tmp/nvidia-bug-report.log.gz"
-		srcSpecStr := fmt.Sprintf("%s/%s:/tmp/nvidia-bug-report.log.gz", pod.Namespace, pod.Name)
-		srcSpec, err := extractFileSpec(srcSpecStr)
-		if err != nil {
-			return err
-		}
+// collectBugReports copies the bug report out of each of the given daemonset
+// pods into the artifact directory. label identifies the daemonset the pods
+// belong to and is used for error reporting.
+func (g *Gatherer) collectBugReports(label string, pods []v1.Pod) error {
+	// Skip if no pod found for this label.
+	if len(pods) == 0 {
+		return nil
+	}
 
-		// Build the destination file spec.
-		// We build a filename based on the label (sanitized for clarity).
-		var destFileName string
-		switch label {
-		case "app=nvidia-driver-daemonset":
-			destFileName = "nvidia-bug-report-nvidiaDriverDaemonSetPod.log.gz"
-		case "app=nvidia-vgpu-manager-daemonset":
-			destFileName = "nvidia-bug-report-nvidiaVgpuManagerDaemonSetPod.log.gz"
-		default:
-			destFileName = "nvidia-bug-report-unknown.log.gz"
-		}
-		destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
-		destSpec, err := extractFileSpec(destPath)
-		if err != nil {
-			return err
-		}
+	// Use the first available pod.
+	pod := pods[0]
 
-		// Copy the bug report file from the pod to the destination.
-		if err = o.copyFromPod(srcSpec, destSpec); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error copying bug report from pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
-				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-			}
-			return err
+	// Build the destination file spec.
+	// We build a filename based on the label (sanitized for clarity).
+	var destFileName string
+	switch label {
+	case "app=nvidia-driver-daemonset":
+		destFileName = "nvidia-bug-report-nvidiaDriverDaemonSetPod.log.gz"
+	case "app=nvidia-vgpu-manager-daemonset":
+		destFileName = "nvidia-bug-report-nvidiaVgpuManagerDaemonSetPod.log.gz"
+	default:
+		destFileName = "nvidia-bug-report-unknown.log.gz"
+	}
+	destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
+
+	if err := g.fetchBugReport(&pod, destPath); err != nil {
+		if _, lerr := fmt.Fprintf(g.errLogFile, "Error collecting bug report from pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
+			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 		}
+		return err
 	}
 	return nil
 }
