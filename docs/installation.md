@@ -30,11 +30,15 @@ ARCH=amd64        # or arm64
 curl -fsSLO "https://github.com/NVIDIA/kubectl-nv/releases/download/v${VERSION}/kubectl-nv_${VERSION}_${OS}_${ARCH}.tar.gz"
 curl -fsSLO "https://github.com/NVIDIA/kubectl-nv/releases/download/v${VERSION}/kubectl-nv_${VERSION}_checksums.txt"
 
-shasum -a 256 -c kubectl-nv_${VERSION}_checksums.txt --ignore-missing
+# Linux
+sha256sum -c --ignore-missing kubectl-nv_${VERSION}_checksums.txt
+
+# macOS
+shasum -a 256 -c --ignore-missing kubectl-nv_${VERSION}_checksums.txt
 ```
 
-The line for your archive must read `OK`. On Linux, `sha256sum -c` takes the
-same arguments.
+The line for your archive must read `OK`. Without `--ignore-missing` the check
+fails on every archive you did not download.
 
 ### Put it on your PATH
 
@@ -81,6 +85,10 @@ Copy `bin/kubectl-nv` onto your `PATH` as above to use it through kubectl.
 ## Prerequisites
 
 - `kubectl`, and a kubeconfig for the cluster you want to inspect
+- The NVIDIA GPU Operator deployed in that cluster. `must-gather` locates the
+  operator by its `app=gpu-operator` pods and fails if it finds none
+- Permission to create `pods/exec` in the operator's namespace, because
+  `must-gather` runs `nvidia-bug-report.sh` inside the driver pods
 - Go, only for building from source. The version is the one in
   `deployments/devel/Dockerfile`
 

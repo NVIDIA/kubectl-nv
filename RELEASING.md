@@ -41,14 +41,23 @@ checksums file, is built exactly as it will be on a tag.
 
 ## 3. Tag
 
-Tags are signed:
+Tags are signed, and the tag has to reach the NVIDIA repository rather than
+your fork. In a clone made by forking, `origin` is the fork and the NVIDIA
+repository is usually `upstream`, so check first:
+
+```bash
+git remote -v
+```
+
+Push to whichever remote shows `github.com/NVIDIA/kubectl-nv`:
 
 ```bash
 git tag -s vX.Y.Z -m "vX.Y.Z"
-git push origin vX.Y.Z
+git push upstream vX.Y.Z
 ```
 
-The tag must match the version you put in `cmd/main.go`.
+The tag must match the version you put in `cmd/main.go`. The workflow only runs
+on `NVIDIA/kubectl-nv`, so a tag pushed to a fork builds nothing.
 
 ## 4. Review the draft
 
@@ -56,7 +65,7 @@ The workflow creates a draft release on
 <https://github.com/NVIDIA/kubectl-nv/releases>. Before publishing, check that:
 
 - the four archives are attached: linux and darwin, amd64 and arm64
-- the checksums file and the SBOM are attached
+- the checksums file is attached, and one SBOM per archive, so four
 - the generated changelog covers the commits since the previous tag
 - the tag name and the version reported by a downloaded binary agree
   (`kubectl-nv --version`)

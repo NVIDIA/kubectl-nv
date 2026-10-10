@@ -3,10 +3,11 @@
 `kubectl nv` is a kubectl plugin for the people who operate NVIDIA GPU
 clusters. It runs on your machine with the kubeconfig and the RBAC you already
 have, installs nothing in the cluster, and works on any distribution where the
-NVIDIA GPU Operator or the components it manages are deployed. It reports and
-never mutates: today it collects the diagnostic bundle that support asks for,
-so you do not have to run the troubleshooting commands and the must-gather
-script by hand.
+NVIDIA GPU Operator is deployed. It never changes Kubernetes objects: today it
+collects the diagnostic bundle that support asks for, so you do not have to run
+the troubleshooting commands and the must-gather script by hand. Collecting
+that bundle runs `nvidia-bug-report.sh` inside the driver pods, which needs
+permission to create `pods/exec`.
 
 ## Install
 

@@ -2,9 +2,12 @@
 
 ## Overview
 
-`kubectl-nv` is a kubectl plugin for managing and troubleshooting
-NVIDIA GPU resources in Kubernetes clusters. It provides admin
-commands for diagnostics, must-gather, and operator support.
+`kubectl-nv` is a kubectl plugin for troubleshooting NVIDIA GPU
+resources in Kubernetes clusters. It never changes Kubernetes objects.
+Today it provides one command, `kubectl nv adm must-gather`, which
+collects a diagnostic bundle from a cluster where the NVIDIA GPU
+Operator is deployed. Gathering it runs `nvidia-bug-report.sh` inside
+the driver pods, which needs permission to create `pods/exec`.
 
 ## Quick Start
 
