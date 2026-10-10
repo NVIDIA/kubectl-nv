@@ -13,7 +13,7 @@
 CONTAINER_RUN_CMD ?= docker run
 GO_CMD ?= go
 GO_FMT ?= gofmt
-GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*" -not -path "./dist/*")
 CONTAINER_RUN_CMD ?= docker run
 
 BINARY_NAME ?= kubectl-nv
@@ -25,7 +25,7 @@ build:
 	$(GO_CMD) build -o bin/$(BINARY_NAME) cmd/main.go
 
 fmt:
-	@$(GO_FMT) -w -l $$(find . -name '*.go')
+	@$(GO_FMT) -w -l $(GO_SRC)
 
 COVERAGE_FILE := coverage.out
 test:
@@ -34,7 +34,7 @@ coverage: test
 	go tool cover -func=$(COVERAGE_FILE)
 
 verify:
-	@out=`$(GO_FMT) -w -l -d $$(find . -name '*.go')`; \
+	@out=`$(GO_FMT) -l -d $(GO_SRC)`; \
 	if [ -n "$$out" ]; then \
 	    echo "$$out"; \
 	    exit 1; \
