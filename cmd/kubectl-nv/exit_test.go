@@ -144,3 +144,51 @@ func TestFlagErrorsAreUsageErrorsOnTheirOwn(t *testing.T) {
 		t.Errorf("exit code = %d, want %d\n%s", got, output.ExitUsage, out.String())
 	}
 }
+
+// TestDiagnosticsStayOffStdout keeps usage and errors on the error stream.
+// Stdout is the command's own output, and a user piping it into a parser
+// should not find a flag list in there. The prefix is checked too: wrapping
+// the same error twice produced "kubectl-nv: kubectl-nv:".
+func TestDiagnosticsStayOffStdout(t *testing.T) {
+	isolateKubeconfig(t)
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: stdout, ErrOut: stderr}
+
+	code := run([]string{"--bogus"}, streams, root.NewCommand("test", root.Deps{Streams: streams}))
+
+	if code != output.ExitUsage {
+		t.Errorf("exit code = %d, want %d", code, output.ExitUsage)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing on it", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "unknown flag") {
+		t.Errorf("stderr = %q, want the flag error", stderr.String())
+	}
+	if n := strings.Count(stderr.String(), "kubectl-nv:"); n != 1 {
+		t.Errorf("stderr names the command %d times, want once:\n%s", n, stderr.String())
+	}
+}
+
+// TestHelpGoesToStdout is the other half: help is what the user asked for, so
+// it is output rather than a diagnostic.
+func TestHelpGoesToStdout(t *testing.T) {
+	isolateKubeconfig(t)
+
+	for _, args := range [][]string{{"--help"}, {"help"}, {"adm", "must-gather", "--help"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			stdout := &bytes.Buffer{}
+			stderr := &bytes.Buffer{}
+			streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: stdout, ErrOut: stderr}
+
+			if code := run(args, streams, root.NewCommand("test", root.Deps{Streams: streams})); code != output.ExitOK {
+				t.Errorf("exit code = %d, want %d", code, output.ExitOK)
+			}
+			if !strings.Contains(stdout.String(), "Usage:") {
+				t.Errorf("stdout = %q, want the help text", stdout.String())
+			}
+		})
+	}
+}

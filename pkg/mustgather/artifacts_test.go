@@ -17,6 +17,7 @@
 package mustgather
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,13 +25,19 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/yaml"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // gpuNode is a node as the GPU operator leaves it: an extended resource whose
@@ -82,6 +89,7 @@ func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string
 	opts := &Options{ArtifactDir: dir}
 	g, err := NewGatherer(opts, stubFactory{
 		clientset: fake.NewSimpleClientset(objects...),
+		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
 		config:    offlineConfig(),
 	}, discardProgress{})
 	if err != nil {
@@ -157,5 +165,243 @@ func TestArtifactsAreNotWorldReadable(t *testing.T) {
 		if got := info.Mode().Perm(); got != 0o600 {
 			t.Errorf("%s mode = %04o, want 0600", name, got)
 		}
+	}
+}
+
+// TestEveryWriterIsKubernetesNative walks the collectors that write YAML and
+// reads each file back the way a user would. One writer left on a Go-struct
+// marshaller is enough to make a bundle that kubectl cannot read, and the only
+// way to catch it is to parse every file.
+func TestEveryWriterIsKubernetesNative(t *testing.T) {
+	cases := []struct {
+		name       string
+		file       string
+		wantKind   string
+		wantInKind string
+		collect    func(t *testing.T, g *Gatherer)
+		contains   []string
+	}{
+		{
+			name:       "gpu nodes",
+			file:       "gpu_nodes.yaml",
+			wantKind:   "NodeList",
+			wantInKind: "Node",
+			collect:    func(t *testing.T, g *Gatherer) { mustCollect(t, g.gatherGPUNodes()) },
+			contains:   []string{"nvidia.com/gpu: \"8\"", "apiVersion: v1"},
+		},
+		{
+			name:       "operand and operator pods",
+			file:       "gpu_operand_pods.yaml",
+			wantKind:   "PodList",
+			wantInKind: "Pod",
+			collect: func(t *testing.T, g *Gatherer) {
+				if _, err := g.gatherPodInfo("gpu-operator"); err != nil {
+					t.Fatalf("gatherPodInfo: %v", err)
+				}
+			},
+			contains: []string{"memory: 2Gi", "apiVersion: v1"},
+		},
+		{
+			name:       "daemonsets",
+			file:       "daemonsets.yaml",
+			wantKind:   "DaemonSetList",
+			wantInKind: "DaemonSet",
+			collect:    func(t *testing.T, g *Gatherer) { mustCollect(t, g.gatherDaemonSets("gpu-operator")) },
+			contains:   []string{"apiVersion: apps/v1", "maxUnavailable: 1"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g, dir := newTestGatherer(t, nativeYAMLCluster()...)
+			c.collect(t, g)
+
+			data, err := os.ReadFile(filepath.Join(dir, c.file))
+			if err != nil {
+				t.Fatalf("reading %s: %v", c.file, err)
+			}
+
+			var head struct {
+				APIVersion string `json:"apiVersion"`
+				Kind       string `json:"kind"`
+				Items      []struct {
+					APIVersion string `json:"apiVersion"`
+					Kind       string `json:"kind"`
+				} `json:"items"`
+			}
+			if err := yaml.Unmarshal(data, &head); err != nil {
+				t.Fatalf("%s does not parse: %v\n%s", c.file, err, data)
+			}
+			if head.APIVersion == "" || head.Kind != c.wantKind {
+				t.Errorf("%s apiVersion/kind = %q/%q, want a version and %s",
+					c.file, head.APIVersion, head.Kind, c.wantKind)
+			}
+			if len(head.Items) == 0 {
+				t.Fatalf("%s has no items:\n%s", c.file, data)
+			}
+			for i, item := range head.Items {
+				if item.APIVersion == "" || item.Kind != c.wantInKind {
+					t.Errorf("%s item %d apiVersion/kind = %q/%q, want a version and %s",
+						c.file, i, item.APIVersion, item.Kind, c.wantInKind)
+				}
+			}
+			for _, want := range c.contains {
+				if !strings.Contains(string(data), want) {
+					t.Errorf("%s does not contain %q:\n%s", c.file, want, data)
+				}
+			}
+		})
+	}
+}
+
+func mustCollect(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("collector failed: %v", err)
+	}
+}
+
+// nativeYAMLCluster is a cluster with something typed in every object the
+// writers under test touch: a quantity on the node, a resource request on the
+// pods, and an update strategy on the daemonset. A Go-struct marshaller
+// mangles all three in a different way.
+func nativeYAMLCluster() []runtime.Object {
+	operatorPod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gpu-operator-0",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{"app": "gpu-operator"},
+		},
+		Spec: v1.PodSpec{
+			NodeName: "gpu-node-1",
+			Containers: []v1.Container{{
+				Name: "gpu-operator",
+				Resources: v1.ResourceRequirements{
+					Requests: v1.ResourceList{v1.ResourceMemory: resource.MustParse("2Gi")},
+				},
+			}},
+		},
+		Status: v1.PodStatus{Phase: v1.PodRunning},
+	}
+
+	maxUnavailable := intstr.FromInt32(1)
+	driverSet := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvidia-driver-daemonset", Namespace: "gpu-operator"},
+		Spec: appsv1.DaemonSetSpec{
+			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
+				Type:          appsv1.RollingUpdateDaemonSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{MaxUnavailable: &maxUnavailable},
+			},
+		},
+	}
+
+	return []runtime.Object{gpuNode("gpu-node-1"), operatorPod, driverSet}
+}
+
+// TestProgressNeverReachesStdout pins the stream the running commentary goes
+// to. Stdout belongs to the command's own output, and a plugin that prints
+// progress there breaks the first pipeline someone writes around it. The real
+// os.Stdout is captured, not just the injected streams, so a writer that
+// reaches past them is caught too.
+func TestProgressNeverReachesStdout(t *testing.T) {
+	realStdout := os.Stdout
+	captured := filepath.Join(t.TempDir(), "stdout")
+	file, err := os.Create(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = file
+	t.Cleanup(func() { os.Stdout = realStdout; file.Close() })
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	logger := output.NewLogger(
+		genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: stdout, ErrOut: stderr},
+		output.LoggerOptions{})
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: fake.NewSimpleClientset(gpuNode("gpu-node-1")),
+		config:    offlineConfig(),
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	defer g.Close()
+
+	g.step("Gathering node information")
+
+	if err := file.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	onStdout, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(onStdout) != 0 || stdout.Len() != 0 {
+		t.Errorf("progress reached stdout: os.Stdout=%q streams.Out=%q", onStdout, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Gathering node information") {
+		t.Errorf("stderr = %q, want the step line", stderr.String())
+	}
+}
+
+// TestMarkerFilesAreNotWorldReadable covers the files that record what the
+// cluster does not have. They are written whole rather than opened, so they
+// take a different path to disk and can keep a looser mode than the rest.
+func TestMarkerFilesAreNotWorldReadable(t *testing.T) {
+	g, dir := newTestGatherer(t)
+
+	// No ClusterPolicy and no NvidiaDriver in the dynamic client, so both
+	// marker files are written.
+	if err := g.gatherGPUOperatorCRDs(); err != nil {
+		t.Fatalf("gatherGPUOperatorCRDs: %v", err)
+	}
+
+	for _, name := range []string{"cluster_policy.missing", "nvidia_driver.missing"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("expected %s to have been written: %v", name, err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s mode = %04o, want 0600", name, got)
+		}
+	}
+}
+
+// TestDebugNamesEveryArtifact is what --debug buys on a must-gather: the
+// bundle listed as it is built, so that a missing file can be told from an
+// empty one.
+func TestDebugNamesEveryArtifact(t *testing.T) {
+	for _, debug := range []bool{false, true} {
+		name := "quiet"
+		if debug {
+			name = "debug"
+		}
+		t.Run(name, func(t *testing.T) {
+			stderr := &bytes.Buffer{}
+			logger := output.NewLogger(
+				genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: &bytes.Buffer{}, ErrOut: stderr},
+				output.LoggerOptions{})
+
+			g, err := NewGatherer(&Options{ArtifactDir: filepath.Join(t.TempDir(), "artifacts"), Debug: debug},
+				stubFactory{
+					clientset: fake.NewSimpleClientset(gpuNode("gpu-node-1")),
+					config:    offlineConfig(),
+				}, logger)
+			if err != nil {
+				t.Fatalf("NewGatherer: %v", err)
+			}
+			defer g.Close()
+
+			if err := g.gatherNodeInfo(); err != nil {
+				t.Fatalf("gatherNodeInfo: %v", err)
+			}
+
+			named := strings.Contains(stderr.String(), "Wrote nodes.yaml")
+			if named != debug {
+				t.Errorf("artifact named on stderr = %v, want %v\n%s", named, debug, stderr.String())
+			}
+		})
 	}
 }

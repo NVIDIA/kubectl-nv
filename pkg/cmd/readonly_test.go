@@ -51,14 +51,27 @@ import (
 // reported.
 var writeVerbs = []string{"create", "update", "patch", "delete", "deletecollection"}
 
-// leafFixtures gives every leaf of the command tree the arguments that make it
-// run. A leaf with no entry fails the test rather than being skipped, so a
-// command added later cannot slip past the guard by needing an argument.
-var leafFixtures = map[string]func(t *testing.T) []string{
-	"adm must-gather": func(t *testing.T) []string {
-		return []string{"--artifacts-dir", t.TempDir()}
+// leafFixture is what a leaf needs to run under the guard, and what it is
+// expected to do.
+type leafFixture struct {
+	// args are the arguments that make this leaf run.
+	args func(t *testing.T) []string
+	// wantErr is the error Execute must return, matched on substring. Empty
+	// means the leaf has to succeed: a leaf that fails early reads as
+	// read-only while never having reached the code that would write.
+	wantErr string
+}
+
+// leafFixtures gives every leaf of the command tree its fixture. A leaf with
+// no entry fails the test rather than being skipped, so a command added later
+// cannot slip past the guard by needing an argument.
+var leafFixtures = map[string]leafFixture{
+	"adm must-gather": {
+		args: func(t *testing.T) []string { return []string{"--artifacts-dir", t.TempDir()} },
 	},
-	"version": func(*testing.T) []string { return nil },
+	"version": {
+		args: func(*testing.T) []string { return nil },
+	},
 }
 
 // readOptional lists the leaves that have no business talking to a cluster.
@@ -92,16 +105,25 @@ func TestEveryCommandIsReadOnly(t *testing.T) {
 
 			args := append([]string{}, path...)
 			args = append(args, "--kubeconfig", writeKubeconfig(t))
-			args = append(args, fixture(t)...)
+			args = append(args, fixture.args(t)...)
 			cmd.SetArgs(args)
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
 
-			// A command that reports a cluster problem is still read-only, so the
-			// returned error is not the subject here; the recorded calls are.
-			_ = cmd.Execute()
+			// The error is checked as well as the calls: a leaf that fails on its
+			// first line never reaches the code that would write, and would read
+			// as read-only for the wrong reason.
+			err := cmd.Execute()
+			switch {
+			case fixture.wantErr == "" && err != nil:
+				t.Errorf("%q returned %v, want it to run to the end", name, err)
+			case fixture.wantErr != "" && err == nil:
+				t.Errorf("%q returned nil, want an error containing %q", name, fixture.wantErr)
+			case fixture.wantErr != "" && !strings.Contains(err.Error(), fixture.wantErr):
+				t.Errorf("%q returned %v, want an error containing %q", name, err, fixture.wantErr)
+			}
 
 			for _, w := range rec.writes() {
 				t.Errorf("kubectl-nv issued %s: this tool must be read-only", w)
