@@ -1,4 +1,6 @@
 # Kubernetes-native YAML, as "kubectl get pods -n gpu-operator -o yaml" prints.
+# must-gather records the operator namespace and nothing else, so every pod
+# here is in gpu-operator.
 apiVersion: v1
 kind: List
 metadata:
@@ -16,6 +18,14 @@ items:
     nodeName: worker-capacity
   status:
     phase: Running
+    containerStatuses:
+    - name: gpu-operator
+      ready: true
+      restartCount: 0
+      started: true
+      state:
+        running:
+          startedAt: "2026-10-09T08:14:02Z"
 - apiVersion: v1
   kind: Pod
   metadata:
@@ -27,16 +37,13 @@ items:
   spec:
     nodeName: worker-broken-plugin
   status:
-    phase: CrashLoopBackOff
-- apiVersion: v1
-  kind: Pod
-  metadata:
-    name: unrelated-pod
-    namespace: default
-    resourceVersion: "2003"
-    labels:
-      app: unrelated
-  spec:
-    nodeName: plain-worker
-  status:
     phase: Running
+    containerStatuses:
+    - name: nvidia-device-plugin-ctr
+      ready: false
+      restartCount: 147
+      started: false
+      state:
+        waiting:
+          reason: CrashLoopBackOff
+          message: back-off 5m0s restarting failed container

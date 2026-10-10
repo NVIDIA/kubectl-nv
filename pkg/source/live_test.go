@@ -18,6 +18,7 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -26,13 +27,29 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
+
+// newDynamicFake returns a dynamic client that knows the ClusterPolicy list
+// kind, which the fake needs before it will serve that resource at all.
+func newDynamicFake(t *testing.T, objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
+	t.Helper()
+	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+		runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}: "ClusterPolicyList",
+		},
+		objects...,
+	)
+}
 
 // callCounter records how many times the fake client saw each verb/resource
 // pair. Reactors run on the caller's goroutine, but a mutex keeps the counter
@@ -269,10 +286,10 @@ func TestLiveNodesMembershipAndPagination(t *testing.T) {
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
 
-	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
-	got, err := live.Nodes(context.Background())
+	live := NewLive(cs, newDynamicFake(t))
+	got, _, err := live.ClassifyNodes(context.Background())
 	if err != nil {
-		t.Fatalf("Nodes() error = %v, want nil", err)
+		t.Fatalf("ClassifyNodes() error = %v, want nil", err)
 	}
 
 	if n := counter.get("list", "nodes"); n != 3 {
@@ -310,10 +327,10 @@ func TestLiveHintedNodes(t *testing.T) {
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
 
-	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
-	got, err := live.HintedNodes(context.Background())
+	live := NewLive(cs, newDynamicFake(t))
+	_, got, err := live.ClassifyNodes(context.Background())
 	if err != nil {
-		t.Fatalf("HintedNodes() error = %v, want nil", err)
+		t.Fatalf("ClassifyNodes() error = %v, want nil", err)
 	}
 
 	if n := counter.get("list", "nodes"); n != 3 {
@@ -336,15 +353,11 @@ func TestLiveNodesAndHintedAreDisjoint(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
-	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	live := NewLive(cs, newDynamicFake(t))
 
-	gpus, err := live.Nodes(context.Background())
+	gpus, hinted, err := live.ClassifyNodes(context.Background())
 	if err != nil {
-		t.Fatalf("Nodes() error = %v", err)
-	}
-	hinted, err := live.HintedNodes(context.Background())
-	if err != nil {
-		t.Fatalf("HintedNodes() error = %v", err)
+		t.Fatalf("ClassifyNodes() error = %v", err)
 	}
 
 	inGPU := map[string]bool{}
@@ -405,18 +418,13 @@ func TestLiveClassificationEdgeCases(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
 	cs.PrependReactor("list", "resourceslices", sliceReactor(slices, counter))
-	live := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()))
+	live := NewLive(cs, newDynamicFake(t))
 
-	gpus, err := live.Nodes(context.Background())
+	gpus, hinted, err := live.ClassifyNodes(context.Background())
 	if err != nil {
-		t.Fatalf("Nodes() error = %v", err)
+		t.Fatalf("ClassifyNodes() error = %v", err)
 	}
 	assertNames(t, "Nodes()", gpus, []string{"alpha-slice-only", "beta-both-rules", "zeta-capacity"})
-
-	hinted, err := live.HintedNodes(context.Background())
-	if err != nil {
-		t.Fatalf("HintedNodes() error = %v", err)
-	}
 	assertNames(t, "HintedNodes()", hinted, []string{"mid-label-only"})
 }
 
@@ -430,7 +438,7 @@ func TestLiveResourceSlicesFilterDriver(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	cs.PrependReactor("list", "resourceslices", sliceReactor(slices, counter))
 
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).ResourceSlices(context.Background())
+	got, err := NewLive(cs, newDynamicFake(t)).ResourceSlices(context.Background())
 	if err != nil {
 		t.Fatalf("ResourceSlices() error = %v, want nil", err)
 	}
@@ -480,7 +488,7 @@ func TestLivePodsPaginates(t *testing.T) {
 		return true, out, nil
 	})
 
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).
+	got, err := NewLive(cs, newDynamicFake(t)).
 		Pods(context.Background(), "gpu-operator", "app=gpu-operator")
 	if err != nil {
 		t.Fatalf("Pods() error = %v, want nil", err)
@@ -491,4 +499,226 @@ func TestLivePodsPaginates(t *testing.T) {
 	if n := counter.get("list", "pods"); n != 3 {
 		t.Errorf("list pods calls = %d, want 3", n)
 	}
+}
+
+// TestLiveNodesAndHintedWrapClassify keeps the two convenience methods honest:
+// they must return the halves ClassifyNodes computed, not a second opinion.
+func TestLiveNodesAndHintedWrapClassify(t *testing.T) {
+	f := buildFixture(40)
+	counter := newCallCounter()
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(f.nodes, counter))
+	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
+	live := NewLive(cs, newDynamicFake(t))
+
+	gpus, hinted, err := live.ClassifyNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyNodes() error = %v", err)
+	}
+	viaNodes, err := live.Nodes(context.Background())
+	if err != nil {
+		t.Fatalf("Nodes() error = %v", err)
+	}
+	viaHinted, err := live.HintedNodes(context.Background())
+	if err != nil {
+		t.Fatalf("HintedNodes() error = %v", err)
+	}
+	assertNames(t, "Nodes()", viaNodes, names(gpus))
+	assertNames(t, "HintedNodes()", viaHinted, names(hinted))
+}
+
+// TestLiveHintLabelValueMustBeTrue pins that the hint labels are read for
+// their value and not merely for their presence. node-feature-discovery writes
+// "true"; a node carrying "false" is a node that was checked and found not to
+// have the feature, which is the opposite of a hint.
+func TestLiveHintLabelValueMustBeTrue(t *testing.T) {
+	counter := newCallCounter()
+	nodes := []corev1.Node{
+		{ObjectMeta: metav1.ObjectMeta{Name: "hint-false",
+			Labels: map[string]string{"nvidia.com/gpu.present": "false"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "hint-empty",
+			Labels: map[string]string{"feature.node.kubernetes.io/pci-10de.present": ""}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "hint-one",
+			Labels: map[string]string{"nvidia.com/gpu.present": "1"}}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "hint-true",
+			Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
+	}
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
+	cs.PrependReactor("list", "resourceslices", sliceReactor(nil, counter))
+
+	gpus, hinted, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyNodes() error = %v", err)
+	}
+	assertNames(t, "Nodes()", gpus, nil)
+	assertNames(t, "HintedNodes()", hinted, []string{"hint-true"})
+}
+
+// TestLiveDeduplicatesByName covers a list that reports the same node twice,
+// which a paginated read can do when the collection changes under it.
+func TestLiveDeduplicatesByName(t *testing.T) {
+	counter := newCallCounter()
+	gpu := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "dup-gpu"},
+		Status: corev1.NodeStatus{Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("2")}}}
+	hint := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "dup-hint",
+		Labels: map[string]string{"nvidia.com/gpu.present": "true"}}}
+	nodes := []corev1.Node{gpu, hint, gpu, hint, gpu}
+
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
+	cs.PrependReactor("list", "resourceslices", sliceReactor(nil, counter))
+
+	gpus, hinted, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyNodes() error = %v", err)
+	}
+	assertNames(t, "Nodes()", gpus, []string{"dup-gpu"})
+	assertNames(t, "HintedNodes()", hinted, []string{"dup-hint"})
+}
+
+// TestLiveResourceSlicesNotFoundIsEmpty covers a cluster that does not serve
+// resource.k8s.io/v1 at all. That is not a denied read and not a broken
+// cluster, so it is an empty list and no error.
+func TestLiveResourceSlicesNotFoundIsEmpty(t *testing.T) {
+	counter := newCallCounter()
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+	cs.PrependReactor("list", "resourceslices", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("list", "resourceslices")
+		return true, nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceslices"}, "")
+	})
+	live := NewLive(cs, newDynamicFake(t))
+
+	slices, err := live.ResourceSlices(context.Background())
+	if err != nil {
+		t.Fatalf("ResourceSlices() error = %v, want nil on a cluster that does not serve the API", err)
+	}
+	if len(slices) != 0 {
+		t.Errorf("ResourceSlices() returned %d items, want 0", len(slices))
+	}
+
+	gpus, hinted, err := live.ClassifyNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyNodes() error = %v, want nil", err)
+	}
+	assertNames(t, "Nodes()", gpus, []string{"gpu-1"})
+	assertNames(t, "HintedNodes()", hinted, []string{"hinted-1"})
+}
+
+// clusterPolicy builds an unstructured ClusterPolicy at the GVK the GPU
+// operator serves.
+func clusterPolicy(name string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1",
+		"kind":       "ClusterPolicy",
+		"metadata":   map[string]any{"name": name},
+		"spec":       map[string]any{"driver": map[string]any{"enabled": true}},
+	}}
+}
+
+// TestLiveClusterPoliciesPaginates pins both the resource the dynamic client
+// is pointed at and the fact that the read is paginated. The fake only serves
+// the GVR it was told about, so a typo in the group, version or resource
+// yields nothing at all.
+func TestLiveClusterPoliciesPaginates(t *testing.T) {
+	counter := newCallCounter()
+	var items []unstructured.Unstructured
+	for i := 0; i < 1200; i++ {
+		items = append(items, *clusterPolicy(fmt.Sprintf("policy-%04d", i)))
+	}
+
+	dyn := newDynamicFake(t)
+	dyn.PrependReactor("list", "clusterpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("list", action.GetResource().String())
+		list := action.(k8stesting.ListActionImpl)
+		start := 0
+		if tok := list.ListOptions.Continue; tok != "" {
+			start, _ = strconv.Atoi(tok)
+		}
+		end := len(items)
+		if lim := int(list.ListOptions.Limit); lim > 0 && start+lim < end {
+			end = start + lim
+		}
+		out := &unstructured.UnstructuredList{
+			Object: map[string]any{"apiVersion": "nvidia.com/v1", "kind": "ClusterPolicyList"},
+			Items:  append([]unstructured.Unstructured(nil), items[start:end]...),
+		}
+		if end < len(items) {
+			out.SetContinue(strconv.Itoa(end))
+		}
+		return true, out, nil
+	})
+
+	got, err := NewLive(fake.NewSimpleClientset(), dyn).ClusterPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("ClusterPolicies() error = %v, want nil", err)
+	}
+	if len(got) != 1200 {
+		t.Errorf("ClusterPolicies() returned %d objects, want 1200", len(got))
+	}
+	const wantGVR = "nvidia.com/v1, Resource=clusterpolicies"
+	if n := counter.get("list", wantGVR); n != 3 {
+		t.Errorf("list %s calls = %d, want 3; the read must be paginated at the right GVR", wantGVR, n)
+	}
+	if len(got) > 0 && got[0].GetName() != "policy-0000" {
+		t.Errorf("first policy = %q, want policy-0000", got[0].GetName())
+	}
+}
+
+// TestLiveClusterPoliciesNotFoundIsNotInstalled covers a cluster without the
+// GPU operator: the CRD is absent, so the resource does not exist. That is not
+// a partial read, and it is not a crash either; the caller decides what to do.
+func TestLiveClusterPoliciesNotFoundIsNotInstalled(t *testing.T) {
+	dyn := newDynamicFake(t)
+	dyn.PrependReactor("list", "clusterpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: "nvidia.com", Resource: "clusterpolicies"}, "")
+	})
+
+	got, err := NewLive(fake.NewSimpleClientset(), dyn).ClusterPolicies(context.Background())
+	if len(got) != 0 {
+		t.Errorf("ClusterPolicies() returned %d objects, want 0", len(got))
+	}
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("error = %v, want it to match ErrNotInstalled", err)
+	}
+	var pe *PartialError
+	if errors.As(err, &pe) {
+		t.Errorf("error = %v, want a plain error: an absent CRD is not a partial read", err)
+	}
+}
+
+// TestLiveFullListFallbackOnExpired covers a collection that changes under a
+// paginated read. The server drops the continue token with a 410, and the
+// pager starts again without one rather than returning half a cluster.
+func TestLiveFullListFallbackOnExpired(t *testing.T) {
+	f := buildFixture(1200)
+	counter := newCallCounter()
+
+	var expired bool
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("list", "nodes")
+		list := action.(k8stesting.ListActionImpl)
+		// The second page, the first one asked for with a continue token,
+		// fails once with the error a dropped watch cache produces.
+		if list.ListOptions.Continue != "" && !expired {
+			expired = true
+			counter.record("expired", "nodes")
+			return true, nil, apierrors.NewResourceExpired("continue token expired")
+		}
+		return pagingNodeReactor(f.nodes, newCallCounter())(action)
+	})
+	cs.PrependReactor("list", "resourceslices", sliceReactor(f.slices, counter))
+
+	got, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+	if err != nil {
+		t.Fatalf("ClassifyNodes() error = %v, want nil: an expired token must fall back to a full list", err)
+	}
+	if n := counter.get("expired", "nodes"); n != 1 {
+		t.Fatalf("the expired page was served %d times, want 1; the test did not exercise the fallback", n)
+	}
+	assertNames(t, "Nodes()", got, f.wantGPUs)
 }

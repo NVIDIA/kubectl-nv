@@ -1,0 +1,21 @@
+# The retired format: kubectl-nv v0.1.x marshalled a corev1.PodList with
+# gopkg.in/yaml.v2, which ignores the json tags and lowercases the Go field
+# names. This file carries no quantity anywhere, so a native decoder reads it
+# without complaining and produces one nameless pod. Only the key names give
+# it away, which is what the legacy check looks at.
+typemeta:
+  kind: ""
+  apiversion: ""
+listmeta:
+  selflink: ""
+  resourceversion: ""
+items:
+- objectmeta:
+    name: gpu-operator-5d9f8-abcde
+    namespace: gpu-operator
+    labels:
+      app: gpu-operator
+  spec:
+    nodename: worker-capacity
+  status:
+    phase: Running

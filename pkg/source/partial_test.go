@@ -19,141 +19,224 @@ package source
 import (
 	"context"
 	"errors"
+	"net"
+	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
 
-// TestNodesForbiddenResourceSlicesIsPartial covers the RBAC case the exit-code
-// contract depends on: a reader denied resourceslices still gets the nodes the
-// capacity rule found, and the error says which resource was lost. The answer
-// is incomplete rather than wrong, because a slice-only GPU node is invisible
-// without that list.
-func TestNodesForbiddenResourceSlicesIsPartial(t *testing.T) {
-	counter := newCallCounter()
-	nodes := []corev1.Node{
+// twoNodes is one GPU node by capacity and one hinted node, enough to show
+// that a failed secondary read still leaves a usable answer.
+func twoNodes() []corev1.Node {
+	return []corev1.Node{
 		{ObjectMeta: metav1.ObjectMeta{Name: "gpu-1"},
 			Status: corev1.NodeStatus{Capacity: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("8")}}},
 		{ObjectMeta: metav1.ObjectMeta{Name: "hinted-1", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "plain-1"}},
 	}
+}
 
+func failingSliceReactor(c *callCounter, err error) k8stesting.ReactionFunc {
+	return func(action k8stesting.Action) (bool, runtime.Object, error) {
+		c.record("list", "resourceslices")
+		return true, nil, err
+	}
+}
+
+func forbidden(resourceName string) error {
+	return apierrors.NewForbidden(
+		schema.GroupResource{Group: "resource.k8s.io", Resource: resourceName},
+		"", errors.New("not allowed"))
+}
+
+// TestForbiddenSecondaryResourceIsPartial covers the RBAC case the exit-code
+// contract depends on: a reader denied resourceslices still gets the nodes the
+// capacity rule found, the error names the one resource that was lost, and it
+// maps to the partial exit code rather than the error one.
+func TestForbiddenSecondaryResourceIsPartial(t *testing.T) {
+	counter := newCallCounter()
 	cs := fake.NewSimpleClientset()
-	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
-	cs.PrependReactor("list", "resourceslices", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		counter.record("list", "resourceslices")
-		return true, nil, apierrors.NewForbidden(
-			schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceslices"},
-			"", errors.New("not allowed"))
-	})
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+	cs.PrependReactor("list", "resourceslices", failingSliceReactor(counter, forbidden("resourceslices")))
 
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).Nodes(context.Background())
+	gpus, hinted, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
 
-	gotNames := names(got)
-	if len(gotNames) != 1 || gotNames[0] != "gpu-1" {
-		t.Fatalf("nodes = %v, want [gpu-1]", gotNames)
-	}
+	assertNames(t, "ClassifyNodes() gpus", gpus, []string{"gpu-1"})
+	assertNames(t, "ClassifyNodes() hinted", hinted, []string{"hinted-1"})
 
 	var pe *PartialError
 	if !errors.As(err, &pe) {
 		t.Fatalf("error = %v (%T), want *PartialError", err, err)
 	}
-	if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
-		t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
+	if pe.Resource != "resourceslices" {
+		t.Errorf("PartialError.Resource = %q, want resourceslices", pe.Resource)
 	}
 	if !apierrors.IsForbidden(errors.Unwrap(pe)) {
 		t.Errorf("unwrapped error = %v, want a Forbidden API error", errors.Unwrap(pe))
 	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(err) = %d, want %d (ExitPartial)", got, output.ExitPartial)
+	}
 }
 
-// TestHintedNodesForbiddenResourceSlicesIsPartial pins the same contract on
-// the other half of the classification. Without the slice list a hinted node
-// may really be a GPU node, so the caller has to be told.
-func TestHintedNodesForbiddenResourceSlicesIsPartial(t *testing.T) {
+func TestLiveResourceSlicesForbiddenIsPartial(t *testing.T) {
 	counter := newCallCounter()
-	nodes := []corev1.Node{
-		{ObjectMeta: metav1.ObjectMeta{Name: "hinted-1", Labels: map[string]string{"nvidia.com/gpu.present": "true"}}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "plain-1"}},
-	}
-
 	cs := fake.NewSimpleClientset()
-	cs.PrependReactor("list", "nodes", pagingNodeReactor(nodes, counter))
-	cs.PrependReactor("list", "resourceslices", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		counter.record("list", "resourceslices")
-		return true, nil, apierrors.NewForbidden(
-			schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceslices"},
-			"", errors.New("not allowed"))
-	})
+	cs.PrependReactor("list", "resourceslices", failingSliceReactor(counter, forbidden("resourceslices")))
 
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).HintedNodes(context.Background())
-
-	gotNames := names(got)
-	if len(gotNames) != 1 || gotNames[0] != "hinted-1" {
-		t.Fatalf("hinted nodes = %v, want [hinted-1]", gotNames)
+	got, err := NewLive(cs, newDynamicFake(t)).ResourceSlices(context.Background())
+	if len(got) != 0 {
+		t.Errorf("ResourceSlices() returned %d items, want 0", len(got))
 	}
 	var pe *PartialError
 	if !errors.As(err, &pe) {
 		t.Fatalf("error = %v (%T), want *PartialError", err, err)
 	}
-	if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
-		t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
+	if pe.Resource != "resourceslices" {
+		t.Errorf("PartialError.Resource = %q, want resourceslices", pe.Resource)
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(err) = %d, want %d", got, output.ExitPartial)
 	}
 }
 
-func TestPartialErrorMessage(t *testing.T) {
-	pe := &PartialError{Resources: []string{"resourceslices"}, Err: errors.New("boom")}
+// TestPlainErrorsExitError walks the failures that are not partial. None of
+// them leaves a usable answer, so each has to reach ExitError: reporting a
+// clean or partial run off a cluster that was never reached would be a lie.
+func TestPlainErrorsExitError(t *testing.T) {
+	connRefused := &net.OpError{
+		Op: "dial", Net: "tcp",
+		Addr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 6443},
+		Err:  syscall.ECONNREFUSED,
+	}
+	unauthorized := apierrors.NewUnauthorized("bad token")
+
+	cases := []struct {
+		name string
+		call func(t *testing.T) error
+	}{
+		{"node list refused", func(t *testing.T) error {
+			counter := newCallCounter()
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				counter.record("list", "nodes")
+				return true, nil, connRefused
+			})
+			_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+			return err
+		}},
+		{"node list forbidden", func(t *testing.T) error {
+			counter := newCallCounter()
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				counter.record("list", "nodes")
+				return true, nil, forbidden("nodes")
+			})
+			_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+			return err
+		}},
+		{"context canceled", func(t *testing.T) error {
+			counter := newCallCounter()
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(ctx)
+			return err
+		}},
+		{"slices unauthorized", func(t *testing.T) error {
+			counter := newCallCounter()
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+			cs.PrependReactor("list", "resourceslices", failingSliceReactor(counter, unauthorized))
+			_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+			return err
+		}},
+		{"slices refused", func(t *testing.T) error {
+			counter := newCallCounter()
+			cs := fake.NewSimpleClientset()
+			cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+			cs.PrependReactor("list", "resourceslices", failingSliceReactor(counter, connRefused))
+			_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(context.Background())
+			return err
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call(t)
+			if err == nil {
+				t.Fatal("error = nil, want a failure")
+			}
+			var pe *PartialError
+			if errors.As(err, &pe) {
+				t.Fatalf("error = %v, want a plain error, not *PartialError", err)
+			}
+			if got := output.ExitCodeFor(err); got != output.ExitError {
+				t.Errorf("output.ExitCodeFor(%v) = %d, want %d (ExitError)", err, got, output.ExitError)
+			}
+		})
+	}
+}
+
+func TestContextCanceledReachesTheCaller(t *testing.T) {
+	counter := newCallCounter()
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "nodes", pagingNodeReactor(twoNodes(), counter))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, _, err := NewLive(cs, newDynamicFake(t)).ClassifyNodes(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want it to wrap context.Canceled", err)
+	}
+	if n := counter.get("list", "nodes"); n != 0 {
+		t.Errorf("list nodes calls = %d, want 0: a dead context must not start a list", n)
+	}
+}
+
+func TestPartialErrorMessageAndCode(t *testing.T) {
+	pe := &PartialError{Resource: "resourceslices", Err: errors.New("boom")}
 	const want = `could not read resourceslices: boom`
 	if got := pe.Error(); got != want {
 		t.Errorf("Error() = %q, want %q", got, want)
 	}
-
-	multi := &PartialError{Resources: []string{"resourceslices", "clusterpolicies"}, Err: errors.New("boom")}
-	const wantMulti = `could not read resourceslices, clusterpolicies: boom`
-	if got := multi.Error(); got != wantMulti {
-		t.Errorf("Error() = %q, want %q", got, wantMulti)
+	if got := pe.ExitCode(); got != 3 {
+		t.Errorf("ExitCode() = %d, want 3", got)
+	}
+	if got := output.ExitCodeFor(pe); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(pe) = %d, want %d", got, output.ExitPartial)
 	}
 }
 
-// TestNodesListFailureIsFatal pins the other half of the contract: when the
-// node list itself cannot be read there is nothing to report, so the result
-// is empty and the error names nodes.
-func TestNodesListFailureIsFatal(t *testing.T) {
-	counter := newCallCounter()
-	cs := fake.NewSimpleClientset()
-	cs.PrependReactor("list", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		counter.record("list", "nodes")
-		return true, nil, apierrors.NewForbidden(
-			schema.GroupResource{Resource: "nodes"}, "", errors.New("not allowed"))
-	})
-
-	got, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).Nodes(context.Background())
-	if err == nil {
-		t.Fatal("Nodes() error = nil, want an error when nodes cannot be listed")
-	}
-	if len(got) != 0 {
-		t.Errorf("nodes = %v, want none", names(got))
+// TestJoinedPartialErrors is how more than one lost resource is reported: one
+// PartialError each, joined. Both names survive and the exit code is still
+// partial, because joining does not make the run less complete than its worst
+// part.
+func TestJoinedPartialErrors(t *testing.T) {
+	joined := errors.Join(
+		&PartialError{Resource: "resourceslices", Err: errors.New("forbidden")},
+		&PartialError{Resource: "clusterpolicies", Err: errors.New("forbidden")},
+	)
+	msg := joined.Error()
+	for _, want := range []string{"resourceslices", "clusterpolicies"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("joined error %q does not name %q", msg, want)
+		}
 	}
 	var pe *PartialError
-	if !errors.As(err, &pe) {
-		t.Fatalf("error = %v, want *PartialError", err)
+	if !errors.As(joined, &pe) {
+		t.Fatal("errors.As did not reach a *PartialError through errors.Join")
 	}
-	if len(pe.Resources) != 1 || pe.Resources[0] != "nodes" {
-		t.Errorf("PartialError.Resources = %v, want [nodes]", pe.Resources)
-	}
-
-	hinted, err := NewLive(cs, dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())).HintedNodes(context.Background())
-	if err == nil {
-		t.Fatal("HintedNodes() error = nil, want an error when nodes cannot be listed")
-	}
-	if len(hinted) != 0 {
-		t.Errorf("hinted nodes = %v, want none", names(hinted))
+	if got := output.ExitCodeFor(joined); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(joined) = %d, want %d", got, output.ExitPartial)
 	}
 }
