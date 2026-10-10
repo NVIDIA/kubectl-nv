@@ -61,17 +61,39 @@ func (g *Gatherer) gatherResourceSlices() error {
 
 	slices, err := listAllPaginated[resourcev1.ResourceSliceList](500, "", listFunc, appendFunc)
 	if err != nil {
-		if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+		switch {
+		case apierrors.IsNotFound(err):
+			// A cluster that does not serve the API has no slices, which is a
+			// fact about the cluster worth recording. The empty list written
+			// below reads the same as a live cluster without DRA, where leaving
+			// the file out would read as "not collected" instead.
+			if _, lerr := fmt.Fprintf(g.errLogFile,
+				"No resourceslices: the resource.k8s.io API is not served (%v)\n", err); lerr != nil {
+				return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+			}
+			slices = resourcev1.ResourceSliceList{}
+
+		case apierrors.IsForbidden(err):
+			// The slices are there and we were not allowed to see them, which is
+			// a gap rather than an answer, so there is no file to write.
 			if _, lerr := fmt.Fprintf(g.errLogFile,
 				"Skipping resourceslices: %v\n", err); lerr != nil {
 				return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 			}
 			return nil
+
+		default:
+			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting resourceslices: %v\n", err); lerr != nil {
+				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+			}
+			return err
 		}
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting resourceslices: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return err
+	}
+
+	// An empty list has to marshal as an empty array rather than null, so that
+	// a reader can range over .items without checking it first.
+	if slices.Items == nil {
+		slices.Items = []resourcev1.ResourceSlice{}
 	}
 
 	slices.APIVersion, slices.Kind = resourcev1.SchemeGroupVersion.String(), "ResourceSliceList"
