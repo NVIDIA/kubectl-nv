@@ -8,13 +8,19 @@ commands for diagnostics, must-gather, and operator support.
 
 ## Quick Start
 
+Install a released binary from the
+[GitHub release page](https://github.com/NVIDIA/kubectl-nv/releases), or build
+from source:
+
 ```bash
-# Install (from source)
 git clone https://github.com/NVIDIA/kubectl-nv.git
 cd kubectl-nv
 make build
 ./bin/kubectl-nv --help
 ```
+
+Either way, see [Installation](installation.md) for verifying the download and
+putting `kubectl-nv` on your `PATH` so that `kubectl nv` resolves.
 
 ## Architecture
 
