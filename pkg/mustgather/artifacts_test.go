@@ -76,7 +76,9 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 // a temporary artifact directory.
 func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string) {
 	t.Helper()
-	dir := t.TempDir()
+	// A path the gatherer has to create itself: a directory t.TempDir already
+	// made would carry its mode, not the one under test.
+	dir := filepath.Join(t.TempDir(), "artifacts")
 	opts := &Options{ArtifactDir: dir}
 	g, err := NewGatherer(opts, stubFactory{
 		clientset: fake.NewSimpleClientset(objects...),
