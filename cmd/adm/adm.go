@@ -17,8 +17,8 @@
 package adm
 
 import (
-	"github.com/NVIDIA/kubectl-nv/cmd/adm/mustgather"
 	"github.com/NVIDIA/kubectl-nv/internal/logger"
+	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 
 	cli "github.com/urfave/cli/v2"
 )
