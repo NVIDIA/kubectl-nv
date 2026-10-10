@@ -42,7 +42,6 @@ import (
 // Options defines the configurable parameters for the must-gather operation.
 type Options struct {
 	ArtifactDir string // Directory to store gathered artifacts/logs.
-	Kubeconfig  string // Path to the Kubernetes configuration file.
 	Debug       bool   // Report every gathering step as it happens.
 
 	// FetchPodFile replaces the live exec-and-copy that pulls a bug report out

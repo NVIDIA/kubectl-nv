@@ -24,65 +24,8 @@ import (
 
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
-
-func TestResolveKubeconfigPath(t *testing.T) {
-	existing := filepath.Join(t.TempDir(), "kubeconfig")
-	if err := os.WriteFile(existing, []byte("apiVersion: v1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// A home directory of our own, so that the developer's own kubeconfig
-	// cannot decide whether this test passes.
-	home := t.TempDir()
-	homeConfig := filepath.Join(home, ".kube", "config")
-
-	cases := []struct {
-		name      string
-		explicit  string
-		env       string
-		writeHome bool
-		want      string
-		wantErr   bool
-	}{
-		{name: "explicit path that exists", explicit: existing, want: existing},
-		{name: "explicit path wins over the environment", explicit: existing, env: "/nowhere/config", want: existing},
-		{name: "environment when nothing is given", env: existing, want: existing},
-		{name: "environment when the explicit path is missing", explicit: "/nowhere/config", env: existing, want: existing},
-		{name: "home directory fallback", writeHome: true, want: homeConfig},
-		{name: "nothing to fall back on", wantErr: true},
-	}
-
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			t.Setenv("HOME", home)
-			t.Setenv("KUBECONFIG", c.env)
-			if c.writeHome {
-				if err := os.MkdirAll(filepath.Dir(homeConfig), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(homeConfig, []byte("apiVersion: v1\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { os.Remove(homeConfig) })
-			}
-
-			got, err := ResolveKubeconfigPath(c.explicit)
-			if (err != nil) != c.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
-			}
-			if c.wantErr {
-				if !strings.Contains(err.Error(), homeConfig) {
-					t.Errorf("error = %q, want it to name %q", err.Error(), homeConfig)
-				}
-				return
-			}
-			if got != c.want {
-				t.Errorf("got %q, want %q", got, c.want)
-			}
-		})
-	}
-}
 
 func TestSetKubernetesDefaults(t *testing.T) {
 	cfg := &rest.Config{}
@@ -163,3 +106,45 @@ users:
 - name: test
   user: {}
 `
+
+// TestKubeconfigDisplay checks the string the gather reports against the files
+// the client configuration would actually read. It is a report, not a second
+// resolver: an explicit path is named even when it does not exist, because
+// that is the path the clients will fail on.
+func TestKubeconfigDisplay(t *testing.T) {
+	home := t.TempDir()
+	onDisk := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(onDisk, []byte(testKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := "/nonexistent/config"
+
+	cases := []struct {
+		name     string
+		explicit string
+		env      string
+		want     string
+	}{
+		{name: "explicit path", explicit: onDisk, want: onDisk},
+		{name: "explicit path that does not exist", explicit: missing, env: onDisk, want: missing},
+		{name: "environment", env: onDisk, want: onDisk},
+		// client-go fixes the home path at package load, so the default is its
+		// own constant rather than anything HOME says now.
+		{name: "default location", want: clientcmd.RecommendedHomeFile},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("HOME", home)
+			t.Setenv("KUBECONFIG", c.env)
+
+			flags := genericclioptions.NewConfigFlags(false)
+			flags.KubeConfig = &c.explicit
+			o := &Options{ConfigFlags: flags}
+
+			if got := o.KubeconfigDisplay(); got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}

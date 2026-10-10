@@ -39,6 +39,9 @@ func NewCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command {
 	adm := &cobra.Command{
 		Use:   "adm",
 		Short: "Perform admin level operations on cluster NV resources",
+		// Without this a mistyped subcommand prints the help and exits 0, so a
+		// script that gathered nothing reports that it did.
+		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			return c.Help()
 		},
@@ -57,18 +60,13 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 		Short: "collects the information from your cluster that is most likely needed for debugging issues",
 		Args:  cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
-			kubeconfig, err := o.Kubeconfig()
-			if err != nil {
-				return fmt.Errorf("error getting kubeconfig path: %w", err)
-			}
-			opts.Kubeconfig = kubeconfig
 			opts.Debug = o.Debug
 			if opts.ArtifactDir == "" {
 				opts.ArtifactDir = defaultArtifactDir(time.Now())
 			}
 
 			out := o.Streams.ErrOut
-			fmt.Fprintf(out, "Using kubeconfig: %s\n", opts.Kubeconfig)
+			fmt.Fprintf(out, "Using kubeconfig: %s\n", o.KubeconfigDisplay())
 			fmt.Fprintf(out, "Collecting cluster information into %s\n", opts.ArtifactDir)
 
 			if err := run(opts); err != nil {

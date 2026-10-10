@@ -52,16 +52,30 @@ type Deps struct {
 // reports; the release stamps it through ldflags.
 func NewCommand(version string, d Deps) *cobra.Command {
 	configFlags := genericclioptions.NewConfigFlags(true)
-	o := &cmd.Options{
-		ConfigFlags: configFlags,
-		Streams:     d.Streams,
-		Factory:     d.Factory,
+	o := d.Options
+	if o == nil {
+		o = &cmd.Options{}
 	}
+	o.ConfigFlags = configFlags
+	o.Streams = d.Streams
+	o.Factory = d.Factory
+	if o.Factory == nil {
+		// Built here rather than in the pre-run hook, so that no subcommand can
+		// leave it nil whatever it does with hooks of its own. The factory reads
+		// nothing until a client is asked for.
+		o.Factory = cmd.NewFactory(configFlags)
+	}
+
+	// Cobra runs only the closest PersistentPreRunE in a chain by default, so a
+	// subcommand with one of its own would silently skip the debug resolution
+	// below.
+	cobra.EnableTraverseRunHooks = true
 
 	root := &cobra.Command{
 		Use:           "kubectl-nv",
 		Short:         "A kubectl plugin for NVIDIA powered Kubernetes clusters",
 		Version:       version,
+		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
 			// The flags parsed, so whatever fails from here on is not a usage
@@ -73,9 +87,6 @@ func NewCommand(version string, d Deps) *cobra.Command {
 				return err
 			}
 			o.Debug = debug
-			if o.Factory == nil {
-				o.Factory = cmd.NewFactory(configFlags)
-			}
 			return nil
 		},
 		// Without a subcommand there is nothing to do but show what is on offer.

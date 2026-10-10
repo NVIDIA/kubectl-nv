@@ -22,7 +22,7 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/spf13/pflag"
@@ -56,42 +56,20 @@ type Options struct {
 	Debug bool
 }
 
-// Kubeconfig returns the path of the kubeconfig the command should report it is
-// using, resolved from --kubeconfig, then KUBECONFIG, then the default
-// location.
-func (o *Options) Kubeconfig() (string, error) {
-	explicit := ""
-	if o.ConfigFlags != nil && o.ConfigFlags.KubeConfig != nil {
-		explicit = *o.ConfigFlags.KubeConfig
+// KubeconfigDisplay names the kubeconfig the clients will be built from, for
+// reporting it to the user. It asks the client configuration rather than
+// resolving a path of its own: a second resolver can disagree with the one
+// that actually loads the file, and then the gather names a cluster it never
+// looked at.
+func (o *Options) KubeconfigDisplay() string {
+	if o.ConfigFlags == nil {
+		return ""
 	}
-	return ResolveKubeconfigPath(explicit)
-}
-
-// ResolveKubeconfigPath finds the kubeconfig to report, preferring an explicit
-// path, then KUBECONFIG, then ~/.kube/config. It mirrors the order the
-// client-go loading rules use, so the path printed to the user is the one the
-// clients actually loaded.
-func ResolveKubeconfigPath(explicit string) (string, error) {
-	if explicit != "" {
-		if _, err := os.Stat(explicit); err == nil {
-			return explicit, nil
-		}
-	}
-
-	if env := os.Getenv("KUBECONFIG"); env != "" {
-		return env, nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("locating the home directory: %w", err)
-	}
-	fallback := filepath.Join(home, ".kube", "config")
-	if _, err := os.Stat(fallback); err == nil {
-		return fallback, nil
-	}
-
-	return "", fmt.Errorf("kubeconfig file not found at %s", fallback)
+	// The loading precedence is a single entry when --kubeconfig named one, and
+	// the KUBECONFIG list or the default path otherwise, which is exactly what
+	// there is to report.
+	access := o.ConfigFlags.ToRawKubeConfigLoader().ConfigAccess()
+	return strings.Join(access.GetLoadingPrecedence(), string(os.PathListSeparator))
 }
 
 // AddConfigFlags registers the kubectl configuration flags on flags, giving
