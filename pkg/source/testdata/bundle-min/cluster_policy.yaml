@@ -1,0 +1,13 @@
+# gatherCRs marshals the unstructured ClusterPolicy object map with
+# gopkg.in/yaml.v2, so this file carries the real API field names.
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  driver:
+    enabled: true
+  devicePlugin:
+    enabled: true
+status:
+  state: ready

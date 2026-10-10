@@ -1,0 +1,102 @@
+# Written by hand in the shape "kubectl nv adm must-gather" produces today:
+# gatherNodeInfo marshals a corev1.NodeList with gopkg.in/yaml.v2, which
+# ignores json tags and lowercases the Go field names.
+typemeta:
+  kind: ""
+  apiversion: ""
+listmeta:
+  selflink: ""
+  resourceversion: ""
+  continue: ""
+items:
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: gpu-label-pci
+    namespace: ""
+    uid: ""
+    resourceversion: "1001"
+    creationtimestamp: null
+    labels:
+      kubernetes.io/os: linux
+      feature.node.kubernetes.io/pci-10de.present: "true"
+  spec:
+    podcidr: ""
+    providerid: ""
+    unschedulable: false
+  status:
+    capacity:
+      cpu:
+        format: DecimalSI
+    allocatable: {}
+    phase: ""
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: gpu-label-present
+    namespace: ""
+    uid: ""
+    resourceversion: "1002"
+    creationtimestamp: null
+    labels:
+      kubernetes.io/os: linux
+      nvidia.com/gpu.present: "true"
+  spec:
+    podcidr: ""
+    providerid: ""
+    unschedulable: false
+  status:
+    capacity:
+      cpu:
+        format: DecimalSI
+    allocatable: {}
+    phase: ""
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: gpu-capacity-only
+    namespace: ""
+    uid: ""
+    resourceversion: "1003"
+    creationtimestamp: null
+    labels:
+      kubernetes.io/os: linux
+  spec:
+    podcidr: ""
+    providerid: ""
+    unschedulable: false
+  status:
+    # This is how must-gather records "nvidia.com/gpu: 8": yaml.v2 cannot see
+    # the unexported fields of resource.Quantity, so only the format survives
+    # and the amount is gone. The capacity rule therefore cannot fire offline.
+    capacity:
+      cpu:
+        format: DecimalSI
+      nvidia.com/gpu:
+        format: DecimalSI
+    allocatable: {}
+    phase: ""
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: plain-worker
+    namespace: ""
+    uid: ""
+    resourceversion: "1004"
+    creationtimestamp: null
+    labels:
+      kubernetes.io/os: linux
+  spec:
+    podcidr: ""
+    providerid: ""
+    unschedulable: false
+  status:
+    capacity:
+      cpu:
+        format: DecimalSI
+    allocatable: {}
+    phase: ""

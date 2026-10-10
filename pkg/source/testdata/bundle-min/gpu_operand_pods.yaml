@@ -1,0 +1,55 @@
+# gatherPodInfo marshals a corev1.PodList with gopkg.in/yaml.v2 into
+# gpu_operand_pods.yaml.
+typemeta:
+  kind: ""
+  apiversion: ""
+listmeta:
+  selflink: ""
+  resourceversion: ""
+  continue: ""
+items:
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: gpu-operator-5d9f8-abcde
+    namespace: gpu-operator
+    uid: ""
+    resourceversion: "2001"
+    creationtimestamp: null
+    labels:
+      app: gpu-operator
+  spec:
+    nodename: gpu-label-pci
+  status:
+    phase: Running
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: nvidia-device-plugin-daemonset-xyz12
+    namespace: gpu-operator
+    uid: ""
+    resourceversion: "2002"
+    creationtimestamp: null
+    labels:
+      app: nvidia-device-plugin-daemonset
+  spec:
+    nodename: gpu-label-present
+  status:
+    phase: Running
+- typemeta:
+    kind: ""
+    apiversion: ""
+  objectmeta:
+    name: unrelated-pod
+    namespace: default
+    uid: ""
+    resourceversion: "2003"
+    creationtimestamp: null
+    labels:
+      app: unrelated
+  spec:
+    nodename: plain-worker
+  status:
+    phase: Running
