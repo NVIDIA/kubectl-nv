@@ -17,6 +17,7 @@
 package mustgather
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -715,163 +716,125 @@ func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
 
 // gatherPodLogs collects logs from the GPU operator pod (both current and previous logs)
 // and from each GPU operand pod. It uses the provided PodInfo data structure and writes logs
-// to files under the artifact directory. The operatorNamespace is used for operator pod log collection.
+// to files under the artifact directory, one file per container. The operatorNamespace is
+// used for operator pod log collection.
 func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) error {
-	// ------------------------------------------------------------------
-	// Collect logs from the GPU Operator Pod (current logs)
-	// ------------------------------------------------------------------
 	// Expecting at least one operator pod; use the first one.
 	if podInfo.OperatorPods == nil || len(podInfo.OperatorPods.Items) == 0 {
 		return fmt.Errorf("no operator pods available for log collection")
 	}
 	operatorPod := podInfo.OperatorPods.Items[0]
 
-	operatorLogsPath := filepath.Join(g.opts.ArtifactDir, "gpu_operator_logs.log")
-	opLogFile, err := os.Create(operatorLogsPath)
+	// Collect current logs from the GPU Operator Pod.
+	for _, container := range containerNames(&operatorPod) {
+		fileName := fmt.Sprintf("gpu_operator_logs_%s.log", container)
+		if err := g.collectContainerLogs(operatorNamespace, &operatorPod, container, fileName, false); err != nil {
+			return err
+		}
+	}
+
+	// Collect previous logs from the GPU Operator Pod.
+	for _, container := range containerNames(&operatorPod) {
+		fileName := fmt.Sprintf("gpu_operator_logs_%s.previous.log", container)
+		if err := g.collectContainerLogs(operatorNamespace, &operatorPod, container, fileName, true); err != nil {
+			return err
+		}
+	}
+
+	// Collect logs for each GPU Operand Pod.
+	if podInfo.OperandPods != nil {
+		for i := range podInfo.OperandPods.Items {
+			pod := podInfo.OperandPods.Items[i]
+			for _, container := range containerNames(&pod) {
+				fileName := fmt.Sprintf("%s_%s.log", pod.Name, container)
+				if err := g.collectContainerLogs(pod.Namespace, &pod, container, fileName, false); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// containerNames lists every container of the pod whose logs are worth
+// collecting: init containers first, then regular containers, each in spec
+// order. This mirrors "kubectl logs --all-containers".
+func containerNames(pod *v1.Pod) []string {
+	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
+	for _, c := range pod.Spec.InitContainers {
+		names = append(names, c.Name)
+	}
+	for _, c := range pod.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// collectContainerLogs writes the logs of a single container to fileName under
+// the artifact directory. The log request always names its container, because
+// the API server refuses a request without one for a pod running more than one
+// container, and always asks for timestamps.
+func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container, fileName string, previous bool) error {
+	logPath := filepath.Join(g.opts.ArtifactDir, fileName)
+	logFile, err := os.Create(logPath)
 	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operator_logs.log: %v\n", err); lerr != nil {
+		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating %s: %v\n", fileName, err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer opLogFile.Close()
+	defer logFile.Close()
 
-	// Get current logs from the operator pod.
-	podLogOpts := v1.PodLogOptions{}
-	stream, err := g.podLogs(context.Background(), operatorNamespace, operatorPod.Name, &podLogOpts)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pod logs for operator pod %s: %v\n", operatorPod.Name, err); lerr != nil {
+	podLogOpts := v1.PodLogOptions{
+		Container:  container,
+		Timestamps: true,
+		Previous:   previous,
+	}
+	stream, err := g.podLogs(context.Background(), namespace, pod.Name, &podLogOpts)
+	if err != nil || stream == nil {
+		if previous {
+			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting previous logs for pod %s container %s: %v\n", pod.Name, container, err); lerr != nil {
+				return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+			}
+			// If no previous logs, write a message and continue.
+			return writeStringToFile(logFile, "No previous logs available\n")
+		}
+		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting logs for pod %s container %s: %v\n", pod.Name, container, err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
 	defer stream.Close()
 
-	buf := make([]byte, 4096)
-	for {
-		n, rerr := stream.Read(buf)
-		if rerr != nil {
-			if rerr == io.EOF {
-				break
-			}
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error reading logs for operator pod %s: %v\n", operatorPod.Name, rerr); lerr != nil {
-				rerr = fmt.Errorf("%v + error writing to stderr log file: %v", rerr, lerr)
-			}
-			return rerr
-		}
-		if n > 0 {
-			if _, werr := opLogFile.Write(buf[:n]); werr != nil {
-				if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing to gpu_operator_logs.log: %v\n", werr); lerr != nil {
-					werr = fmt.Errorf("%v + error writing to stderr log file: %v", werr, lerr)
-				}
-				return werr
-			}
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// Collect previous logs from the GPU Operator Pod
-	// ------------------------------------------------------------------
-	prevLogsPath := filepath.Join(g.opts.ArtifactDir, "gpu_operator_logs_previous.log")
-	prevLogFile, err := os.Create(prevLogsPath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operator_logs_previous.log: %v\n", err); lerr != nil {
+	if err := writePrefixedLines(logFile, stream, pod.Name, container); err != nil {
+		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing %s: %v\n", fileName, err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 		}
 		return err
 	}
-	defer prevLogFile.Close()
-
-	prevLogOpts := v1.PodLogOptions{Previous: true}
-	prevStream, err := g.podLogs(context.Background(), operatorNamespace, operatorPod.Name, &prevLogOpts)
-	if err != nil || prevStream == nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting previous logs for operator pod %s: %v\n", operatorPod.Name, err); lerr != nil {
-			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		// If no previous logs, write a message and continue.
-		if writeErr := writeStringToFile(prevLogFile, "No previous logs available\n"); writeErr != nil {
-			return writeErr
-		}
-	} else {
-		defer prevStream.Close()
-		buf = make([]byte, 4096)
-		for {
-			n, rerr := prevStream.Read(buf)
-			if rerr != nil {
-				if rerr == io.EOF {
-					break
-				}
-				if _, lerr := fmt.Fprintf(g.errLogFile, "Error reading previous logs for operator pod %s: %v\n", operatorPod.Name, rerr); lerr != nil {
-					rerr = fmt.Errorf("%v + error writing to stderr log file: %v", rerr, lerr)
-				}
-				return rerr
-			}
-			if n > 0 {
-				if _, werr := prevLogFile.Write(buf[:n]); werr != nil {
-					if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing previous logs for operator pod %s: %v\n", operatorPod.Name, werr); lerr != nil {
-						werr = fmt.Errorf("%v + error writing to stderr log file: %v", werr, lerr)
-					}
-					return werr
-				}
-			}
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// Collect logs for each GPU Operand Pod
-	// ------------------------------------------------------------------
-	for _, pod := range podInfo.OperandPods.Items {
-		operandLogPath := filepath.Join(g.opts.ArtifactDir, fmt.Sprintf("%s_logs.log", pod.Name))
-		operandLogFile, err := os.Create(operandLogPath)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating log file for pod %s: %v\n", pod.Name, err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		// Note: Avoid deferring inside loops; close explicitly after use.
-
-		podLogOpts := v1.PodLogOptions{}
-		operandStream, err := g.podLogs(context.Background(), pod.Namespace, pod.Name, &podLogOpts)
-		if err != nil {
-			operandLogFile.Close()
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting logs for operand pod %s: %v\n", pod.Name, err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-
-		buf = make([]byte, 4096)
-		for {
-			n, rerr := operandStream.Read(buf)
-			if rerr != nil {
-				if rerr == io.EOF {
-					break
-				}
-				if _, lerr := fmt.Fprintf(g.errLogFile, "Error reading logs for operand pod %s: %v\n", pod.Name, rerr); lerr != nil {
-					rerr = fmt.Errorf("%v + error writing to stderr log file: %v", rerr, lerr)
-				}
-				operandStream.Close()
-				operandLogFile.Close()
-				return rerr
-			}
-			if n > 0 {
-				if _, werr := operandLogFile.Write(buf[:n]); werr != nil {
-					if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing logs for operand pod %s: %v\n", pod.Name, werr); lerr != nil {
-						werr = fmt.Errorf("%v + error writing to stderr log file: %v", werr, lerr)
-					}
-					operandStream.Close()
-					operandLogFile.Close()
-					return werr
-				}
-			}
-		}
-		// Close file and stream once finished with each operand pod.
-		operandStream.Close()
-		operandLogFile.Close()
-	}
-
 	return nil
+}
+
+// writePrefixedLines copies src to dst, prefixing every line with the
+// "[pod/<pod>/<container>] " marker that "kubectl logs --prefix" emits.
+func writePrefixedLines(dst io.Writer, src io.Reader, podName, container string) error {
+	prefix := fmt.Sprintf("[pod/%s/%s] ", podName, container)
+	reader := bufio.NewReader(src)
+	for {
+		line, rerr := reader.ReadString('\n')
+		if len(line) > 0 {
+			if _, werr := io.WriteString(dst, prefix+line); werr != nil {
+				return fmt.Errorf("error writing log line: %w", werr)
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return nil
+			}
+			return fmt.Errorf("error reading log stream: %w", rerr)
+		}
+	}
 }
 
 // writeStringToFile is a helper function that writes a string to the provided file.
@@ -971,32 +934,21 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 // pods into the artifact directory. label identifies the daemonset the pods
 // belong to and is used for error reporting.
 func (g *Gatherer) collectBugReports(label string, pods []v1.Pod) error {
-	// Skip if no pod found for this label.
-	if len(pods) == 0 {
-		return nil
-	}
+	for i := range pods {
+		pod := pods[i]
 
-	// Use the first available pod.
-	pod := pods[0]
+		// Name the report after the node the pod runs on, matching the gpu-operator
+		// must-gather script. Naming it after the daemonset instead would make every
+		// pod of that daemonset write to the same file.
+		destFileName := fmt.Sprintf("nvidia-bug-report_%s.log.gz", pod.Spec.NodeName)
+		destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
 
-	// Build the destination file spec.
-	// We build a filename based on the label (sanitized for clarity).
-	var destFileName string
-	switch label {
-	case "app=nvidia-driver-daemonset":
-		destFileName = "nvidia-bug-report-nvidiaDriverDaemonSetPod.log.gz"
-	case "app=nvidia-vgpu-manager-daemonset":
-		destFileName = "nvidia-bug-report-nvidiaVgpuManagerDaemonSetPod.log.gz"
-	default:
-		destFileName = "nvidia-bug-report-unknown.log.gz"
-	}
-	destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
-
-	if err := g.fetchBugReport(&pod, destPath); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error collecting bug report from pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
+		if err := g.fetchBugReport(&pod, destPath); err != nil {
+			if _, lerr := fmt.Fprintf(g.errLogFile, "Error collecting bug report from pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
+				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
+			}
+			return err
 		}
-		return err
 	}
 	return nil
 }
