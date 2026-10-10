@@ -19,19 +19,15 @@
 package e2e
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/yaml"
 )
 
@@ -47,6 +43,13 @@ type bundle struct {
 	dir   string
 	run   result
 	files map[string]os.FileInfo
+
+	// podsBefore and podsAfter are the operator namespace as the cluster
+	// reported it either side of the gather. A pod that came or went while the
+	// gather was running is the cluster's doing, not the gatherer's, and the
+	// two lists are what tells those apart.
+	podsBefore []v1.Pod
+	podsAfter  []v1.Pod
 }
 
 // gather runs a must-gather into a fresh directory under the test's temporary
@@ -55,11 +58,20 @@ type bundle struct {
 func gather(t *testing.T) *bundle {
 	t.Helper()
 
+	// A container whose logs the API server will not serve yet fails the
+	// gather, and that is the lane still coming up rather than anything about
+	// kubectl-nv.
+	waitForStartedPods(t)
+
+	podsBefore := operatorPods(t)
+
 	dir := filepath.Join(t.TempDir(), "artifacts")
 	res := run(t, "adm", "must-gather", "--artifacts-dir", dir)
 	if res.code != 0 {
 		t.Fatalf("must-gather exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
+
+	podsAfter := operatorPods(t)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -74,7 +86,7 @@ func gather(t *testing.T) *bundle {
 		files[e.Name()] = info
 	}
 
-	return &bundle{dir: dir, run: res, files: files}
+	return &bundle{dir: dir, run: res, files: files, podsBefore: podsBefore, podsAfter: podsAfter}
 }
 
 // read returns the named artifact, failing the test when it is missing: every
@@ -112,6 +124,121 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 		// the plugin, and is the kind of thing only a real run catches.
 		if b.run.stdout != "" {
 			t.Errorf("stdout = %q, want empty", b.run.stdout)
+		}
+	})
+
+	t.Run("every collector wrote its artifact", func(t *testing.T) {
+		// Each name here is one collector's output. A collector that silently
+		// stopped running takes its file with it, and nothing else in this
+		// suite would notice: the mode and parse checks below only look at the
+		// files that are there. Listed rather than globbed, so that a file the
+		// gatherer stops writing has to be deleted from this list by hand.
+		want := map[string]bool{
+			"nodes.yaml":             true,
+			"gpu_nodes.yaml":         true,
+			"gpu_operand_pods.yaml":  true,
+			"gpu_operator_pod.yaml":  true,
+			"cluster_policy.yaml":    true,
+			"daemonsets.yaml":        true,
+			"resourceslices.yaml":    true,
+			"must-gather.log":        true,
+			"must-gather.stderr.log": true,
+		}
+
+		// The driver custom resource is either there or recorded as absent,
+		// and exactly one of the two files says so. Both, or neither, means
+		// the collector cannot make its mind up about the cluster.
+		driverYAML := b.files["nvidia_driver.yaml"] != nil
+		driverMissing := b.files["nvidia_driver.missing"] != nil
+		switch {
+		case driverYAML && driverMissing:
+			t.Error("bundle holds both nvidia_driver.yaml and nvidia_driver.missing")
+		case driverYAML:
+			want["nvidia_driver.yaml"] = true
+		case driverMissing:
+			want["nvidia_driver.missing"] = true
+		default:
+			t.Error("bundle holds neither nvidia_driver.yaml nor nvidia_driver.missing")
+		}
+
+		for name := range want {
+			if b.files[name] == nil {
+				t.Errorf("bundle is missing %s", name)
+			}
+		}
+		// The log files are counted one per container by their own subtest;
+		// anything else the bundle holds is a file no collector claims.
+		for name := range b.files {
+			if want[name] || strings.HasSuffix(name, ".log") {
+				continue
+			}
+			t.Errorf("bundle holds %s, which no collector is supposed to write", name)
+		}
+	})
+
+	t.Run("the operand pods are the cluster's pods", func(t *testing.T) {
+		// Derived from the file, checked against the cluster: a gatherer that
+		// listed one page of pods and stopped writes a bundle that is
+		// self-consistent and wrong, and only the cluster can say so.
+		got := podNames(podList(t, b, "gpu_operand_pods.yaml"))
+		before := podNames(b.podsBefore)
+		after := podNames(b.podsAfter)
+
+		if strings.Join(before, ",") == strings.Join(after, ",") {
+			if strings.Join(got, ",") != strings.Join(before, ",") {
+				t.Errorf("gpu_operand_pods.yaml lists\n  %v\nthe cluster has\n  %v", got, before)
+			}
+			return
+		}
+
+		// The namespace changed under the gather. What was there throughout
+		// still has to be in the bundle, and nothing may be in it that was
+		// never in the namespace at all.
+		t.Logf("the namespace changed during the gather: before %v, after %v", before, after)
+		for _, name := range intersection(before, after) {
+			if !contains(got, name) {
+				t.Errorf("gpu_operand_pods.yaml is missing %s, which was there throughout", name)
+			}
+		}
+		for _, name := range got {
+			if !contains(before, name) && !contains(after, name) {
+				t.Errorf("gpu_operand_pods.yaml lists %s, which the cluster never had", name)
+			}
+		}
+	})
+
+	t.Run("the operands cover every worker", func(t *testing.T) {
+		// The two daemonsets that make a node a GPU node: one puts
+		// nvidia.com/gpu into allocatable, the other puts the nvidia.com
+		// labels on. A bundle collected from a lane where either is missing
+		// from a worker is a bundle of a lane that is not what it claims.
+		const (
+			devicePlugin = "nvidia-device-plugin-daemonset"
+			featureDisc  = "gpu-feature-discovery"
+		)
+
+		onNode := daemonSetPodNodes(b.podsBefore)
+		for _, name := range []string{devicePlugin, featureDisc} {
+			for _, worker := range workerNodeNames(t) {
+				if !onNode[name][worker] {
+					t.Errorf("no %s pod on worker %s", name, worker)
+				}
+			}
+		}
+
+		var sets appsv1.DaemonSetList
+		data := b.read(t, "daemonsets.yaml")
+		if err := yaml.Unmarshal(data, &sets); err != nil {
+			t.Fatalf("daemonsets.yaml does not parse as a DaemonSetList: %v", err)
+		}
+		named := make(map[string]bool, len(sets.Items))
+		for _, set := range sets.Items {
+			named[set.Name] = true
+		}
+		for _, name := range []string{devicePlugin, featureDisc} {
+			if !named[name] {
+				t.Errorf("daemonsets.yaml does not list %s, it lists %v", name, sortedKeys(named))
+			}
 		}
 	})
 
@@ -271,32 +398,34 @@ func containerNames(pod v1.Pod) []string {
 	return names
 }
 
-// clusterNodeNames asks the cluster itself what it is made of, so that
-// nodes.yaml is checked against the cluster rather than against itself. The
-// call is a read, as every call this suite makes is.
-func clusterNodeNames(t *testing.T) []string {
-	t.Helper()
+// contains reports whether names holds name.
+func contains(names []string, name string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
+}
 
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
-	if err != nil {
-		t.Fatalf("building a client configuration from %s: %v", kubeconfigPath, err)
+// intersection returns the names in both lists, sorted.
+func intersection(a, b []string) []string {
+	both := make([]string, 0, len(a))
+	for _, name := range a {
+		if contains(b, name) {
+			both = append(both, name)
+		}
 	}
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		t.Fatalf("building a kubernetes client: %v", err)
-	}
+	sort.Strings(both)
+	return both
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	nodes, err := clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		t.Fatalf("listing the cluster's nodes: %v", err)
+// sortedKeys lists the keys of set, sorted, for a failure message.
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
 	}
-	names := make([]string, 0, len(nodes.Items))
-	for _, node := range nodes.Items {
-		names = append(names, node.Name)
-	}
-	sort.Strings(names)
-	return names
+	sort.Strings(keys)
+	return keys
 }
