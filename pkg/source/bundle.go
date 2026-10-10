@@ -35,10 +35,10 @@ import (
 // gatherPodInfo writes gpu_operand_pods.yaml, and gatherCRs writes
 // cluster_policy.yaml.
 const (
-	fileNodes                    = "nodes.yaml"
-	fileOperandPods              = "gpu_operand_pods.yaml"
-	fileClusterPolicy            = "cluster_policy.yaml"
-	resourceSlicesInBundleReason = "must-gather does not collect ResourceSlices"
+	fileNodes          = "nodes.yaml"
+	fileOperandPods    = "gpu_operand_pods.yaml"
+	fileClusterPolicy  = "cluster_policy.yaml"
+	fileResourceSlices = "resourceslices.yaml"
 )
 
 // MissingBundleError reports that the path given to NewBundle is not a
@@ -84,45 +84,61 @@ func NewBundle(dir string) (*Bundle, error) {
 	return &Bundle{dir: dir}, nil
 }
 
-// readYAML decodes the named file into out. A missing file becomes a
-// PartialError naming that file, which is the normal case for a bundle
-// gathered from a cluster where some read failed.
-func (b *Bundle) readYAML(name string, out any) error {
+// readFile decodes the named file into out, reporting the plain failure. Both
+// the missing-file and the undecodable-file case name the file, so a caller
+// can report either one without adding the name back.
+func (b *Bundle) readFile(name string, out any) error {
 	data, err := os.ReadFile(filepath.Join(b.dir, name))
 	if err != nil {
-		return &PartialError{Resources: []string{name}, Err: err}
+		return err
 	}
 	if err := yaml.Unmarshal(data, out); err != nil {
-		return &PartialError{Resources: []string{name}, Err: fmt.Errorf("decode %s: %w", name, err)}
+		return fmt.Errorf("decode %s: %w", name, err)
 	}
 	return nil
 }
 
-// Nodes returns the GPU nodes recorded in nodes.yaml.
-//
-// Only the capacity rule can fire offline, because must-gather collects no
-// ResourceSlices: a node that is a GPU node solely by its slice is reported as
-// hinted, or not at all. The same classifyNodes the live path uses is what
-// decides, so the rule lives in one place.
+// readYAML decodes the named file into out and turns any failure into a
+// PartialError naming that file, which is the normal case for a bundle
+// gathered from a cluster where some read failed.
+func (b *Bundle) readYAML(name string, out any) error {
+	if err := b.readFile(name, out); err != nil {
+		return &PartialError{Resources: []string{name}, Err: err}
+	}
+	return nil
+}
+
+// Nodes returns the GPU nodes recorded in nodes.yaml. The same classifyNodes
+// the live path uses is what decides, so the rule lives in one place.
 func (b *Bundle) Nodes(ctx context.Context) ([]corev1.Node, error) {
-	gpus, _, err := b.classify()
+	gpus, _, err := b.classify(ctx)
 	return gpus, err
 }
 
 // HintedNodes returns the nodes in nodes.yaml that carry an NVIDIA discovery
-// label without backing it with capacity.
+// label without backing it with capacity or a slice.
 func (b *Bundle) HintedNodes(ctx context.Context) ([]corev1.Node, error) {
-	_, hinted, err := b.classify()
+	_, hinted, err := b.classify(ctx)
 	return hinted, err
 }
 
-func (b *Bundle) classify() (gpus, hinted []corev1.Node, err error) {
+// classify reads nodes.yaml and, when the bundle carries one, the slice file.
+//
+// A missing nodes.yaml is the end of it: there is nothing to classify. A
+// missing slice file is not, but it does mean one of the two membership rules
+// could not be evaluated, so both sets come back with a PartialError naming
+// resourceslices. The answer is wrong in a known direction: a node that is a
+// GPU node only by its slice falls out of both sets rather than into the
+// wrong one.
+func (b *Bundle) classify(ctx context.Context) (gpus, hinted []corev1.Node, err error) {
 	var list corev1.NodeList
 	if err := b.readYAML(fileNodes, &list); err != nil {
 		return nil, nil, err
 	}
-	gpus, hinted = classifyNodes(list.Items, nil)
-	return gpus, hinted, nil
+
+	slices, sliceErr := b.ResourceSlices(ctx)
+	gpus, hinted = classifyNodes(list.Items, sliceNodeNames(slices))
+	return gpus, hinted, sliceErr
 }
 
 // Pods returns the operand pods recorded in gpu_operand_pods.yaml, filtered by
@@ -156,13 +172,27 @@ func (b *Bundle) Pods(ctx context.Context, namespace, selector string) ([]corev1
 	return out, nil
 }
 
-// ResourceSlices always reports a partial read: must-gather writes no
-// ResourceSlice data, so an offline replay cannot answer the question.
+// ResourceSlices returns the slices recorded in resourceslices.yaml that were
+// published by DRADriverName.
+//
+// A bundle gathered before must-gather started collecting them has no such
+// file, and neither does one where the slice read was denied. That is not an
+// empty cluster, so it is reported as a PartialError naming resourceslices
+// rather than as an empty success. The error names the API resource, not the
+// file, because that is what the caller could not learn about.
 func (b *Bundle) ResourceSlices(ctx context.Context) ([]resourcev1.ResourceSlice, error) {
-	return nil, &PartialError{
-		Resources: []string{"resourceslices"},
-		Err:       errors.New(resourceSlicesInBundleReason),
+	var list resourcev1.ResourceSliceList
+	if err := b.readFile(fileResourceSlices, &list); err != nil {
+		return nil, &PartialError{Resources: []string{"resourceslices"}, Err: err}
 	}
+
+	out := make([]resourcev1.ResourceSlice, 0, len(list.Items))
+	for i := range list.Items {
+		if list.Items[i].Spec.Driver == DRADriverName {
+			out = append(out, list.Items[i])
+		}
+	}
+	return out, nil
 }
 
 // ClusterPolicies returns the single ClusterPolicy recorded in
