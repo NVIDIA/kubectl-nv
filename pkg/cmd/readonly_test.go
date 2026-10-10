@@ -17,7 +17,10 @@
 package cmd_test
 
 import (
+	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,31 +45,51 @@ import (
 )
 
 // writeVerbs are the API verbs this plugin must never issue. kubectl-nv is a
-// diagnostic tool: a support engineer runs it against a cluster that is already
-// unhappy, and a write from it would change the very state being reported.
+// diagnostic tool: a support engineer runs it against a cluster that is
+// already unhappy, and a write from it would change the very state being
+// reported.
 var writeVerbs = []string{"create", "update", "patch", "delete", "deletecollection"}
 
+// leafFixtures gives every leaf of the command tree the arguments that make it
+// run. A leaf with no entry fails the test rather than being skipped, so a
+// command added later cannot slip past the guard by needing an argument.
+var leafFixtures = map[string]func(t *testing.T) []string{
+	"adm must-gather": func(t *testing.T) []string {
+		return []string{"--artifacts-dir", t.TempDir()}
+	},
+	"version": func(*testing.T) []string { return nil },
+}
+
+// readOptional lists the leaves that have no business talking to a cluster.
+// Every other leaf has to issue at least one read, or the run proved nothing
+// about what it would have written.
+var readOptional = map[string]bool{"version": true}
+
 // TestEveryCommandIsReadOnly executes every leaf of the command tree against
-// fake clients that fail the test on any write. New commands are covered
-// without touching this test, because the tree is walked rather than listed.
+// clients that fail the test on any write. The fakes cover the typed and
+// dynamic clients; an HTTP server standing in for the API covers anything
+// built straight from the REST config, which the fakes never see.
 func TestEveryCommandIsReadOnly(t *testing.T) {
-	paths := leafPaths(newTestCommand(t, &recorder{}))
+	paths := leafPaths(newTestCommand(t, newRecorder(t, "")))
 	if len(paths) == 0 {
 		t.Fatal("found no leaf commands to execute")
 	}
 	t.Logf("leaf commands under test: %v", paths)
 
-	var exercised bool
 	for _, path := range paths {
-		t.Run(strings.Join(path, " "), func(t *testing.T) {
-			rec := &recorder{t: t}
+		name := strings.Join(path, " ")
+		t.Run(name, func(t *testing.T) {
+			fixture, ok := leafFixtures[name]
+			if !ok {
+				t.Fatalf("no fixture for leaf %q: add one to leafFixtures so the guard covers it", name)
+			}
+
+			rec := newRecorder(t, name)
 			cmd := newTestCommand(t, rec)
 
 			args := append([]string{}, path...)
 			args = append(args, "--kubeconfig", writeKubeconfig(t))
-			if leafAt(cmd, path).Flags().Lookup("artifacts-dir") != nil {
-				args = append(args, "--artifacts-dir", t.TempDir())
-			}
+			args = append(args, fixture(t)...)
 			cmd.SetArgs(args)
 			cmd.SetOut(io.Discard)
 			cmd.SetErr(io.Discard)
@@ -74,55 +97,107 @@ func TestEveryCommandIsReadOnly(t *testing.T) {
 			cmd.SilenceErrors = true
 
 			// A command that reports a cluster problem is still read-only, so the
-			// returned error is not the subject here; the recorded verbs are.
+			// returned error is not the subject here; the recorded calls are.
 			_ = cmd.Execute()
 
-			if rec.reads() > 0 {
-				exercised = true
+			for _, w := range rec.writes() {
+				t.Errorf("kubectl-nv issued %s: this tool must be read-only", w)
+			}
+			if !readOptional[name] && rec.reads() == 0 {
+				t.Errorf("%q read nothing from the cluster: the guard proved nothing about it", name)
 			}
 		})
 	}
-
-	if !exercised {
-		t.Fatal("no leaf command read from the fake cluster: the guard proved nothing")
-	}
 }
 
-// recorder counts the API calls the fakes see and fails the test on a write.
+// recorder counts what the clients were asked to do and reports every write.
+// The HTTP half runs on the server's goroutines, so it records and uses
+// Errorf, which is safe to call from any goroutine, rather than Fatalf, which
+// is not.
 type recorder struct {
-	t  *testing.T
-	mu sync.Mutex
-	n  int
+	t    *testing.T
+	leaf string
+
+	mu     sync.Mutex
+	nReads int
+	bad    []string
+}
+
+func newRecorder(t *testing.T, leaf string) *recorder {
+	t.Helper()
+	return &recorder{t: t, leaf: leaf}
+}
+
+// transport stands in for the API server for anything built straight from the
+// REST config, which the fake clients never see. It answers in-process, so
+// the guard needs no listening socket.
+func (r *recorder) transport() http.RoundTripper {
+	return roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		if req.Method != http.MethodGet {
+			what := fmt.Sprintf("an HTTP %s to %s", req.Method, req.URL.Path)
+			r.record(what)
+			// Errorf, not Fatalf: this runs on whatever goroutine made the
+			// request, and only the test's own goroutine may call Fatalf.
+			r.t.Errorf("kubectl-nv issued %s: this tool must be read-only", what)
+			http.Error(w, "writes are not allowed", http.StatusForbidden)
+		} else {
+			r.countRead()
+			http.NotFound(w, req)
+		}
+		resp := w.Result()
+		resp.Request = req
+		return resp, nil
+	})
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func (r *recorder) record(what string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bad = append(r.bad, what)
+}
+
+func (r *recorder) countRead() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nReads++
 }
 
 func (r *recorder) reads() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.n
+	return r.nReads
 }
 
-// install wires the recorder into a fake. Reads are counted and passed on to
-// the object tracker; writes stop the test where they happen, so the failure
-// names the call site.
+func (r *recorder) writes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string{}, r.bad...)
+}
+
+// install wires the recorder into a fake clientset or dynamic client. Reads
+// are counted and passed on to the object tracker; a write fails the test
+// where it happens, so the failure names the call site.
 func (r *recorder) install(f *k8stesting.Fake) {
-	f.PrependReactor("*", "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		r.mu.Lock()
-		r.n++
-		r.mu.Unlock()
+	f.PrependReactor("*", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+		r.countRead()
 		return false, nil, nil
 	})
 	for _, verb := range writeVerbs {
 		f.PrependReactor(verb, "*", func(action k8stesting.Action) (bool, runtime.Object, error) {
-			if r.t != nil {
-				r.t.Fatalf("kubectl-nv issued a %s on %s: this tool must be read-only",
-					action.GetVerb(), action.GetResource().Resource)
-			}
+			what := fmt.Sprintf("a %s on %s", action.GetVerb(), action.GetResource().Resource)
+			r.record(what)
+			r.t.Fatalf("kubectl-nv issued %s: this tool must be read-only", what)
 			return true, nil, nil
 		})
 	}
 }
 
-// newTestCommand builds the real command tree over fake clients.
+// newTestCommand builds the real command tree over the recorder's clients.
 func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 	t.Helper()
 
@@ -134,9 +209,9 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 	f := &fakeFactory{
 		clientset: clientset,
 		dynamic:   dyn,
-		// A host nothing listens on: the OpenShift probe has to fail fast rather
-		// than reach whatever cluster the developer is pointed at.
-		config: &rest.Config{Host: "https://127.0.0.1:1"},
+		// Anything built from the REST config rather than from the fakes lands
+		// here, where a write is just as visible.
+		config: &rest.Config{Host: "https://kubectl-nv.invalid", Transport: rec.transport()},
 	}
 
 	return root.NewCommand("test", root.Deps{
@@ -153,9 +228,9 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 	})
 }
 
-// clusterObjects is the smallest cluster that drives must-gather all the way to
-// the bug-report copy: an operator pod to find the namespace from, a GPU node,
-// a driver pod to collect from, and a daemonset.
+// clusterObjects is the smallest cluster that drives must-gather all the way
+// to the bug-report copy: an operator pod to find the namespace from, a GPU
+// node, a driver pod to collect from, and a daemonset.
 func clusterObjects() []runtime.Object {
 	return []runtime.Object{
 		&v1.Node{ObjectMeta: metav1.ObjectMeta{
@@ -217,20 +292,6 @@ func leafPaths(c *cobra.Command) [][]string {
 	}
 	walk(c, nil)
 	return out
-}
-
-// leafAt returns the command the given argument path names.
-func leafAt(root *cobra.Command, path []string) *cobra.Command {
-	cmd := root
-	for _, name := range path {
-		for _, child := range cmd.Commands() {
-			if child.Name() == name {
-				cmd = child
-				break
-			}
-		}
-	}
-	return cmd
 }
 
 func writeKubeconfig(t *testing.T) string {
