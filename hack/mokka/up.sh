@@ -31,6 +31,15 @@
 #   4  the lane cluster already exists, so nothing was touched
 #   5  the lane came up but an assertion about it did not come true in time
 #
+# Readiness is decided by waiting for the nvidia-device-plugin-daemonset and
+# gpu-feature-discovery DaemonSets by name, not by waiting for "every pod in
+# the gpu-operator namespace to be Ready". Those two are what put
+# nvidia.com/gpu into node allocatable and the nvidia.com/* labels onto the
+# node, and they are operands: the operator creates them some time after its
+# own chart has finished installing. A check over whatever pods happen to be
+# in the namespace is therefore satisfiable before any operand exists, and
+# passes against the operator and NFD pods alone.
+#
 # This script never reads or writes the caller's default kubeconfig. The lane
 # kubeconfig is written to hack/mokka/bin/kubeconfig-<lane> and every kind,
 # kubectl and helm call is pointed at it explicitly. `kind create cluster`
@@ -118,6 +127,9 @@ fi
 # ---------------------------------------------------------------------------
 
 mkdir -p "${BIN_DIR}"
+# mkdir -p leaves an existing directory's mode alone, and this one outlives
+# any single run, so the mode is set rather than left to whoever created it.
+chmod 700 "${BIN_DIR}"
 
 mokka::phase "create cluster ${CLUSTER}"
 kind create cluster \
