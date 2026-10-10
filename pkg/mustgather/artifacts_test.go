@@ -29,7 +29,9 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -403,5 +405,75 @@ func TestDebugNamesEveryArtifact(t *testing.T) {
 				t.Errorf("artifact named on stderr = %v, want %v\n%s", named, debug, stderr.String())
 			}
 		})
+	}
+}
+
+// TestClusterPolicyIsWrittenAsItWasRead covers the custom resources. They
+// arrive unstructured, so the file has to carry the apiVersion and kind the
+// cluster gave them and the spec has to survive unchanged: support compares
+// this file against the ClusterPolicy a customer says they applied.
+func TestClusterPolicyIsWrittenAsItWasRead(t *testing.T) {
+	policy := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "nvidia.com/v1",
+		"kind":       "ClusterPolicy",
+		"metadata":   map[string]any{"name": "cluster-policy"},
+		"spec": map[string]any{
+			"operator": map[string]any{"defaultRuntime": "containerd"},
+			"driver": map[string]any{
+				"version":  "550.90.07",
+				"replicas": int64(3),
+				"enabled":  true,
+			},
+		},
+	}}
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: fake.NewSimpleClientset(),
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(),
+			map[schema.GroupVersionResource]string{
+				{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:     "ClusterPolicyList",
+				{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}: "NvidiaDriverList",
+			},
+			policy),
+		config: offlineConfig(),
+	}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	defer g.Close()
+
+	if err := g.gatherGPUOperatorCRDs(); err != nil {
+		t.Fatalf("gatherGPUOperatorCRDs: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "cluster_policy.yaml"))
+	if err != nil {
+		t.Fatalf("reading cluster_policy.yaml: %v", err)
+	}
+
+	var got unstructured.Unstructured
+	if err := yaml.Unmarshal(data, &got.Object); err != nil {
+		t.Fatalf("cluster_policy.yaml does not parse: %v\n%s", err, data)
+	}
+	if got.GetAPIVersion() != "nvidia.com/v1" || got.GetKind() != "ClusterPolicy" {
+		t.Errorf("apiVersion/kind = %q/%q, want nvidia.com/v1 ClusterPolicy",
+			got.GetAPIVersion(), got.GetKind())
+	}
+	version, found, err := unstructured.NestedString(got.Object, "spec", "driver", "version")
+	if err != nil || !found {
+		t.Fatalf("spec.driver.version is missing: found=%v err=%v\n%s", found, err, data)
+	}
+	if version != "550.90.07" {
+		t.Errorf("spec.driver.version = %q, want %q", version, "550.90.07")
+	}
+	// The number is checked as written rather than as re-parsed: reading YAML
+	// back into a map gives float64 for every number, which says nothing about
+	// the file.
+	for _, want := range []string{"replicas: 3", "version: 550.90.07", "enabled: true"} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("cluster_policy.yaml does not contain %q:\n%s", want, data)
+		}
 	}
 }
