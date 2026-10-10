@@ -185,7 +185,27 @@ case "${args}" in
         exit 0
         ;;
     *"get daemonset"*)
-        n="$(bump ds)"
+        # The namespace has to be explicit. Without it the query would hit the
+        # default namespace, where these DaemonSets do not exist, so answering
+        # anyway would hide a missing --namespace.
+        case "${args}" in
+            *"--namespace gpu-operator"*) ;;
+            *)
+                echo 'Error from server (NotFound): daemonsets.apps not found' >&2
+                exit 1
+                ;;
+        esac
+        # Each DaemonSet answers for itself, so a subject that waits on only
+        # one of them cannot be told apart from one that waits on both.
+        case "${args}" in
+            *nvidia-device-plugin-daemonset*) key=DEVICE_PLUGIN ;;
+            *gpu-feature-discovery*) key=GFD ;;
+            *)
+                echo 'Error from server (NotFound): daemonsets.apps not found' >&2
+                exit 1
+                ;;
+        esac
+        n="$(bump "ds_${key}")"
         if [ "${n}" -le "${FAKE_DS_NOTFOUND_CALLS-0}" ]; then
             echo 'Error from server (NotFound): daemonsets.apps not found' >&2
             exit 1
@@ -194,7 +214,15 @@ case "${args}" in
             printf '%s' "${FAKE_DS_NOTREADY_STATUS-2 0 2}"
             exit 0
         fi
-        printf '%s' "${FAKE_DS_STATUS-2 2 2}"
+        status=""
+        case "${key}" in
+            DEVICE_PLUGIN) status="${FAKE_DS_STATUS_DEVICE_PLUGIN-}" ;;
+            GFD) status="${FAKE_DS_STATUS_GFD-}" ;;
+        esac
+        if [ -z "${status}" ]; then
+            status="${FAKE_DS_STATUS-2 2 2}"
+        fi
+        printf '%s' "${status}"
         exit 0
         ;;
     *control-plane*)
@@ -202,7 +230,7 @@ case "${args}" in
         # resource and none of the labels.
         exit 0
         ;;
-    *allocatable*)
+    *'allocatable.nvidia\.com/gpu'*)
         n="$(bump gpu)"
         if [ "${n}" -le "${FAKE_GPU_NOTREADY_CALLS-0}" ]; then
             exit 0
@@ -238,18 +266,48 @@ SHIM
     done
 }
 
+# make_tool_dir
+# A directory of symlinks to exactly the system tools the scripts and the shims
+# need. The subject's PATH is this plus the shim directory and nothing else, so
+# a CI image or a developer laptop that happens to have a real docker, kubectl,
+# kind or helm on PATH cannot leak one into a test. Putting /usr/bin on the
+# subject's PATH would do exactly that wherever those tools are installed
+# there, which is the usual case on Linux.
+MOKKA_SYSTEM_TOOLS="bash sh env date mktemp grep sed awk cat sleep rm mkdir
+chmod tr wc head tail cut sort dirname basename shasum stat ls printf jq"
+
+make_tool_dir() {
+    mkdir -p "${TOOL_DIR}"
+    local t resolved
+    for t in ${MOKKA_SYSTEM_TOOLS}; do
+        resolved="$(command -v "${t}" 2> /dev/null || true)"
+        # Shell builtins resolve to a bare name; only real files can be linked.
+        case "${resolved}" in
+            /*) ln -sf "${resolved}" "${TOOL_DIR}/${t}" ;;
+        esac
+    done
+}
+
+# file_mode <path> -- octal permission bits, BSD and GNU stat.
+file_mode() {
+    stat -f '%Lp' "$1" 2> /dev/null || stat -c '%a' "$1"
+}
+
 # run_subject <script> <args...>
-# Runs the subject with a PATH holding only the shim directory plus the system
-# directories, so the real kind/helm/kubectl/docker under /opt/homebrew/bin and
-# /usr/local/bin cannot be reached, and with HOME pointed at a throwaway
-# directory holding a sentinel kubeconfig. Sets RC, OUT and ERR.
+# Runs the subject with an isolated PATH, with HOME pointed at a throwaway
+# directory holding a sentinel kubeconfig, and with the lane bin directory
+# removed so that every run creates it afresh and its mode is the mode this
+# run chose. Sets RC, OUT and ERR.
 run_subject() {
     local script="$1"
     shift
     : > "${MOKKA_CALL_LOG}"
     rm -rf "${MOKKA_STATE_DIR}"
+    if [ "${KEEP_BIN_DIR:-0}" != "1" ]; then
+        rm -rf "${MOKKA_BIN_DIR}"
+    fi
     mkdir -p "${MOKKA_STATE_DIR}"
-    PATH="${SHIM_DIR}:/usr/bin:/bin:/usr/sbin:/sbin" HOME="${FAKE_HOME}" \
+    PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
         "${script}" "$@" > "${WORK}/out" 2> "${WORK}/err"
     RC=$?
     OUT="$(cat "${WORK}/out")"
@@ -326,10 +384,27 @@ FAKE_HOME="${WORK}/home"
 export MOKKA_CALL_LOG="${WORK}/calls.log"
 export MOKKA_STATE_DIR="${WORK}/state"
 export MOKKA_BIN_DIR="${WORK}/kubeconfigs"
-# Keep the readiness poll from sleeping and from waiting out the production
-# timeout; the shims answer on a call count, not on elapsed time.
-export MOKKA_POLL_INTERVAL=0
-export MOKKA_READY_TIMEOUT=2
+TOOL_DIR="${WORK}/systools"
+OUTER_STUBS="${WORK}/outer-stubs"
+
+# Timeouts. A case that is meant to converge gets a deadline long enough to
+# survive a loaded machine: the shims answer on a call count rather than on
+# elapsed time, so a converging case needs the wall clock only to not run out,
+# and `date +%s` has one-second resolution, which made a two-second deadline a
+# coin toss under parallel load. A case that is meant to time out gets a short
+# deadline and a one-second poll, so it reaches the deadline in a few polls
+# instead of spinning.
+expect_converge() {
+    export MOKKA_READY_TIMEOUT=60
+    export MOKKA_POLL_INTERVAL=0
+}
+
+expect_timeout() {
+    export MOKKA_READY_TIMEOUT=2
+    export MOKKA_POLL_INTERVAL=1
+}
+
+expect_converge
 
 PINNED_DIGEST="sha256:8bd910853e49bd46953c95b646d35e4765fa7097b18765040b3d95dbc376f524"
 
@@ -342,8 +417,32 @@ reset_fixtures() {
     unset FAKE_WORKERS FAKE_ALLOCATABLE FAKE_GPU_PRODUCT FAKE_PCI_LABEL
     unset FAKE_DS_STATUS FAKE_DS_NOTFOUND_CALLS FAKE_DS_NOTREADY_CALLS
     unset FAKE_DS_NOTREADY_STATUS FAKE_GPU_NOTREADY_CALLS FAKE_CLUSTERPOLICY_STATE
+    unset FAKE_DS_STATUS_DEVICE_PLUGIN FAKE_DS_STATUS_GFD
+    expect_converge
     make_shims "${SHIM_DIR}" kind helm kubectl docker
 }
+
+make_tool_dir
+
+# Stubs for the two tools most likely to exist on a CI image, placed on the
+# HARNESS's PATH but deliberately not on the subject's. If the subject could
+# see them, the missing-tool cases below would stop returning 3.
+mkdir -p "${OUTER_STUBS}"
+for stub in docker kubectl kind helm; do
+    printf '#!/bin/bash\necho "OUTER STUB %s SHOULD NEVER RUN" >&2\nexit 0\n' "${stub}" \
+        > "${OUTER_STUBS}/${stub}"
+    chmod +x "${OUTER_STUBS}/${stub}"
+done
+PATH="${OUTER_STUBS}:${PATH}"
+export PATH
+
+if [ "$(command -v docker)" = "${OUTER_STUBS}/docker" ] &&
+    [ "$(command -v kubectl)" = "${OUTER_STUBS}/kubectl" ]; then
+    ok "the harness PATH does offer a docker and a kubectl to leak"
+else
+    nope "the outer stubs are not on the harness PATH, so the isolation test proves nothing" \
+        "docker:  $(command -v docker)" "kubectl: $(command -v kubectl)"
+fi
 
 rm -rf "${SHIM_DIR}"
 reset_fixtures
@@ -405,9 +504,17 @@ for missing in kind helm kubectl docker; do
     # shellcheck disable=SC2086
     make_shims "${SHIM_DIR}" ${present}
     run_subject "${UP}" mokka t4
-    assert_rc 3 "up.sh with ${missing} missing"
+    # The harness PATH carries a stub for every one of these tools. Still 3
+    # means the subject's PATH really is the shims plus the curated system
+    # tools, with no leak from the surrounding environment.
+    assert_rc 3 "up.sh with ${missing} missing, despite a ${missing} on the harness PATH"
     assert_says "up.sh: required tool not found: ${missing}" \
         "up.sh names the missing tool ${missing}"
+    if printf '%s\n%s\n' "${OUT}" "${ERR}" | grep -qF 'OUTER STUB'; then
+        nope "the subject reached an outer stub; PATH isolation is broken" "stderr: ${ERR}"
+    else
+        ok "up.sh did not reach the outer ${missing} stub"
+    fi
 done
 
 rm -rf "${SHIM_DIR}"
@@ -556,6 +663,79 @@ else
         "before: ${SENTINEL_BEFORE}" "after:  $(sentinel_hash)"
 fi
 
+# A kubeconfig holds cluster credentials, so the file it lands in and the
+# directory holding it must not be world readable. The fake kind creates the
+# file the way the real one does, with the umask the subject set.
+lane_kc="${MOKKA_BIN_DIR}/kubeconfig-mokka"
+if [ -f "${lane_kc}" ]; then
+    if [ "$(file_mode "${lane_kc}")" = "600" ]; then
+        ok "the lane kubeconfig is created mode 0600"
+    else
+        nope "the lane kubeconfig is mode $(file_mode "${lane_kc}"), want 600"
+    fi
+else
+    nope "no lane kubeconfig was created at ${lane_kc}"
+fi
+
+if [ "$(file_mode "${MOKKA_BIN_DIR}")" = "700" ]; then
+    ok "the lane bin directory is created mode 0700"
+else
+    nope "the lane bin directory is mode $(file_mode "${MOKKA_BIN_DIR}"), want 700"
+fi
+
+# The directory outlives any one run, and `mkdir -p` leaves an existing one
+# alone. A bin directory left behind by an older version of this script, or by
+# a run under a laxer umask, has to be tightened rather than accepted: that is
+# the state the real worktree was actually in.
+rm -rf "${MOKKA_BIN_DIR}"
+mkdir -p "${MOKKA_BIN_DIR}"
+chmod 755 "${MOKKA_BIN_DIR}"
+KEEP_BIN_DIR=1 run_subject "${UP}" mokka t4
+assert_rc 0 "up.sh succeeds with a pre-existing bin directory"
+if [ "$(file_mode "${MOKKA_BIN_DIR}")" = "700" ]; then
+    ok "up.sh tightens a pre-existing bin directory to 0700"
+else
+    nope "a pre-existing bin directory stayed mode $(file_mode "${MOKKA_BIN_DIR}"), want 700"
+fi
+
+# ---------------------------------------------------------------------------
+# ClusterPolicy is recorded, never gated on
+# ---------------------------------------------------------------------------
+
+export FAKE_CLUSTERPOLICY_STATE="notReady"
+run_subject "${UP}" mokka t4
+assert_rc 0 "a ClusterPolicy that is not ready does not fail the run"
+assert_says "ClusterPolicy state: notReady" "the notReady ClusterPolicy state is still printed"
+unset FAKE_CLUSTERPOLICY_STATE
+
+# An absent ClusterPolicy CRD makes the query fail; that is not a lane failure.
+export FAKE_CLUSTERPOLICY_STATE=""
+run_subject "${UP}" mokka t4
+assert_rc 0 "an unavailable ClusterPolicy does not fail the run"
+assert_says "ClusterPolicy state: <unavailable>" "an unavailable ClusterPolicy is reported as such"
+unset FAKE_CLUSTERPOLICY_STATE
+
+# ---------------------------------------------------------------------------
+# A failing tool is exit 1, and only a created cluster is reported as partial
+# ---------------------------------------------------------------------------
+
+export FAKE_HELM_RC=1
+run_subject "${UP}" mokka t4
+assert_rc 1 "a failing helm install exits 1"
+assert_says "partial install left in kubectl-nv-mokka; run hack/mokka/down.sh mokka" \
+    "a failing helm install reports the cluster it left behind"
+unset FAKE_HELM_RC
+
+export FAKE_KIND_RC=1
+run_subject "${UP}" mokka t4
+assert_rc 1 "a failing kind create exits 1"
+if printf '%s\n%s\n' "${OUT}" "${ERR}" | grep -qF 'partial install left in'; then
+    nope "a cluster that was never created must not be reported as partial" "stderr: ${ERR}"
+else
+    ok "a failing kind create does not claim a partial install"
+fi
+unset FAKE_KIND_RC
+
 # ---------------------------------------------------------------------------
 # Readiness: the DaemonSet gate
 # ---------------------------------------------------------------------------
@@ -564,31 +744,74 @@ export FAKE_DS_NOTFOUND_CALLS=3
 run_subject "${UP}" mokka t4
 assert_rc 0 "up.sh keeps waiting while the operand DaemonSets are not found yet"
 unset FAKE_DS_NOTFOUND_CALLS
+expect_converge
 
 export FAKE_DS_NOTREADY_CALLS=3
 run_subject "${UP}" mokka t4
 assert_rc 0 "up.sh keeps waiting while the operand DaemonSets are not ready yet"
 unset FAKE_DS_NOTREADY_CALLS
+expect_converge
 
 # Never ready: the deadline is reached and the last failing condition printed.
+expect_timeout
 export FAKE_DS_NOTREADY_CALLS=100000
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when the operand DaemonSets never become ready"
 assert_says "nvidia-device-plugin-daemonset" "up.sh names the DaemonSet that is not ready"
 assert_says "desired=2 ready=0 updated=2" "up.sh prints the last DaemonSet numbers it saw"
 unset FAKE_DS_NOTREADY_CALLS
+expect_converge
 
+expect_timeout
 export FAKE_DS_NOTFOUND_CALLS=100000
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when the operand DaemonSets never appear"
 assert_says "not found" "up.sh reports the DaemonSet as not found at the deadline"
 unset FAKE_DS_NOTFOUND_CALLS
+expect_converge
 
 # A DaemonSet scheduled onto fewer nodes than there are workers is not ready.
+expect_timeout
 export FAKE_DS_STATUS="1 1 1"
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when a DaemonSet covers fewer nodes than there are workers"
 unset FAKE_DS_STATUS
+expect_converge
+
+# Both operand DaemonSets are waited on, not just the first. Each of these
+# leaves the OTHER one fully ready, so a subject that checks only one of them
+# passes one case and fails the other.
+expect_timeout
+export FAKE_DS_STATUS_DEVICE_PLUGIN="2 2 2"
+export FAKE_DS_STATUS_GFD="2 0 2"
+run_subject "${UP}" mokka t4
+assert_rc 5 "up.sh waits for gpu-feature-discovery, not only the device plugin"
+assert_says "gpu-feature-discovery: desired=2 ready=0 updated=2" \
+    "up.sh names gpu-feature-discovery as the one that is not ready"
+unset FAKE_DS_STATUS_DEVICE_PLUGIN FAKE_DS_STATUS_GFD
+expect_converge
+
+expect_timeout
+export FAKE_DS_STATUS_DEVICE_PLUGIN="2 0 2"
+export FAKE_DS_STATUS_GFD="2 2 2"
+run_subject "${UP}" mokka t4
+assert_rc 5 "up.sh waits for the device plugin, not only gpu-feature-discovery"
+assert_says "nvidia-device-plugin-daemonset: desired=2 ready=0 updated=2" \
+    "up.sh names the device plugin as the one that is not ready"
+unset FAKE_DS_STATUS_DEVICE_PLUGIN FAKE_DS_STATUS_GFD
+expect_converge
+
+# A rollout still in progress reports every pod ready while fewer are updated.
+# Checking only numberReady would call that done and hand back a lane running
+# the previous image.
+expect_timeout
+export FAKE_DS_STATUS_DEVICE_PLUGIN="2 2 1"
+run_subject "${UP}" mokka t4
+assert_rc 5 "up.sh fails when a DaemonSet has fewer updated pods than desired"
+assert_says "nvidia-device-plugin-daemonset: desired=2 ready=2 updated=1" \
+    "up.sh prints the updated count it rejected"
+unset FAKE_DS_STATUS_DEVICE_PLUGIN
+expect_converge
 
 # ---------------------------------------------------------------------------
 # Readiness: the per-worker assertions are themselves the loop
@@ -600,30 +823,39 @@ export FAKE_GPU_NOTREADY_CALLS=6
 run_subject "${UP}" mokka t4
 assert_rc 0 "up.sh retries the per-worker assertions until they pass"
 unset FAKE_GPU_NOTREADY_CALLS
+expect_converge
 
+expect_timeout
 export FAKE_GPU_NOTREADY_CALLS=100000
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when the per-worker assertions never pass"
 assert_says "expected 4" "up.sh prints the last failing condition at the deadline"
 unset FAKE_GPU_NOTREADY_CALLS
+expect_converge
 
+expect_timeout
 export FAKE_ALLOCATABLE=2
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when allocatable nvidia.com/gpu is not the profile count"
 assert_says "expected 4" "up.sh reports the expected GPU count"
 unset FAKE_ALLOCATABLE
+expect_converge
 
+expect_timeout
 export FAKE_GPU_PRODUCT=""
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when the nvidia.com/gpu.product label is absent"
 unset FAKE_GPU_PRODUCT
+expect_converge
 
+expect_timeout
 export FAKE_PCI_LABEL="false"
 run_subject "${UP}" mokka t4
 assert_rc 5 "up.sh fails when feature.node.kubernetes.io/pci-10de.present is not true"
 assert_says "partial install left in kubectl-nv-mokka; run hack/mokka/down.sh mokka" \
     "a failed run says a partial install was left behind"
 unset FAKE_PCI_LABEL
+expect_converge
 
 # A run that never creates a cluster must NOT claim one was left behind.
 export FAKE_KIND_CLUSTERS="kubectl-nv-mokka"
@@ -636,6 +868,7 @@ fi
 unset FAKE_KIND_CLUSTERS
 
 # Every worker is checked, not just the first one.
+expect_timeout
 export FAKE_WORKERS="w1 w2"
 cat > "${SHIM_DIR}/kubectl" <<'SHIM'
 #!/bin/bash
@@ -691,6 +924,7 @@ check_profile() {
             "rc=${RC}" "stdout: ${OUT}" "stderr: ${ERR}"
     fi
     unset FAKE_ALLOCATABLE
+expect_converge
 }
 
 check_profile gb300 4
