@@ -8,12 +8,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-.PHONY: build fmt verify release
+.PHONY: build fmt verify test coverage lint ci-lint vendor mod-tidy mod-vendor mod-verify check-vendor licenses release-snapshot mdlint
 
 CONTAINER_RUN_CMD ?= docker run
 GO_CMD ?= go
 GO_FMT ?= gofmt
-GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*")
+GO_SRC := $(shell find . -type f -name '*.go' -not -path "./vendor/*" -not -path "./dist/*")
 CONTAINER_RUN_CMD ?= docker run
 
 BINARY_NAME ?= kubectl-nv
@@ -25,7 +25,7 @@ build:
 	$(GO_CMD) build -o bin/$(BINARY_NAME) cmd/main.go
 
 fmt:
-	@$(GO_FMT) -w -l $$(find . -name '*.go')
+	@$(GO_FMT) -w -l $(GO_SRC)
 
 COVERAGE_FILE := coverage.out
 test:
@@ -34,7 +34,7 @@ coverage: test
 	go tool cover -func=$(COVERAGE_FILE)
 
 verify:
-	@out=`$(GO_FMT) -w -l -d $$(find . -name '*.go')`; \
+	@out=`$(GO_FMT) -l -d $(GO_SRC)`; \
 	if [ -n "$$out" ]; then \
 	    echo "$$out"; \
 	    exit 1; \
@@ -42,6 +42,11 @@ verify:
 
 ci-lint:
 	golangci-lint run --timeout 10m
+
+lint:
+	golangci-lint run --timeout 10m
+	bash hack/lint-words_test.sh
+	bash hack/lint-words.sh
 
 vendor:  | mod-tidy mod-vendor mod-verify
 
@@ -72,15 +77,8 @@ check-vendor: vendor
 licenses:
 	go-licenses csv $(MODULE)/...
 
-release:
-	@rm -rf bin
-	@mkdir -p bin
-	@for os in linux darwin; do \
-		for arch in amd64 arm64; do \
-			echo "Building $$os-$$arch"; \
-			GOOS=$$os GOARCH=$$arch $(GO_CMD) build -o bin/$(BINARY_NAME)-$$os-$$arch cmd/main.go; \
-		done; \
-	done
+release-snapshot:
+	goreleaser release --snapshot --clean --skip=sbom
 
 mdlint:
 	${CONTAINER_RUN_CMD} \

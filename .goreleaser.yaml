@@ -1,0 +1,63 @@
+# Copyright 2026 NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+version: 2
+
+project_name: kubectl-nv
+
+builds:
+  - id: kubectl-nv
+    main: ./cmd
+    binary: kubectl-nv
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: kubectl-nv
+    ids:
+      - kubectl-nv
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
+  algorithm: sha256
+
+# syft is installed by the release workflow; `make release-snapshot` skips this
+# step so that a local snapshot does not need it.
+sboms:
+  - id: archive
+    artifacts: archive
+
+changelog:
+  use: git
+  sort: asc
+
+# Carlos reviews and publishes every release by hand, so the workflow only ever
+# creates a draft.
+release:
+  github:
+    owner: NVIDIA
+    name: kubectl-nv
+  draft: true
