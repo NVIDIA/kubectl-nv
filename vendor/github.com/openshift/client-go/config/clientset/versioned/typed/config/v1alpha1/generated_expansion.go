@@ -4,8 +4,12 @@ package v1alpha1
 
 type BackupExpansion interface{}
 
-type ClusterImagePolicyExpansion interface{}
+type CRIOCredentialProviderConfigExpansion interface{}
 
-type ImagePolicyExpansion interface{}
+type ClusterMonitoringExpansion interface{}
+
+type ControllerManagerExpansion interface{}
 
 type InsightsDataGatherExpansion interface{}
+
+type PKIExpansion interface{}
