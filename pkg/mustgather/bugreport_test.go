@@ -596,3 +596,27 @@ func TestDriverPodsAreNotReportedAsAbsent(t *testing.T) {
 		t.Errorf("artifact dir holds %v, want %v", got, want)
 	}
 }
+
+// TestVGPUManagerOnlyIsNotDriverless covers the cluster that runs no driver
+// daemonset but does run a vGPU manager one. The two labels are queried in
+// separate passes, so a count that only remembered the last pass, or only the
+// first, would call this cluster driverless and tell support to stop looking
+// for a bug report that the bundle holds.
+func TestVGPUManagerOnlyIsNotDriverless(t *testing.T) {
+	const namespace = "gpu-operator"
+
+	g, artifactDir, stderr := bugReportGatherer(t,
+		vgpuPod(t, namespace, "nvidia-vgpu-manager-daemonset-aaaaa", "worker-a"))
+
+	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
+		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	}
+
+	if strings.Contains(stderr.String(), "no driver pods found") {
+		t.Errorf("stderr calls a cluster with a vGPU manager pod driverless:\n%s", stderr.String())
+	}
+	want := []string{"nvidia-bug-report_worker-a.log.gz"}
+	if got := artifactNames(t, artifactDir); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("artifact dir holds %v, want %v", got, want)
+	}
+}
