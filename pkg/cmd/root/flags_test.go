@@ -18,6 +18,7 @@ package root_test
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -235,4 +236,47 @@ users:
 		t.Fatalf("writing kubeconfig: %v", err)
 	}
 	return path
+}
+
+// TestRuntimeFailureDoesNotPrintUsage keeps a cluster that could not be reached
+// from being reported as a usage mistake: the flags were fine, and forty lines
+// of flag help bury the one line that says what went wrong.
+func TestRuntimeFailureDoesNotPrintUsage(t *testing.T) {
+	out := &bytes.Buffer{}
+	cmd := root.NewCommand("test", root.Deps{
+		Streams: genericiooptions.NewTestIOStreamsDiscard(),
+		MustGather: func(*mustgather.Options) error {
+			return errors.New("dial tcp 127.0.0.1:1: connect: connection refused")
+		},
+	})
+	cmd.SetArgs([]string{"adm", "must-gather", "--kubeconfig", writeKubeconfig(t)})
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected the must-gather failure to be returned")
+	}
+	if strings.Contains(out.String(), "Usage:") {
+		t.Errorf("output = %q, want no usage block for a runtime failure", out.String())
+	}
+}
+
+// TestFlagMistakeStillPrintsUsage is the other half: an unknown flag is a usage
+// mistake, and the user should see the flags on offer.
+func TestFlagMistakeStillPrintsUsage(t *testing.T) {
+	out := &bytes.Buffer{}
+	cmd := root.NewCommand("test", root.Deps{
+		Streams:    genericiooptions.NewTestIOStreamsDiscard(),
+		MustGather: func(*mustgather.Options) error { return nil },
+	})
+	cmd.SetArgs([]string{"adm", "must-gather", "--not-a-flag"})
+	cmd.SetOut(out)
+	cmd.SetErr(out)
+
+	if err := cmd.Execute(); err == nil {
+		t.Fatal("expected an error for an unknown flag")
+	}
+	if !strings.Contains(out.String(), "Usage:") {
+		t.Errorf("output = %q, want the usage block for a flag mistake", out.String())
+	}
 }
