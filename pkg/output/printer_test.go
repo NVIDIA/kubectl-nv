@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -410,5 +411,104 @@ func TestKnownFormatsAreAccepted(t *testing.T) {
 		if got != want {
 			t.Errorf("ParseFormat(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+// raggedKind returns a row whose cell count does not match its columns, which
+// is a bug in the kind rather than anything the user did.
+type raggedKind struct {
+	metav1.TypeMeta `json:",inline"`
+
+	cells []string
+}
+
+func (r *raggedKind) DeepCopyObject() runtime.Object { clone := *r; return &clone }
+
+func (r *raggedKind) TableColumns(_ bool) []Column {
+	return []Column{{Header: "NAME"}, {Header: "GPUS"}}
+}
+
+func (r *raggedKind) TableRows(_ bool) [][]string { return [][]string{r.cells} }
+
+// A kind that hands back the wrong number of cells would otherwise print a
+// table whose columns do not line up with its headers, silently.
+func TestTableRejectsARowWithTheWrongCellCount(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		cells []string
+	}{
+		{name: "too few cells", cells: []string{"node-a"}},
+		{name: "too many cells", cells: []string{"node-a", "8", "extra"}},
+		{name: "no cells at all", cells: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			printer, err := NewPrinter(string(FormatTable))
+			if err != nil {
+				t.Fatalf("NewPrinter(table): %v", err)
+			}
+
+			obj := &raggedKind{TypeMeta: TypeMetaFor(KindGPUNode), cells: tc.cells}
+
+			var buf bytes.Buffer
+			err = printer.PrintObj(obj, &buf)
+			if err == nil {
+				t.Fatalf("PrintObj accepted a row of %d cells against 2 columns, output:\n%s", len(tc.cells), buf.String())
+			}
+
+			want := fmt.Sprintf("row 0 has %d cells, want 2", len(tc.cells))
+			if err.Error() != want {
+				t.Errorf("error = %q, want %q", err.Error(), want)
+			}
+
+			var usage *UsageError
+			if errors.As(err, &usage) {
+				t.Errorf("error %v is a usage error, want a plain error", err)
+			}
+		})
+	}
+}
+
+// Label values, taints and node names reach the wide columns, and stdout is a
+// terminal. A cell that can move the cursor can repaint the table around it.
+func TestTableCellsAreSanitized(t *testing.T) {
+	t.Parallel()
+
+	obj := &gpuNode{
+		TypeMeta:   TypeMetaFor(KindGPUNode),
+		ObjectMeta: metav1.ObjectMeta{Name: "node-\x1b[31ma\u009b31mb\x7fc"},
+		Spec:       gpuNodeSpec{Driver: "580\t65\n580.66"},
+	}
+
+	printer, err := NewPrinter(string(FormatWide))
+	if err != nil {
+		t.Fatalf("NewPrinter(wide): %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := printer.PrintObj(obj, &buf); err != nil {
+		t.Fatalf("PrintObj: %v", err)
+	}
+
+	out := buf.String()
+	for _, bad := range []string{"\x1b", "\u009b", "\x7f", "\x00"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("table output still carries %q: %q", bad, out)
+		}
+	}
+	if !strings.Contains(out, "node-[31ma31mbc") {
+		t.Errorf("table output = %q, want the name with only the control bytes removed", out)
+	}
+
+	// A tab or a newline inside a cell would break the columns apart, so in a
+	// cell they become a space rather than being kept.
+	if !strings.Contains(out, "580 65 580.66") {
+		t.Errorf("table output = %q, want the tab and newline inside the cell turned into spaces", out)
+	}
+	if n := strings.Count(strings.TrimRight(out, "\n"), "\n"); n != 1 {
+		t.Errorf("table has %d line breaks, want 1 (header plus one row): %q", n, out)
 	}
 }

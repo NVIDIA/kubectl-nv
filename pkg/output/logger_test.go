@@ -163,24 +163,29 @@ func TestLoggerEmptyNoColorEnvironmentDoesNotDisableColor(t *testing.T) {
 
 // Node names, taints and container logs come from the cluster. A control
 // character in one of them must not reach the terminal, or anything that can
-// write a node name can move the cursor and repaint the screen.
+// write a node name can move the cursor and repaint the screen. C1 is in scope
+// as well as C0: U+009B is a CSI on its own, so stripping only ESC would leave
+// a working escape sequence behind.
 func TestLoggerStripsControlCharacters(t *testing.T) {
 	t.Parallel()
 
 	streams, _, _, errOut := genericiooptions.NewTestIOStreams()
 	logger := NewLogger(streams, LoggerOptions{NoColor: true})
 
-	logger.Warnf("node %s is tainted", "bad\033[31mname\x00end\x07")
+	logger.Warnf("node %s is tainted", "bad\x1b[31mname\u009b31mmore\x7fend\x00\u0085")
 	logger.Infof("column\there\nand a second line")
 
 	got := errOut.String()
-	if strings.ContainsAny(got, "\033\x00\x07") {
-		t.Errorf("stderr still carries a control character: %q", got)
+	for _, bad := range []string{"\x1b", "\u009b", "\x7f", "\x00", "\u0085"} {
+		if strings.Contains(got, bad) {
+			t.Errorf("stderr still carries %q: %q", bad, got)
+		}
 	}
-	if !strings.Contains(got, "node bad[31mnameend is tainted\n") {
+	if !strings.Contains(got, "node bad[31mname31mmoreend is tainted\n") {
 		t.Errorf("stderr = %q, want the text with only the control bytes removed", got)
 	}
-	// A tab and a newline are how a terminal lays text out, so they stay.
+	// A tab and a newline are how a terminal lays text out, so the logger keeps
+	// them: unlike a table cell, a log line has no columns to break.
 	if !strings.Contains(got, "column\there\nand a second line\n") {
 		t.Errorf("stderr = %q, want the tab and the newline kept", got)
 	}
