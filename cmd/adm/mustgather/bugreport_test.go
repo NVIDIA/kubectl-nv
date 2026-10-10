@@ -300,7 +300,7 @@ func TestCollectBugReportsContinuesAfterFailure(t *testing.T) {
 		fetchPodFile: recordingFetcher(map[string]bool{failing: true}),
 	}
 
-	err := g.collectBugReports("app=nvidia-driver-daemonset", pods)
+	err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool))
 	if err == nil {
 		t.Fatal("collectBugReports returned nil, want an error naming the failing pod")
 	}
@@ -349,7 +349,7 @@ func TestCollectBugReportsSkipsUncollectablePods(t *testing.T) {
 		},
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods); err != nil {
+	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
 		t.Fatalf("collectBugReports: %v", err)
 	}
 
@@ -392,7 +392,7 @@ func TestCollectBugReportsKeepsBothReportsOnOneNode(t *testing.T) {
 		fetchPodFile: recordingFetcher(nil),
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods); err != nil {
+	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
 		t.Fatalf("collectBugReports: %v", err)
 	}
 
@@ -445,7 +445,7 @@ func TestGatherBugReportNamesFilesPerNode(t *testing.T) {
 		},
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods); err != nil {
+	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
 		t.Fatalf("collectBugReports: %v", err)
 	}
 

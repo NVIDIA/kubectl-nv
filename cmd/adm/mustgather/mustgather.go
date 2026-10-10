@@ -922,6 +922,10 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 		all.Items = append(all.Items, page.Items...)
 	}
 	var errs []error
+	// One ledger of destination names for every daemonset: a node can run both a
+	// driver pod and a vGPU manager pod, and each pass must see what the previous
+	// one already wrote.
+	taken := make(map[string]bool)
 	for _, label := range labels {
 		listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
 			pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
@@ -937,7 +941,7 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 			}
 			return err
 		}
-		if err := g.collectBugReports(label, podList.Items); err != nil {
+		if err := g.collectBugReports(label, podList.Items, taken); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -946,10 +950,10 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 
 // collectBugReports copies the bug report out of each of the given daemonset
 // pods into the artifact directory. label identifies the daemonset the pods
-// belong to and is used for error reporting.
-func (g *Gatherer) collectBugReports(label string, pods []v1.Pod) error {
+// belong to and is used for error reporting. taken carries the destination
+// names already used across every daemonset, and is added to here.
+func (g *Gatherer) collectBugReports(label string, pods []v1.Pod, taken map[string]bool) error {
 	var errs []error
-	taken := make(map[string]bool, len(pods))
 
 	for i := range pods {
 		pod := pods[i]
@@ -972,8 +976,9 @@ func (g *Gatherer) collectBugReports(label string, pods []v1.Pod) error {
 
 		// Name the report after the node the pod runs on, matching the gpu-operator
 		// must-gather script. Naming it after the daemonset instead would make every
-		// pod of that daemonset write to the same file. A node running more than one
-		// pod of the daemonset, as happens mid-rollout, gets the pod name too.
+		// pod of that daemonset write to the same file. A node already collected
+		// from, because it runs a second pod of this daemonset mid-rollout or a pod
+		// of another one, gets the pod name too.
 		destFileName := fmt.Sprintf("nvidia-bug-report_%s.log.gz", pod.Spec.NodeName)
 		if taken[destFileName] {
 			destFileName = fmt.Sprintf("nvidia-bug-report_%s_%s.log.gz", pod.Spec.NodeName, pod.Name)
