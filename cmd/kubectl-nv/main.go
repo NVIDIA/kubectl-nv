@@ -17,6 +17,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -61,8 +62,16 @@ func run(args []string, streams genericiooptions.IOStreams, c *cobra.Command) (c
 
 	c.SetArgs(args)
 	c.SetIn(streams.In)
-	c.SetOut(streams.Out)
 	c.SetErr(streams.ErrOut)
+
+	// Usage is a diagnostic and belongs on the error stream; help is what the
+	// user asked for and belongs on stdout. Cobra writes both through the same
+	// stream, so which one that is depends on what was asked.
+	if helpRequested(args) {
+		c.SetOut(streams.Out)
+	} else {
+		c.SetOut(streams.ErrOut)
+	}
 
 	executed, err := c.ExecuteC()
 	if err == nil {
@@ -72,12 +81,26 @@ func run(args []string, streams genericiooptions.IOStreams, c *cobra.Command) (c
 	// The root silences usage once the flags have parsed and the pre-run hook
 	// has had its say. A command that still has usage on at this point failed
 	// before it started doing any work, which makes it the user's to fix.
-	if executed != nil && !executed.SilenceUsage {
+	// Flag errors arrive already marked, and naming the command twice reads as
+	// "kubectl-nv: kubectl-nv: ...".
+	var alreadyUsage *output.UsageError
+	if executed != nil && !executed.SilenceUsage && !errors.As(err, &alreadyUsage) {
 		err = output.WrapUsageError(err, "%s", executed.CommandPath())
 	}
 
 	fmt.Fprintf(streams.ErrOut, "Error: %v\n", err)
 	return output.ExitCodeFor(err)
+}
+
+// helpRequested reports whether the user asked for help, rather than being
+// shown it because something went wrong.
+func helpRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" || arg == "help" {
+			return true
+		}
+	}
+	return false
 }
 
 // debugRequested reports whether the command line asked for debug output. The

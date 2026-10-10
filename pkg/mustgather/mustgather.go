@@ -41,7 +41,7 @@ import (
 // Options defines the configurable parameters for the must-gather operation.
 type Options struct {
 	ArtifactDir string // Directory to store gathered artifacts/logs.
-	Debug       bool   // Report every gathering step as it happens.
+	Debug       bool   // Name every artifact as it is written.
 
 	// FetchPodFile replaces the live exec-and-copy that pulls a bug report out
 	// of a driver pod. It is the seam the tests drive the gatherer through
@@ -1115,6 +1115,12 @@ func (g *Gatherer) createArtifact(path string) (*os.File, error) {
 		return nil, err
 	}
 	g.collected = true
+	// With debug on, the bundle is listed as it is built: a support engineer
+	// chasing a missing file needs to know whether it was never written or
+	// written and empty.
+	if g.opts.Debug {
+		g.step("Wrote %s", filepath.Base(path))
+	}
 	return file, nil
 }
 

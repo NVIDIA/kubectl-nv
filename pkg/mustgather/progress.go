@@ -17,8 +17,6 @@
 package mustgather
 
 import (
-	"fmt"
-
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
@@ -78,5 +76,5 @@ func (g *Gatherer) note(format string, a ...any) {
 	if g.progress == nil {
 		return
 	}
-	g.progress.Warnf(fmt.Sprintf(format, a...))
+	g.progress.Warnf(format, a...)
 }
