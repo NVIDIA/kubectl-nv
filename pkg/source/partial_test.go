@@ -240,3 +240,68 @@ func TestJoinedPartialErrors(t *testing.T) {
 		t.Errorf("output.ExitCodeFor(joined) = %d, want %d", got, output.ExitPartial)
 	}
 }
+
+// TestLivePodsForbiddenIsPartial covers a reader allowed nodes but not pods,
+// which is a routine namespace-scoped RBAC split. The run still has an answer
+// about the nodes, so the pods are reported as the one resource that was lost.
+func TestLivePodsForbiddenIsPartial(t *testing.T) {
+	counter := newCallCounter()
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("list", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		counter.record("list", "pods")
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Resource: "pods"}, "", errors.New("not allowed"))
+	})
+
+	got, err := NewLive(cs, newDynamicFake(t)).Pods(context.Background(), "gpu-operator", "")
+	if len(got) != 0 {
+		t.Errorf("Pods() returned %d pods, want 0", len(got))
+	}
+
+	var pe *PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want *PartialError", err, err)
+	}
+	if pe.Resource != "pods" {
+		t.Errorf("PartialError.Resource = %q, want pods", pe.Resource)
+	}
+	if !apierrors.IsForbidden(errors.Unwrap(pe)) {
+		t.Errorf("unwrapped error = %v, want a Forbidden API error", errors.Unwrap(pe))
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(err) = %d, want %d (ExitPartial)", got, output.ExitPartial)
+	}
+}
+
+// TestLiveClusterPoliciesForbiddenIsPartial is the same split one layer up: a
+// reader with no access to the GPU Operator's custom resources. That is a
+// denial, not the absence ErrNotInstalled describes, so it is partial.
+func TestLiveClusterPoliciesForbiddenIsPartial(t *testing.T) {
+	dyn := newDynamicFake(t)
+	dyn.PrependReactor("list", "clusterpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "nvidia.com", Resource: "clusterpolicies"}, "", errors.New("not allowed"))
+	})
+
+	got, err := NewLive(fake.NewSimpleClientset(), dyn).ClusterPolicies(context.Background())
+	if len(got) != 0 {
+		t.Errorf("ClusterPolicies() returned %d objects, want 0", len(got))
+	}
+
+	var pe *PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v (%T), want *PartialError", err, err)
+	}
+	if pe.Resource != "clusterpolicies" {
+		t.Errorf("PartialError.Resource = %q, want clusterpolicies", pe.Resource)
+	}
+	if !apierrors.IsForbidden(errors.Unwrap(pe)) {
+		t.Errorf("unwrapped error = %v, want a Forbidden API error", errors.Unwrap(pe))
+	}
+	if errors.Is(err, ErrNotInstalled) {
+		t.Error("error matched ErrNotInstalled; a denied read is not an absent CRD")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("output.ExitCodeFor(err) = %d, want %d (ExitPartial)", got, output.ExitPartial)
+	}
+}

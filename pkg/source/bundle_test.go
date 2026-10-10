@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -530,6 +531,11 @@ func TestBundleRejectsOversizeFile(t *testing.T) {
 	}
 }
 
+// TestBundleHonoursContext pins both halves of the cancellation contract: the
+// caller's context stops every read, and a cancelled read is a plain error.
+// Nothing was gathered, so there is no incomplete answer to qualify, and
+// reporting exit 3 here would tell a script that the findings it never got
+// were merely partial.
 func TestBundleHonoursContext(t *testing.T) {
 	b, err := NewBundle(filepath.Join("testdata", "bundle-min"))
 	if err != nil {
@@ -538,17 +544,31 @@ func TestBundleHonoursContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, _, err := b.ClassifyNodes(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("ClassifyNodes() error = %v, want context.Canceled", err)
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"ClassifyNodes", func() error { _, _, err := b.ClassifyNodes(ctx); return err }},
+		{"Nodes", func() error { _, err := b.Nodes(ctx); return err }},
+		{"HintedNodes", func() error { _, err := b.HintedNodes(ctx); return err }},
+		{"Pods", func() error { _, err := b.Pods(ctx, "gpu-operator", ""); return err }},
+		{"ResourceSlices", func() error { _, err := b.ResourceSlices(ctx); return err }},
+		{"ClusterPolicies", func() error { _, err := b.ClusterPolicies(ctx); return err }},
 	}
-	if _, err := b.Pods(ctx, "gpu-operator", ""); !errors.Is(err, context.Canceled) {
-		t.Errorf("Pods() error = %v, want context.Canceled", err)
-	}
-	if _, err := b.ResourceSlices(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("ResourceSlices() error = %v, want context.Canceled", err)
-	}
-	if _, err := b.ClusterPolicies(ctx); !errors.Is(err, context.Canceled) {
-		t.Errorf("ClusterPolicies() error = %v, want context.Canceled", err)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.call()
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("%s() error = %v, want context.Canceled", c.name, err)
+			}
+			var pe *PartialError
+			if errors.As(err, &pe) {
+				t.Errorf("%s() error = %v, want a plain error, not *PartialError", c.name, err)
+			}
+			if got := output.ExitCodeFor(err); got != output.ExitError {
+				t.Errorf("output.ExitCodeFor(%v) = %d, want %d (ExitError)", err, got, output.ExitError)
+			}
+		})
 	}
 }
 
