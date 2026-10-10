@@ -41,6 +41,11 @@ type Deps struct {
 	Streams    genericiooptions.IOStreams
 	Factory    cmd.Factory
 	MustGather mustgather.RunFunc
+
+	// Options, when non-nil, is the state the root fills in and every
+	// subcommand reads. A caller that needs to see what parsing produced passes
+	// its own; the root makes one otherwise.
+	Options *cmd.Options
 }
 
 // NewCommand builds the kubectl-nv command tree. version is what the binary

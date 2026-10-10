@@ -19,11 +19,15 @@ package root_test
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
+
+	nvcmd "github.com/NVIDIA/kubectl-nv/pkg/cmd"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/root"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
@@ -66,6 +70,14 @@ func TestMustGatherFlagCompatibility(t *testing.T) {
 			args:           []string{"adm", "must-gather", "--kubeconfig", kubeconfig},
 			env:            map[string]string{"KUBECONFIG": otherKubeconfig},
 			wantKubeconfig: kubeconfig,
+		},
+		{
+			// Reporting the KUBECONFIG path here, as a second resolver did, tells
+			// the user the gather came from a cluster it never looked at.
+			name:           "an explicit path that does not exist is still what we report",
+			args:           []string{"adm", "must-gather", "--kubeconfig", "/nonexistent/config"},
+			env:            map[string]string{"KUBECONFIG": kubeconfig},
+			wantKubeconfig: "/nonexistent/config",
 		},
 		{
 			name:            "artifacts dir flag",
@@ -130,8 +142,9 @@ func TestMustGatherFlagCompatibility(t *testing.T) {
 			}
 
 			var got *mustgather.Options
+			progress := &bytes.Buffer{}
 			cmd := root.NewCommand("test", root.Deps{
-				Streams: genericiooptions.NewTestIOStreamsDiscard(),
+				Streams: genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: io.Discard, ErrOut: progress},
 				MustGather: func(o *mustgather.Options) error {
 					got = o
 					return nil
@@ -147,8 +160,12 @@ func TestMustGatherFlagCompatibility(t *testing.T) {
 			if got == nil {
 				t.Fatalf("Execute(%v) never reached the must-gather seam", c.args)
 			}
-			if got.Kubeconfig != c.wantKubeconfig {
-				t.Errorf("kubeconfig = %q, want %q", got.Kubeconfig, c.wantKubeconfig)
+			// The kubeconfig in play is what the run tells the user it is: there
+			// is no second copy of it to inspect, because the client
+			// configuration is the only thing that resolves one.
+			wantLine := "Using kubeconfig: " + c.wantKubeconfig + "\n"
+			if !strings.Contains(progress.String(), wantLine) {
+				t.Errorf("progress = %q, want it to contain %q", progress.String(), wantLine)
 			}
 			if c.wantArtifactDir != "" && got.ArtifactDir != c.wantArtifactDir {
 				t.Errorf("artifacts dir = %q, want %q", got.ArtifactDir, c.wantArtifactDir)
@@ -278,5 +295,86 @@ func TestFlagMistakeStillPrintsUsage(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Usage:") {
 		t.Errorf("output = %q, want the usage block for a flag mistake", out.String())
+	}
+}
+
+// TestUnknownSubcommandIsAnError keeps a typo from looking like success. The
+// adm command used to print its help and exit 0 for "adm must-gaher", so a
+// script that collected nothing reported that it had.
+func TestUnknownSubcommandIsAnError(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		wantHas string
+	}{
+		{name: "typo in a subcommand", args: []string{"adm", "must-gaher"}, wantHas: "must-gaher"},
+		{name: "unknown top-level command", args: []string{"bogus"}, wantHas: "bogus"},
+		{name: "stray argument to a leaf", args: []string{"adm", "must-gather", "extra"}, wantHas: "extra"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reached := false
+			cmd := root.NewCommand("test", root.Deps{
+				Streams:    genericiooptions.NewTestIOStreamsDiscard(),
+				MustGather: func(*mustgather.Options) error { reached = true; return nil },
+			})
+			cmd.SetArgs(c.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("Execute(%v) returned nil, want an error", c.args)
+			}
+			if !strings.Contains(err.Error(), c.wantHas) {
+				t.Errorf("error = %q, want it to name %q", err.Error(), c.wantHas)
+			}
+			if reached {
+				t.Error("the must-gather ran for an invocation that should not have parsed")
+			}
+		})
+	}
+}
+
+// TestParentHooksRunForASubcommandWithItsOwnHook covers the shape every
+// command added after this one will have. Cobra runs only the closest
+// PersistentPreRunE in the chain unless told otherwise, so a subcommand that
+// defines one of its own would otherwise skip the root's and run with no
+// client factory and no debug setting at all.
+func TestParentHooksRunForASubcommandWithItsOwnHook(t *testing.T) {
+	t.Setenv("DEBUG", "1")
+
+	options := &nvcmd.Options{}
+	cmd := root.NewCommand("test", root.Deps{
+		Streams:    genericiooptions.NewTestIOStreamsDiscard(),
+		Options:    options,
+		MustGather: func(*mustgather.Options) error { return nil },
+	})
+
+	ran := false
+	probe := &cobra.Command{
+		Use: "probe",
+		// A hook of its own, which is what hides the root's.
+		PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
+		RunE:              func(*cobra.Command, []string) error { ran = true; return nil },
+	}
+	cmd.AddCommand(probe)
+
+	cmd.SetArgs([]string{"probe"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute returned %v", err)
+	}
+	if !ran {
+		t.Fatal("the subcommand did not run")
+	}
+	if options.Factory == nil {
+		t.Error("factory is nil: the subcommand would panic on its first client")
+	}
+	if !options.Debug {
+		t.Error("debug is false although DEBUG=1: the root hook did not run")
 	}
 }

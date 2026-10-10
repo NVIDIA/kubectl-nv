@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
 )
 
@@ -96,3 +97,69 @@ func TestSetKubernetesDefaults(t *testing.T) {
 		t.Error("GroupVersion not set")
 	}
 }
+
+// TestExplicitKubeconfigMustExist pins the one resolver. A path given on the
+// command line is a statement of intent: falling back to KUBECONFIG because
+// that path is missing would gather from a cluster the user did not name.
+func TestExplicitKubeconfigMustExist(t *testing.T) {
+	good := filepath.Join(t.TempDir(), "config")
+	if err := os.WriteFile(good, []byte(testKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("KUBECONFIG", good)
+
+	missing := filepath.Join(t.TempDir(), "nonexistent")
+	flags := genericclioptions.NewConfigFlags(false)
+	flags.KubeConfig = &missing
+
+	_, err := NewFactory(flags).RESTConfig()
+	if err == nil {
+		t.Fatal("expected an error for a kubeconfig that does not exist")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("error = %q, want it to name %q", err.Error(), missing)
+	}
+}
+
+// TestServerAndTokenWithoutAKubeconfig covers the other half: with --server and
+// --token there is nothing to read from disk, and demanding a kubeconfig file
+// would turn a working invocation into an error.
+func TestServerAndTokenWithoutAKubeconfig(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("KUBECONFIG", "")
+
+	server := "https://127.0.0.1:1"
+	token := "not-a-real-token"
+	flags := genericclioptions.NewConfigFlags(false)
+	flags.APIServer = &server
+	flags.BearerToken = &token
+
+	f := NewFactory(flags)
+	config, err := f.RESTConfig()
+	if err != nil {
+		t.Fatalf("RESTConfig returned %v", err)
+	}
+	if config.Host != server {
+		t.Errorf("host = %q, want %q", config.Host, server)
+	}
+	if _, err := f.KubernetesClient(); err != nil {
+		t.Errorf("KubernetesClient returned %v", err)
+	}
+}
+
+const testKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+- name: test
+  cluster:
+    server: https://127.0.0.1:1
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+current-context: test
+users:
+- name: test
+  user: {}
+`
