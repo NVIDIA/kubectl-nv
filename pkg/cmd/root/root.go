@@ -59,6 +59,10 @@ func NewCommand(version string, d Deps) *cobra.Command {
 		Version:       version,
 		SilenceErrors: true,
 		PersistentPreRunE: func(c *cobra.Command, _ []string) error {
+			// The flags parsed, so whatever fails from here on is not a usage
+			// mistake and should not be answered with the flag list.
+			c.SilenceUsage = true
+
 			debug, err := resolveDebug(c)
 			if err != nil {
 				return err
