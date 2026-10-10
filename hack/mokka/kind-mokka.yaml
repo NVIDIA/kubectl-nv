@@ -1,0 +1,30 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind topology for a Mokka lane: one control plane and two workers.
+#
+# Two workers and not one: the per-worker assertions in up.sh exist to catch a
+# lane where only one node got labelled, and a single-worker cluster cannot
+# catch that. Two and not three: each extra node is another cold image pull,
+# about eight minutes, for no extra coverage.
+#
+# The containerdConfigPatches block below is copied verbatim from
+# docs/guides/kind.yaml in NVIDIA/k8s-test-infra at 4ce11e5. NRI has to be
+# enabled before the node starts, which is why it lives here rather than in a
+# chart value.
+#
+# That upstream file also labels its workers run.ai/simulated-gpu-node-pool.
+# Those labels belong to a different demo's node-pool selection and nothing in
+# this repository reads them, so they are deliberately not copied.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.nri.v1.nri"]
+      disable = false
+      disable_connections = false
+      socket_path = "/var/run/nri/nri.sock"
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

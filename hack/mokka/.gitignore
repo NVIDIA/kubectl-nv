@@ -1,0 +1,3 @@
+# Lane kubeconfigs written by up.sh. A kubeconfig carries cluster
+# credentials and never enters git.
+bin/
