@@ -55,7 +55,7 @@ const (
 	labelValueTrue = "true"
 
 	// pageLimit is the page size for every list. It matches the limit
-	// cmd/adm/mustgather already uses, so a large cluster is walked in
+	// pkg/mustgather already uses, so a large cluster is walked in
 	// bounded chunks instead of one unbounded response.
 	pageLimit = 500
 )
@@ -190,8 +190,10 @@ func sliceNodeNames(slices []resourcev1.ResourceSlice) map[string]struct{} {
 // disjoint: membership wins, so a node that carries a hint and has capacity is
 // a GPU node and nothing else.
 //
-// fromSlices may be nil, which is the case for a bundle: must-gather collects
-// no ResourceSlices, so only the capacity rule can fire offline.
+// fromSlices may be nil, which is what a bundle gathered before must-gather
+// started writing resourceslices.yaml looks like. Only the capacity rule can
+// fire then, and the bundle reader reports that as a partial read rather than
+// letting a slice-only GPU node quietly go missing.
 func classifyNodes(nodes []corev1.Node, fromSlices map[string]struct{}) (gpus, hinted []corev1.Node) {
 	gpus = make([]corev1.Node, 0, len(nodes))
 	hinted = make([]corev1.Node, 0, len(nodes))

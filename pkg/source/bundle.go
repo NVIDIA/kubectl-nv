@@ -34,9 +34,9 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// File names written by cmd/adm/mustgather. gatherNodeInfo writes nodes.yaml,
-// gatherPodInfo writes gpu_operand_pods.yaml, and gatherCRs writes
-// cluster_policy.yaml.
+// File names written by pkg/mustgather. gatherNodeInfo writes nodes.yaml,
+// gatherPodInfo writes gpu_operand_pods.yaml, gatherCRs writes
+// cluster_policy.yaml, and resourceslices.yaml carries the DRA slices.
 const (
 	fileNodes          = "nodes.yaml"
 	fileOperandPods    = "gpu_operand_pods.yaml"
