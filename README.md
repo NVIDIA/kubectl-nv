@@ -50,8 +50,8 @@ What is planned for the next six months, milestone by milestone, is in
 
 ## Testing
 
-CI exercises the plugin against Mokka, which runs the GPU Operator on simulated
-GPUs, so changes are tested without GPU hardware.
+End-to-end tests against Mokka, which runs the GPU Operator on simulated GPUs,
+are planned; see [ROADMAP.md](ROADMAP.md).
 
 ## License
 
