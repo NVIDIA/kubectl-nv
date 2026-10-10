@@ -19,6 +19,7 @@ package mustgather
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -757,9 +758,11 @@ func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) err
 	return nil
 }
 
-// containerNames lists every container of the pod whose logs are worth
-// collecting: init containers first, then regular containers, each in spec
-// order. This mirrors "kubectl logs --all-containers".
+// containerNames lists the containers of the pod whose logs are collected: init
+// containers first, then regular containers, each in spec order. Ephemeral
+// containers, which "kubectl logs --all-containers" also covers, are left out:
+// they are attached for live debugging and are gone by the time a bug report is
+// read.
 func containerNames(pod *v1.Pod) []string {
 	names := make([]string, 0, len(pod.Spec.InitContainers)+len(pod.Spec.Containers))
 	for _, c := range pod.Spec.InitContainers {
@@ -807,8 +810,18 @@ func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container
 	}
 	defer stream.Close()
 
-	if err := writePrefixedLines(logFile, stream, pod.Name, container); err != nil {
+	writer := bufio.NewWriter(logFile)
+	if err := writePrefixedLines(writer, stream, pod.Name, container); err != nil {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing %s: %v\n", fileName, err); lerr != nil {
+			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+		}
+		return err
+	}
+	// The buffer holds the tail of the log until this point, so a failure here
+	// truncates the artifact silently.
+	if err := writer.Flush(); err != nil {
+		err = fmt.Errorf("error flushing %s: %w", fileName, err)
+		if _, lerr := fmt.Fprintf(g.errLogFile, "%v\n", err); lerr != nil {
 			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 		}
 		return err
@@ -908,6 +921,7 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 	appendFunc := func(all *v1.PodList, page v1.PodList) {
 		all.Items = append(all.Items, page.Items...)
 	}
+	var errs []error
 	for _, label := range labels {
 		listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
 			pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
@@ -924,33 +938,62 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error 
 			return err
 		}
 		if err := g.collectBugReports(label, podList.Items); err != nil {
-			return err
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // collectBugReports copies the bug report out of each of the given daemonset
 // pods into the artifact directory. label identifies the daemonset the pods
 // belong to and is used for error reporting.
 func (g *Gatherer) collectBugReports(label string, pods []v1.Pod) error {
+	var errs []error
+	taken := make(map[string]bool, len(pods))
+
 	for i := range pods {
 		pod := pods[i]
 
+		// A pod that never got scheduled has no node to name a report after, and
+		// one that is not running cannot answer an exec. Record the gap and move on
+		// rather than spending a doomed exec on it.
+		if pod.Spec.NodeName == "" {
+			if _, lerr := fmt.Fprintf(g.errLogFile, "Skipping pod %s (label %s): not scheduled to a node\n", pod.Name, label); lerr != nil {
+				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
+			}
+			continue
+		}
+		if pod.Status.Phase != v1.PodRunning {
+			if _, lerr := fmt.Fprintf(g.errLogFile, "Skipping pod %s (label %s): pod is %s, not Running\n", pod.Name, label, pod.Status.Phase); lerr != nil {
+				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
+			}
+			continue
+		}
+
 		// Name the report after the node the pod runs on, matching the gpu-operator
 		// must-gather script. Naming it after the daemonset instead would make every
-		// pod of that daemonset write to the same file.
+		// pod of that daemonset write to the same file. A node running more than one
+		// pod of the daemonset, as happens mid-rollout, gets the pod name too.
 		destFileName := fmt.Sprintf("nvidia-bug-report_%s.log.gz", pod.Spec.NodeName)
+		if taken[destFileName] {
+			destFileName = fmt.Sprintf("nvidia-bug-report_%s_%s.log.gz", pod.Spec.NodeName, pod.Name)
+		}
+		taken[destFileName] = true
 		destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
 
+		// One unreachable pod must not cost us the reports of the nodes behind it,
+		// so collect what we can and report the failures together at the end.
 		if err := g.fetchBugReport(&pod, destPath); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error collecting bug report from pod %s (label %s): %v\n", pod.Name, label, err); lerr != nil {
+			err = fmt.Errorf("collecting bug report from pod %s (label %s): %w", pod.Name, label, err)
+			if _, lerr := fmt.Fprintf(g.errLogFile, "%v\n", err); lerr != nil {
 				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
 			}
-			return err
+			errs = append(errs, err)
+			continue
 		}
 	}
-	return nil
+
+	return errors.Join(errs...)
 }
 
 func (m command) run(opts *Options) error {
