@@ -18,19 +18,28 @@ package output
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 )
 
+// alwaysTerminal and neverTerminal stand in for the terminal check so that the
+// color decision can be exercised without a pty.
+func alwaysTerminal(_ io.Writer) bool { return true }
+
+func neverTerminal(_ io.Writer) bool { return false }
+
 func TestLoggerWritesToTheErrorStreamOnly(t *testing.T) {
 	t.Parallel()
 
 	streams, _, out, errOut := genericiooptions.NewTestIOStreams()
-	logger := NewLogger(streams, true)
+	logger := NewLogger(streams, LoggerOptions{NoColor: true})
 
 	logger.Infof("scanning %d nodes", 3)
 	logger.Warnf("node %s denied exec", "node-a")
@@ -51,61 +60,190 @@ func TestLoggerWritesToTheErrorStreamOnly(t *testing.T) {
 	}
 }
 
-func TestLoggerOmitsColorWhenDisabledOrNotATerminal(t *testing.T) {
+func TestLoggerColorDecision(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name    string
-		noColor bool
+		name      string
+		opts      LoggerOptions
+		wantPaint bool
 	}{
-		{name: "no-color requested", noColor: true},
-		{name: "not a terminal", noColor: false},
+		{
+			name:      "a terminal with color allowed",
+			opts:      LoggerOptions{IsTerminal: alwaysTerminal},
+			wantPaint: true,
+		},
+		{
+			// The case the review called out: a real terminal plus --no-color
+			// still has to come out clean, or the flag does nothing.
+			name:      "a terminal with no-color",
+			opts:      LoggerOptions{NoColor: true, IsTerminal: alwaysTerminal},
+			wantPaint: false,
+		},
+		{
+			name:      "not a terminal",
+			opts:      LoggerOptions{IsTerminal: neverTerminal},
+			wantPaint: false,
+		},
+		{
+			name:      "not a terminal and no-color",
+			opts:      LoggerOptions{NoColor: true, IsTerminal: neverTerminal},
+			wantPaint: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			streams, _, _, errOut := genericiooptions.NewTestIOStreams()
-			logger := NewLogger(streams, tc.noColor)
+			logger := NewLogger(streams, tc.opts)
 
 			logger.Warnf("careful")
 			logger.Errorf("broken")
+			logger.Infof("plain")
 
-			if strings.Contains(errOut.String(), "\033[") {
-				t.Errorf("stderr carries an escape sequence: %q", errOut.String())
+			got := errOut.String()
+			if tc.wantPaint {
+				if !strings.Contains(got, "\033[33mcareful\033[0m") {
+					t.Errorf("warning is not yellow: %q", got)
+				}
+				if !strings.Contains(got, "\033[31mbroken\033[0m") {
+					t.Errorf("error is not red: %q", got)
+				}
+				if strings.Contains(got, "\033[33mplain") || strings.Contains(got, "\033[31mplain") {
+					t.Errorf("progress output is painted: %q", got)
+				}
+
+				return
+			}
+
+			if strings.Contains(got, "\033[") {
+				t.Errorf("stderr carries an escape sequence: %q", got)
+			}
+			for _, want := range []string{"careful", "broken", "plain"} {
+				if !strings.Contains(got, want) {
+					t.Errorf("stderr %q lost %q along with the color", got, want)
+				}
 			}
 		})
 	}
 }
 
-func TestLoggerPaintsWhenColorIsOn(t *testing.T) {
-	t.Parallel()
+// NO_COLOR is the convention every other CLI on the box honours.
+func TestLoggerHonoursNoColorEnvironment(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 
-	var buf bytes.Buffer
-	logger := &Logger{out: &buf, color: true}
+	streams, _, _, errOut := genericiooptions.NewTestIOStreams()
+	logger := NewLogger(streams, LoggerOptions{IsTerminal: alwaysTerminal})
 
 	logger.Warnf("careful")
-	logger.Errorf("broken")
-	logger.Infof("plain")
 
-	got := buf.String()
-	if !strings.Contains(got, "\033[33mcareful\033[0m") {
-		t.Errorf("warning is not yellow: %q", got)
+	if strings.Contains(errOut.String(), "\033[") {
+		t.Errorf("NO_COLOR was ignored: %q", errOut.String())
 	}
-	if !strings.Contains(got, "\033[31mbroken\033[0m") {
-		t.Errorf("error is not red: %q", got)
-	}
-	if strings.Contains(got, "\033[33mplain") || strings.Contains(got, "\033[31mplain") {
-		t.Errorf("progress output is painted: %q", got)
+	if !strings.Contains(errOut.String(), "careful") {
+		t.Errorf("stderr %q lost the message", errOut.String())
 	}
 }
 
-// fakeFdWriter reports a file descriptor without being a terminal.
-type fakeFdWriter struct {
-	bytes.Buffer
-	fd uintptr
+func TestLoggerEmptyNoColorEnvironmentDoesNotDisableColor(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+
+	streams, _, _, errOut := genericiooptions.NewTestIOStreams()
+	logger := NewLogger(streams, LoggerOptions{IsTerminal: alwaysTerminal})
+
+	logger.Warnf("careful")
+
+	if !strings.Contains(errOut.String(), "\033[33m") {
+		t.Errorf("an empty NO_COLOR disabled color: %q", errOut.String())
+	}
 }
 
-func (w *fakeFdWriter) Fd() uintptr { return w.fd }
+// Node names, taints and container logs come from the cluster. A control
+// character in one of them must not reach the terminal, or anything that can
+// write a node name can move the cursor and repaint the screen.
+func TestLoggerStripsControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	streams, _, _, errOut := genericiooptions.NewTestIOStreams()
+	logger := NewLogger(streams, LoggerOptions{NoColor: true})
+
+	logger.Warnf("node %s is tainted", "bad\033[31mname\x00end\x07")
+	logger.Infof("column\there\nand a second line")
+
+	got := errOut.String()
+	if strings.ContainsAny(got, "\033\x00\x07") {
+		t.Errorf("stderr still carries a control character: %q", got)
+	}
+	if !strings.Contains(got, "node bad[31mnameend is tainted\n") {
+		t.Errorf("stderr = %q, want the text with only the control bytes removed", got)
+	}
+	// A tab and a newline are how a terminal lays text out, so they stay.
+	if !strings.Contains(got, "column\there\nand a second line\n") {
+		t.Errorf("stderr = %q, want the tab and the newline kept", got)
+	}
+}
+
+// Progress is written from whatever goroutine noticed something, so the writes
+// have to be serialised: without the lock this test is red under -race.
+func TestLoggerIsSafeForConcurrentUse(t *testing.T) {
+	t.Parallel()
+
+	streams, _, _, errOut := genericiooptions.NewTestIOStreams()
+	logger := NewLogger(streams, LoggerOptions{IsTerminal: alwaysTerminal})
+
+	const goroutines = 8
+	const perGoroutine = 25
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := range goroutines {
+		go func() {
+			defer wg.Done()
+
+			for i := range perGoroutine {
+				switch i % 3 {
+				case 0:
+					logger.Infof("g%d i%d", g, i)
+				case 1:
+					logger.Warnf("g%d i%d", g, i)
+				default:
+					logger.Errorf("g%d i%d", g, i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	lines := strings.Split(strings.TrimRight(errOut.String(), "\n"), "\n")
+	if len(lines) != goroutines*perGoroutine {
+		t.Errorf("stderr has %d lines, want %d: writes interleaved", len(lines), goroutines*perGoroutine)
+	}
+
+	// Every line has to have survived whole, not half of one and half of another.
+	seen := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		seen[line] = true
+	}
+	for g := range goroutines {
+		for i := range perGoroutine {
+			want := fmt.Sprintf("g%d i%d", g, i)
+			if !containsLineWith(seen, want) {
+				t.Errorf("stderr lost or mangled %q", want)
+			}
+		}
+	}
+}
+
+// containsLineWith reports whether any seen line carries want, color and all.
+func containsLineWith(seen map[string]bool, want string) bool {
+	for line := range seen {
+		if strings.Contains(line, want) {
+			return true
+		}
+	}
+
+	return false
+}
 
 func TestIsTerminal(t *testing.T) {
 	t.Parallel()
@@ -125,20 +263,18 @@ func TestIsTerminal(t *testing.T) {
 	if isTerminal(f) {
 		t.Error("isTerminal(regular file) = true, want false")
 	}
-	if isTerminal(&fakeFdWriter{fd: f.Fd()}) {
-		t.Error("isTerminal(fd of a regular file) = true, want false")
-	}
 }
 
-func TestNewLoggerDefaultsToTheErrorStream(t *testing.T) {
+func TestNewLoggerDefaultsToTheErrorStreamAndTheRealTerminalCheck(t *testing.T) {
 	t.Parallel()
 
 	var errOut bytes.Buffer
-	logger := NewLogger(genericiooptions.IOStreams{Out: &bytes.Buffer{}, ErrOut: &errOut}, false)
+	logger := NewLogger(genericiooptions.IOStreams{Out: &bytes.Buffer{}, ErrOut: &errOut}, LoggerOptions{})
 
 	if logger.out != &errOut {
 		t.Error("logger does not write to the error stream")
 	}
+	// No IsTerminal was passed, so the real check runs and a buffer is not one.
 	if logger.color {
 		t.Error("logger enabled color for a buffer")
 	}

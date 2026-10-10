@@ -17,102 +17,131 @@
 package output
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+// findingsOf builds one finding per severity named.
+func findingsOf(severities ...Severity) []Finding {
+	findings := make([]Finding, 0, len(severities))
+	for i, s := range severities {
+		findings = append(findings, Finding{
+			Node:     fmt.Sprintf("node-%d", i),
+			Code:     fmt.Sprintf("GPU%03d", i),
+			Severity: s,
+		})
+	}
+
+	return findings
+}
 
 func TestExitCode(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name  string
-		state ReportState
-		want  int
+		name   string
+		status ReportStatus
+		failOn Severity
+		want   int
 	}{
 		{
-			name:  "no findings",
-			state: ReportState{FailOn: SeverityWarning},
-			want:  0,
+			name:   "no findings",
+			status: ReportStatus{},
+			failOn: SeverityWarning,
+			want:   0,
 		},
 		{
-			name:  "info only below an info threshold is still below nothing",
-			state: ReportState{Counts: map[Severity]int{SeverityInfo: 4}, FailOn: SeverityWarning},
-			want:  0,
+			name:   "info below a warning threshold",
+			status: ReportStatus{Findings: findingsOf(SeverityInfo, SeverityInfo)},
+			failOn: SeverityWarning,
+			want:   0,
 		},
 		{
-			name:  "warning with fail-on error",
-			state: ReportState{Counts: map[Severity]int{SeverityWarning: 1}, FailOn: SeverityError},
-			want:  0,
+			name:   "warning with fail-on error",
+			status: ReportStatus{Findings: findingsOf(SeverityWarning)},
+			failOn: SeverityError,
+			want:   0,
 		},
 		{
-			name:  "warning with fail-on warning",
-			state: ReportState{Counts: map[Severity]int{SeverityWarning: 1}, FailOn: SeverityWarning},
-			want:  1,
+			name:   "warning with fail-on warning",
+			status: ReportStatus{Findings: findingsOf(SeverityWarning)},
+			failOn: SeverityWarning,
+			want:   1,
 		},
 		{
-			name:  "error with fail-on error",
-			state: ReportState{Counts: map[Severity]int{SeverityError: 1}, FailOn: SeverityError},
-			want:  1,
+			name:   "error with fail-on error",
+			status: ReportStatus{Findings: findingsOf(SeverityError)},
+			failOn: SeverityError,
+			want:   1,
 		},
 		{
-			name:  "error with fail-on warning",
-			state: ReportState{Counts: map[Severity]int{SeverityError: 1}, FailOn: SeverityWarning},
-			want:  1,
+			name:   "error with fail-on warning",
+			status: ReportStatus{Findings: findingsOf(SeverityError)},
+			failOn: SeverityWarning,
+			want:   1,
 		},
 		{
-			name:  "info with fail-on info",
-			state: ReportState{Counts: map[Severity]int{SeverityInfo: 1}, FailOn: SeverityInfo},
-			want:  1,
+			name:   "info with fail-on info",
+			status: ReportStatus{Findings: findingsOf(SeverityInfo)},
+			failOn: SeverityInfo,
+			want:   1,
 		},
 		{
-			name:  "zero counts do not count",
-			state: ReportState{Counts: map[Severity]int{SeverityError: 0}, FailOn: SeverityError},
-			want:  0,
+			name:   "empty fail-on means error",
+			status: ReportStatus{Findings: findingsOf(SeverityWarning)},
+			failOn: "",
+			want:   0,
 		},
 		{
-			name:  "empty fail-on defaults to error",
-			state: ReportState{Counts: map[Severity]int{SeverityWarning: 3}},
-			want:  0,
+			name:   "empty fail-on still fails on an error",
+			status: ReportStatus{Findings: findingsOf(SeverityError)},
+			failOn: "",
+			want:   1,
 		},
 		{
-			name:  "empty fail-on still fails on an error",
-			state: ReportState{Counts: map[Severity]int{SeverityError: 1}},
-			want:  1,
+			name:   "partial with no findings",
+			status: ReportStatus{Partial: true},
+			failOn: SeverityError,
+			want:   3,
 		},
 		{
-			name:  "partial with no findings",
-			state: ReportState{Partial: true, FailOn: SeverityError},
-			want:  3,
+			name: "partial with what it could not reach listed",
+			status: ReportStatus{
+				Partial:     true,
+				Unreachable: []Unreachable{{Resource: "nodes/node-a/proxy", Node: "node-a", Reason: "forbidden"}},
+			},
+			failOn: SeverityError,
+			want:   3,
 		},
 		{
-			name:  "partial with findings below the threshold",
-			state: ReportState{Counts: map[Severity]int{SeverityWarning: 2}, Partial: true, FailOn: SeverityError},
-			want:  3,
+			name:   "partial with findings below the threshold",
+			status: ReportStatus{Findings: findingsOf(SeverityWarning), Partial: true},
+			failOn: SeverityError,
+			want:   3,
 		},
 		{
-			// Findings win over partial results: a run that found something at or
-			// above the threshold failed, whatever else it could not reach.
-			name:  "partial with an error",
-			state: ReportState{Counts: map[Severity]int{SeverityError: 1}, Partial: true, FailOn: SeverityError},
-			want:  1,
+			// Findings win over partial results: a run that found something at
+			// or above the threshold failed, whatever else it could not reach.
+			name:   "partial with an error",
+			status: ReportStatus{Findings: findingsOf(SeverityError), Partial: true},
+			failOn: SeverityError,
+			want:   1,
 		},
 		{
-			name:  "an unknown severity never trips the threshold",
-			state: ReportState{Counts: map[Severity]int{Severity("fatal"): 9}, FailOn: SeverityInfo},
-			want:  0,
-		},
-		{
-			name:  "an unknown threshold is treated as error",
-			state: ReportState{Counts: map[Severity]int{SeverityWarning: 1}, FailOn: Severity("bogus")},
-			want:  0,
+			name:   "an unknown severity on a finding never trips the threshold",
+			status: ReportStatus{Findings: findingsOf(Severity("fatal"))},
+			failOn: SeverityInfo,
+			want:   0,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := ExitCode(tc.state); got != tc.want {
-				t.Errorf("ExitCode(%+v) = %d, want %d", tc.state, got, tc.want)
+			if got := ExitCode(tc.status, tc.failOn); got != tc.want {
+				t.Errorf("ExitCode(%+v, %q) = %d, want %d", tc.status, tc.failOn, got, tc.want)
 			}
 		})
 	}
@@ -130,10 +159,50 @@ func TestExitCodeConstants(t *testing.T) {
 		{"ExitFindings", ExitFindings, 1},
 		{"ExitUsage", ExitUsage, 2},
 		{"ExitPartial", ExitPartial, 3},
+		{"ExitError", ExitError, 4},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %d, want %d", tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// coded is an error from somewhere else that carries its own exit code.
+type coded struct{ code int }
+
+func (c coded) Error() string { return "coded" }
+func (c coded) ExitCode() int { return c.code }
+
+func TestExitCodeFor(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "nil is success", err: nil, want: ExitOK},
+		{name: "a usage error", err: NewUsageError("bad flag"), want: ExitUsage},
+		{
+			name: "a usage error behind a wrap",
+			err:  fmt.Errorf("parsing flags: %w", NewUsageError("bad flag")),
+			want: ExitUsage,
+		},
+		{name: "any error that carries its own code", err: coded{code: 7}, want: 7},
+		{
+			name: "a coded error behind a wrap",
+			err:  fmt.Errorf("listing nodes: %w", coded{code: 3}),
+			want: 3,
+		},
+		{name: "a plain error could not run", err: errors.New("connection refused"), want: ExitError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := ExitCodeFor(tc.err); got != tc.want {
+				t.Errorf("ExitCodeFor(%v) = %d, want %d", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -145,36 +214,59 @@ func TestSeverityConstants(t *testing.T) {
 	}
 }
 
-func TestNewReportStateCountsFindingsBySeverity(t *testing.T) {
+func TestParseSeverity(t *testing.T) {
 	t.Parallel()
 
-	findings := []Finding{
-		{Node: "node-a", Code: "GPU001", Severity: SeverityError},
-		{Node: "node-a", Code: "GPU002", Severity: SeverityWarning},
-		{Node: "node-b", Code: "GPU002", Severity: SeverityWarning},
-		{Node: "node-b", Code: "GPU003", Severity: SeverityInfo},
-	}
+	t.Run("accepted values", func(t *testing.T) {
+		t.Parallel()
 
-	state := NewReportState(findings, true, SeverityWarning)
+		for input, want := range map[string]Severity{
+			"":        SeverityError,
+			"error":   SeverityError,
+			"warning": SeverityWarning,
+			"info":    SeverityInfo,
+		} {
+			got, err := ParseSeverity(input)
+			if err != nil {
+				t.Errorf("ParseSeverity(%q): %v", input, err)
+				continue
+			}
+			if got != want {
+				t.Errorf("ParseSeverity(%q) = %q, want %q", input, got, want)
+			}
+		}
+	})
 
-	if state.Counts[SeverityError] != 1 {
-		t.Errorf("error count = %d, want 1", state.Counts[SeverityError])
-	}
-	if state.Counts[SeverityWarning] != 2 {
-		t.Errorf("warning count = %d, want 2", state.Counts[SeverityWarning])
-	}
-	if state.Counts[SeverityInfo] != 1 {
-		t.Errorf("info count = %d, want 1", state.Counts[SeverityInfo])
-	}
-	if !state.Partial {
-		t.Error("state.Partial = false, want true")
-	}
-	if state.FailOn != SeverityWarning {
-		t.Errorf("state.FailOn = %q, want %q", state.FailOn, SeverityWarning)
-	}
-	if got := ExitCode(state); got != ExitFindings {
-		t.Errorf("ExitCode(state) = %d, want %d", got, ExitFindings)
-	}
+	// A typo in --fail-on used to be swallowed and quietly read as error. It is
+	// the difference between a gate and no gate, so it has to be rejected.
+	t.Run("rejected values", func(t *testing.T) {
+		t.Parallel()
+
+		for _, input := range []string{"fatal", "Error", "warn", "none", " "} {
+			got, err := ParseSeverity(input)
+			if err == nil {
+				t.Errorf("ParseSeverity(%q) = %q, want an error", input, got)
+				continue
+			}
+
+			var usage *UsageError
+			if !errors.As(err, &usage) {
+				t.Errorf("ParseSeverity(%q) error %T, want *UsageError", input, err)
+				continue
+			}
+			if ExitCodeFor(err) != ExitUsage {
+				t.Errorf("ParseSeverity(%q) maps to %d, want %d", input, ExitCodeFor(err), ExitUsage)
+			}
+			if !strings.Contains(err.Error(), input) {
+				t.Errorf("error %q does not name the rejected value %q", err.Error(), input)
+			}
+			for _, valid := range []string{"error", "warning", "info"} {
+				if !strings.Contains(err.Error(), valid) {
+					t.Errorf("error %q does not list %q", err.Error(), valid)
+				}
+			}
+		}
+	})
 }
 
 func TestUsageErrorWrapsAndReportsExitUsage(t *testing.T) {
@@ -197,5 +289,59 @@ func TestUsageErrorWrapsAndReportsExitUsage(t *testing.T) {
 	// directions or the exit code mapping is meaningless.
 	if errors.As(errors.New("bad flag"), &usage) {
 		t.Error("errors.As matched a plain error")
+	}
+}
+
+func TestUsageErrorUnwrapsItsCause(t *testing.T) {
+	t.Parallel()
+
+	cause := errors.New("no such file")
+	err := WrapUsageError(cause, "reading the kubeconfig")
+
+	if !errors.Is(err, cause) {
+		t.Error("errors.Is did not find the cause")
+	}
+	if !strings.Contains(err.Error(), "reading the kubeconfig") {
+		t.Errorf("Error() = %q, want the context", err.Error())
+	}
+	if !strings.Contains(err.Error(), "no such file") {
+		t.Errorf("Error() = %q, want the cause", err.Error())
+	}
+	if ExitCodeFor(err) != ExitUsage {
+		t.Errorf("ExitCodeFor = %d, want %d", ExitCodeFor(err), ExitUsage)
+	}
+
+	// Without a cause there is nothing to unwrap, and Unwrap must not invent one.
+	if errors.Unwrap(NewUsageError("bare")) != nil {
+		t.Error("a usage error with no cause unwrapped to something")
+	}
+}
+
+// A consumer that has to special case null before ranging over findings is a
+// consumer that will get it wrong.
+func TestReportStatusMarshalsFindingsAsAnArray(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(ReportStatus{})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if string(raw) != `{"findings":[]}` {
+		t.Errorf("json = %s, want {\"findings\":[]}", raw)
+	}
+
+	full, err := json.Marshal(ReportStatus{
+		Findings:    []Finding{{Node: "node-a", Code: "GPU001", Severity: SeverityError, Message: "no driver"}},
+		Partial:     true,
+		Unreachable: []Unreachable{{Resource: "pods/log", Node: "node-a", Reason: "forbidden"}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	want := `{"findings":[{"node":"node-a","code":"GPU001","severity":"error","message":"no driver"}],` +
+		`"partial":true,"unreachable":[{"resource":"pods/log","node":"node-a","reason":"forbidden"}]}`
+	if string(full) != want {
+		t.Errorf("json  = %s\nwant = %s", full, want)
 	}
 }
