@@ -109,8 +109,11 @@ func TestLoggerColorDecision(t *testing.T) {
 				if !strings.Contains(got, "\033[31mbroken\033[0m") {
 					t.Errorf("error is not red: %q", got)
 				}
-				if strings.Contains(got, "\033[33mplain") || strings.Contains(got, "\033[31mplain") {
-					t.Errorf("progress output is painted: %q", got)
+				// Progress carries no color at all, not even a bare reset:
+				// the whole line has to come out as plain text.
+				lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+				if last := lines[len(lines)-1]; last != "plain" {
+					t.Errorf("progress line = %q, want %q with no escape at all", last, "plain")
 				}
 
 				return
