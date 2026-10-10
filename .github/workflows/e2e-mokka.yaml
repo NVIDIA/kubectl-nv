@@ -1,0 +1,117 @@
+# Copyright 2026 NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Runs the end to end suite against a Mokka lane: a kind cluster of simulated
+# GPU nodes with the GPU Operator on top. It is the only job that exercises the
+# built binary against a live API server, so a change that passes the unit
+# tests and still breaks a real gather is caught here.
+#
+# Every action is pinned to a commit, not to a tag: a tag is moved by whoever
+# owns the action, and this job has a checkout of the pull request and a Docker
+# daemon in reach.
+
+name: e2e Mokka
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
+      - release-*
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  mokka:
+    name: must-gather on a ${{ matrix.profile }} lane
+    runs-on: ubuntu-latest
+    # A cold run pulls the node image, the nvml-mock chart and the GPU Operator
+    # images on two workers before the suite starts.
+    timeout-minutes: 50
+    strategy:
+      # One profile failing says something about that profile. The other one
+      # still has to run, or the report cannot say whether it is the profile or
+      # the change.
+      fail-fast: false
+      matrix:
+        profile:
+          - gb300
+          - t4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The job reads the pull request's own code and runs it. It has no
+          # reason to hold a credential that can write to the repository.
+          persist-credentials: false
+
+      - name: Get Golang version
+        id: go_version
+        run: |
+          GOLANG_VERSION=$(./hack/golang-version.sh)
+          echo "GOLANG_VERSION=${GOLANG_VERSION##GOLANG_VERSION := }" >> "$GITHUB_OUTPUT"
+
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ steps.go_version.outputs.GOLANG_VERSION }}
+
+      - name: Install kind
+        env:
+          # The release the Mokka node image's base, kindest/node:v1.35.0, is
+          # built and tested against.
+          KIND_VERSION: v0.31.0
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cd "${workdir}"
+          base="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}"
+          curl -fsSLo kind-linux-amd64 "${base}/kind-linux-amd64"
+          curl -fsSLo kind-linux-amd64.sha256sum "${base}/kind-linux-amd64.sha256sum"
+          # The binary creates the cluster this job then trusts, so it is
+          # checked against the digest the release publishes before it is
+          # installed, not after.
+          sha256sum -c kind-linux-amd64.sha256sum
+          sudo install -m 0755 kind-linux-amd64 /usr/local/bin/kind
+          kind version
+
+      - name: Install helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Pinned rather than "latest": the lane scripts are verified against
+          # this release, and a helm that changes under them turns an unrelated
+          # pull request red.
+          version: v4.3.0
+
+      - name: Run the e2e suite against a Mokka lane
+        env:
+          MOKKA_PROFILE: ${{ matrix.profile }}
+        run: make e2e-mokka MOKKA_PROFILE="${MOKKA_PROFILE}"
+
+      # The lane is deleted by the make target as soon as the suite returns, so
+      # the pod list, the events and the kind logs are collected by that target
+      # while the cluster is still up. This step only ships what it left behind.
+      # hack/mokka/bin holds the lane's kubeconfig and is never uploaded.
+      - name: Upload the diagnostics of a failed lane
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-mokka-${{ matrix.profile }}-diagnostics
+          path: bin/e2e-diagnostics-mokka/
+          if-no-files-found: warn
+          retention-days: 7
