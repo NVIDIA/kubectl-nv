@@ -14,13 +14,13 @@ Three properties are fixed for the whole roadmap:
 
 1. **Read-only by construction.** kubectl-nv reports; it never cordons, drains, resets, labels or edits. The only
    cluster-side action is running `nvidia-bug-report.sh` inside a driver pod during `must-gather`, and `--no-exec`
-   turns that off. Remediation belongs to operators and to systems such as NVSentinel.
+   (from v0.2.0) turns that off. Remediation belongs to operators and to systems such as NVSentinel.
 2. **One binary for humans and agents.** Every command prints a table for a terminal and JSON with a versioned schema
    for everything else, with documented exit codes and no interactive prompts. An SRE can hand the same tool to an
    automation agent without adding approval gates, because there is nothing to approve.
-3. **Tested without GPU hardware.** CI runs end to end on Mokka, the simulated GPU nodes from
+3. **Tested without GPU hardware.** From v0.2.0, CI runs end to end on Mokka, the simulated GPU nodes from
    [NVIDIA/k8s-test-infra](https://github.com/NVIDIA/k8s-test-infra), including injected faults. Every finding in the
-   health catalog has a reproduction in CI.
+   health catalog will have a reproduction in CI.
 
 ## Non-goals
 
