@@ -26,10 +26,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/urfave/cli/v2"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"gopkg.in/yaml.v2"
-
-	"github.com/NVIDIA/kubectl-nv/internal/logger"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -39,22 +37,27 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 )
-
-type command struct {
-	logger *logger.FunLogger
-}
 
 // Options defines the configurable parameters for the must-gather operation.
 type Options struct {
 	ArtifactDir string // Directory to store gathered artifacts/logs.
 	Kubeconfig  string // Path to the Kubernetes configuration file.
+	Debug       bool   // Report every gathering step as it happens.
+
+	// FetchPodFile replaces the live exec-and-copy that pulls a bug report out
+	// of a driver pod. It is the seam the tests drive the gatherer through
+	// without a cluster to exec into; a nil value means the live one.
+	FetchPodFile PodFileFetcher
 }
 
-// podFileFetcher runs the bug-report command inside pod and copies the resulting
+// RunFunc is the signature a must-gather runs through, so that a caller can put
+// its own implementation in front of the real one.
+type RunFunc func(opts *Options) error
+
+// PodFileFetcher runs the bug-report command inside pod and copies the resulting
 // file out of the pod to destPath on the local filesystem.
-type podFileFetcher func(pod *v1.Pod, destPath string) error
+type PodFileFetcher func(pod *v1.Pod, destPath string) error
 
 // podLogStreamer opens a log stream for the given pod. The caller owns the
 // returned stream and is responsible for closing it.
@@ -67,11 +70,25 @@ type Gatherer struct {
 	errLogFile *os.File
 	config     *rest.Config
 	clientset  kubernetes.Interface
+	dynClient  dynamic.Interface
+
+	// progress carries the running commentary to the user's terminal. The
+	// artifacts themselves go to the log files, never here.
+	progress io.Writer
 
 	// fetchPodFile and streamPodLogs are injection seams for tests. When nil the
 	// Gatherer falls back to the live cluster implementations.
-	fetchPodFile  podFileFetcher
+	fetchPodFile  PodFileFetcher
 	streamPodLogs podLogStreamer
+}
+
+// step reports a gathering step to the user. Steps are only printed with debug
+// logging on, because a normal run should stay quiet enough to read.
+func (g *Gatherer) step(format string, a ...any) {
+	if !g.opts.Debug || g.progress == nil {
+		return
+	}
+	fmt.Fprintf(g.progress, format+"\n", a...)
 }
 
 // fetchBugReport copies the bug report generated inside pod to destPath, using
@@ -92,7 +109,7 @@ func (g *Gatherer) podLogs(ctx context.Context, namespace, podName string, opts 
 	return g.clientset.CoreV1().Pods(namespace).GetLogs(podName, opts).Stream(ctx)
 }
 
-// execAndCopyBugReport is the live-cluster podFileFetcher: it runs
+// execAndCopyBugReport is the live-cluster PodFileFetcher: it runs
 // nvidia-bug-report.sh inside the pod and copies /tmp/nvidia-bug-report.log.gz
 // out to destPath.
 func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
@@ -114,7 +131,7 @@ func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
 	o.ClientConfig = g.config
 
 	// Execute remote command to run the bug report script.
-	outLog, errLog, err := executeRemoteCommand(pod, "cd /tmp && nvidia-bug-report.sh")
+	outLog, errLog, err := executeRemoteCommand(g.config, pod, "cd /tmp && nvidia-bug-report.sh")
 	if err != nil {
 		if _, lerr := g.errLogFile.WriteString(errLog); lerr != nil {
 			err = fmt.Errorf("%v+ error writing error output to stderr log file: %v", err, lerr)
@@ -148,75 +165,12 @@ type PodInfo struct {
 	OperatorPods *v1.PodList
 }
 
-// NewCommand constructs a must-gather command with the specified logger
-func NewCommand(logger *logger.FunLogger) *cli.Command {
-	c := command{
-		logger: logger,
-	}
-	return c.build()
-}
-
-// build creates the CLI command
-func (m command) build() *cli.Command {
-	opts := Options{}
-
-	// Create the 'must-gather' command
-	mg := cli.Command{
-		Name:  "must-gather",
-		Usage: "collects the information from your cluster that is most likely needed for debugging issues",
-		Before: func(c *cli.Context) error {
-			return m.validateFlags(&opts)
-		},
-		Action: func(c *cli.Context) error {
-			m.logger.Info("Using kubeconfig: %s", opts.Kubeconfig)
-
-			// Start the loading animation
-			m.logger.Wg.Add(1)
-			go m.logger.Loading("Collecting cluster information")
-
-			err := m.run(&opts)
-			if err != nil {
-				m.fail()
-				m.logger.Error(err)
-				m.logger.Exit(1)
-			}
-			// All done!
-			m.done()
-			m.logger.Info("Please send the contents of %s to NVIDIA support\n", opts.ArtifactDir)
-
-			return nil
-		},
-	}
-
-	mg.Flags = []cli.Flag{
-		&cli.StringFlag{
-			Name:        "kubeconfig",
-			Aliases:     []string{"k"},
-			Usage:       "path to kubeconfig file",
-			Value:       "-",
-			Destination: &opts.Kubeconfig,
-			EnvVars:     []string{"KUBECONFIG"},
-		},
-		&cli.StringFlag{
-			Name: "artifacts-dir",
-			Usage: "path to the directory where the artifacts will be stored. " +
-				"Defaults to /tmp/nvidia-gpu-operator_<timestamp>",
-			Value:       "",
-			Destination: &opts.ArtifactDir,
-			EnvVars:     []string{"ARTIFACT_DIR"},
-		},
-	}
-
-	return &mg
-}
-
 // NewGatherer initializes a new Gatherer by performing the following tasks:
 // 1. Create the artifact directory.
 // 2. Create log files for stdout and stderr.
-// 3. Build the Kubernetes REST config and apply default settings.
-// 4. Create the Kubernetes clientset.
+// 3. Take the clients from the factory.
 // If any step fails, any opened file resources are closed before returning.
-func NewGatherer(opts *Options) (*Gatherer, error) {
+func NewGatherer(opts *Options, f cmd.Factory, progress io.Writer) (*Gatherer, error) {
 	// Create the ARTIFACT_DIR.
 	if err := os.MkdirAll(opts.ArtifactDir, os.ModePerm); err != nil {
 		return nil, fmt.Errorf("failed to create artifact directory: %w", err)
@@ -237,33 +191,28 @@ func NewGatherer(opts *Options) (*Gatherer, error) {
 		return nil, fmt.Errorf("failed to create error log file: %w", err)
 	}
 
-	// Build the Kubernetes client configuration.
-	config, err := clientcmd.BuildConfigFromFlags("", opts.Kubeconfig)
+	// Take the REST config and the clients from the factory. Every client the
+	// gather uses comes from here, so a test that hands over fakes leaves no
+	// path to a real cluster.
+	config, err := f.RESTConfig()
 	if err != nil {
-		if _, lerr := fmt.Fprintf(errLogFile, "Error creating Kubernetes REST config: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
+		err = logTo(errLogFile, "Error creating Kubernetes REST config: %v\n", err)
 		logFile.Close()
 		errLogFile.Close()
 		return nil, err
 	}
 
-	// Set Kubernetes defaults (e.g., QPS limits, Burst, etc.).
-	if err = setKubernetesDefaults(config); err != nil {
-		if _, lerr := fmt.Fprintf(errLogFile, "Error setting Kubernetes defaults: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
+	clientset, err := f.KubernetesClient()
+	if err != nil {
+		err = logTo(errLogFile, "Error creating Kubernetes client: %v\n", err)
 		logFile.Close()
 		errLogFile.Close()
 		return nil, err
 	}
 
-	// Create the Kubernetes clientset.
-	clientset, err := createKubernetesClient(opts.Kubeconfig)
+	dynClient, err := f.DynamicClient()
 	if err != nil {
-		if _, lerr := fmt.Fprintf(errLogFile, "Error creating Kubernetes client: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
+		err = logTo(errLogFile, "Error creating dynamic client: %v\n", err)
 		logFile.Close()
 		errLogFile.Close()
 		return nil, err
@@ -271,34 +220,31 @@ func NewGatherer(opts *Options) (*Gatherer, error) {
 
 	// Return a fully initialized Gatherer.
 	return &Gatherer{
-		opts:       opts,
-		logFile:    logFile,
-		errLogFile: errLogFile,
-		config:     config,
-		clientset:  clientset,
+		opts:         opts,
+		logFile:      logFile,
+		errLogFile:   errLogFile,
+		config:       config,
+		clientset:    clientset,
+		dynClient:    dynClient,
+		progress:     progress,
+		fetchPodFile: opts.FetchPodFile,
 	}, nil
 }
 
-func (m command) validateFlags(opts *Options) error {
-	// Get the path to the kubeconfig file
-	k, err := getKubeconfigPath(opts.Kubeconfig)
-	if err != nil {
-		return fmt.Errorf("error getting kubeconfig path: %v", err)
+// logTo records err in the stderr log file and returns it, folding in a failure
+// to write that record rather than losing either one.
+func logTo(errLogFile *os.File, format string, err error) error {
+	if _, lerr := fmt.Fprintf(errLogFile, format, err); lerr != nil {
+		return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 	}
-	opts.Kubeconfig = k
-
-	// Validate artifactDir
-	if opts.ArtifactDir == "" {
-		opts.ArtifactDir = fmt.Sprintf("/tmp/nvidia-gpu-operator_%s", time.Now().Format("20060102_1504"))
-	}
-	return nil
+	return err
 }
 
 // gatherOpenShiftVersion checks if the cluster is OpenShift using the kubeconfig,
 // and if so, writes the OpenShift version to "openshift_version.yaml" in the artifact directory.
 func (g *Gatherer) gatherOpenShiftVersion() error {
 	// Determine if the cluster is OpenShift.
-	oversion, isOpenShift := isOpenShiftCluster(g.opts.Kubeconfig)
+	oversion, isOpenShift := isOpenShiftCluster(g.config)
 	if isOpenShift {
 		// Construct the file path for the OpenShift version file.
 		versionFilePath := filepath.Join(g.opts.ArtifactDir, "openshift_version.yaml")
@@ -327,10 +273,10 @@ func (g *Gatherer) gatherOpenShiftVersion() error {
 // For OpenShift clusters, it retrieves machine data; otherwise, it lists Kubernetes nodes.
 func (g *Gatherer) gatherNodeInfo() error {
 	// Determine if the cluster is OpenShift.
-	_, isOpenShift := isOpenShiftCluster(g.opts.Kubeconfig)
+	_, isOpenShift := isOpenShiftCluster(g.config)
 	if isOpenShift {
 		// Get machines data from an OpenShift cluster.
-		machines, err := getOpenShiftMachines(g.opts.Kubeconfig)
+		machines, err := getOpenShiftMachines(g.config)
 		if err != nil {
 			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting machines: %v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
@@ -457,11 +403,7 @@ func (g *Gatherer) logError(format string, err error) error {
 // the ClusterPolicy and NvidiaDriver CRs. These resources are cluster-scoped,
 // so we do not specify a namespace.
 func (g *Gatherer) gatherGPUOperatorCRDs() error {
-	// Create a dynamic client using the stored Kubernetes REST config.
-	dynClient, err := dynamic.NewForConfig(g.config)
-	if err != nil {
-		return g.logError("error creating dynamic client: %v", err)
-	}
+	dynClient := g.dynClient
 
 	// Set a context with timeout for our dynamic calls.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -1001,20 +943,25 @@ func (g *Gatherer) collectBugReports(label string, pods []v1.Pod, taken map[stri
 	return errors.Join(errs...)
 }
 
-func (m command) run(opts *Options) error {
+// Run collects everything NVIDIA support asks for from the cluster the factory
+// points at, into opts.ArtifactDir. progress carries the running commentary;
+// the artifacts themselves go to files under the artifact directory.
+func Run(opts *Options, f cmd.Factory, progress io.Writer) error {
 	// Initialize the Gatherer with the provided options.
-	g, err := NewGatherer(opts)
+	g, err := NewGatherer(opts, f, progress)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Gatherer: %w", err)
 	}
 	defer g.Close()
 
 	// 1. Gather OpenShift version (if applicable).
+	g.step("Gathering the OpenShift version")
 	if err := g.gatherOpenShiftVersion(); err != nil {
 		return err
 	}
 
 	// 2. Gather node information.
+	g.step("Gathering node information")
 	if err := g.gatherNodeInfo(); err != nil {
 		return err
 	}
@@ -1025,34 +972,41 @@ func (m command) run(opts *Options) error {
 	if err != nil {
 		return err
 	}
+	g.step("Found the GPU operator in namespace %s", operatorNamespace)
 
 	// 4. Collect GPU Operator CRDs (ClusterPolicy and NvidiaDriver).
+	g.step("Gathering the GPU operator custom resources")
 	if err := g.gatherGPUOperatorCRDs(); err != nil {
 		return err
 	}
 
 	// 5. Gather GPU node information.
+	g.step("Gathering GPU node information")
 	if err := g.gatherGPUNodes(); err != nil {
 		return err
 	}
 
 	// 6. Retrieve pod information (both operand and operator pods).
+	g.step("Gathering pod information")
 	podInfo, err := g.gatherPodInfo(operatorNamespace)
 	if err != nil {
 		return err
 	}
 
 	// 7. Collect logs from the pods using the obtained PodInfo.
+	g.step("Gathering pod logs")
 	if err := g.gatherPodLogs(podInfo, operatorNamespace); err != nil {
 		return err
 	}
 
 	// 8. Gather information about DaemonSets.
+	g.step("Gathering daemonsets")
 	if err := g.gatherDaemonSets(operatorNamespace); err != nil {
 		return err
 	}
 
 	// 9. Run remote command on daemonset pods to generate and collect bug report.
+	g.step("Gathering bug reports from the driver daemonsets")
 	if err := g.gatherBugReportFromDaemonSet(operatorNamespace); err != nil {
 		return err
 	}
@@ -1068,16 +1022,6 @@ func (g *Gatherer) Close() {
 	if g.errLogFile != nil {
 		g.errLogFile.Close()
 	}
-}
-
-func (m *command) done() {
-	m.logger.Done <- struct{}{}
-	m.logger.Wg.Wait()
-}
-
-func (m *command) fail() {
-	m.logger.Fail <- struct{}{}
-	m.logger.Wg.Wait()
 }
 
 // listAllPaginated fetches all items from a paginated List call.

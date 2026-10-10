@@ -22,14 +22,14 @@ VERSION := 0.1.0
 
 build:
 	@rm -rf bin
-	$(GO_CMD) build -o bin/$(BINARY_NAME) cmd/main.go
+	$(GO_CMD) build -ldflags "-X main.version=$(VERSION)" -o bin/$(BINARY_NAME) ./cmd/kubectl-nv
 
 fmt:
 	@$(GO_FMT) -w -l $(GO_SRC)
 
 COVERAGE_FILE := coverage.out
 test:
-	go test -coverprofile=$(COVERAGE_FILE) ./cmd/... ./internal/...
+	go test -coverprofile=$(COVERAGE_FILE) ./cmd/... ./pkg/...
 coverage: test
 	go tool cover -func=$(COVERAGE_FILE)
 

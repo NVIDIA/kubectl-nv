@@ -1,71 +1,40 @@
 package mustgather
 
 import (
-	"os"
+	"strings"
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/rest"
 )
 
-func TestGetKubeconfigPath(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "kubeconfig")
-	if err != nil {
-		t.Fatal(err)
+// TestIsOpenShiftClusterOnAnUnreachableCluster covers the case the gatherer
+// meets first on a plain Kubernetes cluster: the OpenShift endpoint does not
+// answer. It used to call os.Exit on a configuration it could not build, which
+// took the whole must-gather down with it.
+func TestIsOpenShiftClusterOnAnUnreachableCluster(t *testing.T) {
+	version, isOpenShift := isOpenShiftCluster(&rest.Config{Host: "https://127.0.0.1:1"})
+	if isOpenShift {
+		t.Errorf("isOpenShift = true for an unreachable cluster, version %q", version)
 	}
-	defer os.Remove(tempFile.Name())
-
-	cases := []struct {
-		name    string
-		input   string
-		setEnv  bool
-		envVal  string
-		want    string
-		wantErr bool
-	}{
-		{"file exists", tempFile.Name(), false, "", tempFile.Name(), false},
-		{"env set", "notfound", true, tempFile.Name(), tempFile.Name(), false},
-		{"not found", "notfound", false, "", "", true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if c.setEnv {
-				t.Setenv("KUBECONFIG", c.envVal)
-			} else {
-				os.Unsetenv("KUBECONFIG")
-			}
-			got, err := getKubeconfigPath(c.input)
-			if (err != nil) != c.wantErr {
-				t.Errorf("err = %v, wantErr %v", err, c.wantErr)
-			}
-			if !c.wantErr && got != c.want {
-				t.Errorf("got %q, want %q", got, c.want)
-			}
-		})
+	if version != "" {
+		t.Errorf("version = %q, want empty", version)
 	}
 }
 
-func TestCreateKubernetesClient(t *testing.T) {
-	tempFile, err := os.CreateTemp("", "kubeconfig")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tempFile.Name())
-	_, err = createKubernetesClient(tempFile.Name())
+// TestExecuteRemoteCommandUsesTheGivenConfig pins the exec at the cluster the
+// caller named. It used to reload the default kubeconfig, which sent the exec
+// to whatever cluster the current context pointed at rather than the one
+// --kubeconfig named.
+func TestExecuteRemoteCommandUsesTheGivenConfig(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "driver", Namespace: "gpu-operator"}}
+
+	_, _, err := executeRemoteCommand(&rest.Config{Host: "https://127.0.0.1:1"}, pod, "true")
 	if err == nil {
-		t.Error("expected error for empty kubeconfig")
+		t.Fatal("expected an error executing against an unreachable cluster")
 	}
-}
-
-func TestSetKubernetesDefaults(t *testing.T) {
-	cfg := &rest.Config{}
-	err := setKubernetesDefaults(cfg)
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if cfg.APIPath != "/api" {
-		t.Error("APIPath not set")
-	}
-	if cfg.GroupVersion == nil || cfg.GroupVersion.Version != "v1" {
-		t.Error("GroupVersion not set")
+	if !strings.Contains(err.Error(), "127.0.0.1:1") {
+		t.Errorf("error = %q, want it to name the host from the given config", err.Error())
 	}
 }

@@ -61,7 +61,7 @@ func artifactNames(t *testing.T, dir string) []string {
 // recordingFetcher writes each source pod's name into the destination file, so a
 // report can be traced back to the pod it came from. Pods named in failFor fail
 // instead, as a pod whose driver container is wedged would.
-func recordingFetcher(failFor map[string]bool) podFileFetcher {
+func recordingFetcher(failFor map[string]bool) PodFileFetcher {
 	return func(pod *v1.Pod, destPath string) error {
 		if failFor[pod.Name] {
 			return errors.New("command terminated with exit code 1")
