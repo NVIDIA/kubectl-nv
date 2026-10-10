@@ -17,6 +17,7 @@
 package mustgather
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -26,7 +27,11 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // driverPod builds a running driver daemonset pod scheduled on the named node.
@@ -516,4 +521,78 @@ func readFileAsString(t *testing.T, path string) string {
 		t.Fatalf("reading %s: %v", path, err)
 	}
 	return string(data)
+}
+
+// noDriverPodsLine is the one line a gather puts on the error stream when the
+// cluster runs no driver and no vGPU manager pods. It is pinned exactly,
+// because an operator reading a bundle with no nvidia-bug-report file has to be
+// able to tell "the driver is not deployed here" from "the collector gave up".
+const noDriverPodsLine = "no driver pods found " +
+	"(labels app=nvidia-driver-daemonset, app=nvidia-vgpu-manager-daemonset); " +
+	"skipping nvidia-bug-report"
+
+// bugReportGatherer builds a Gatherer over the given cluster objects whose
+// progress goes to the returned buffer.
+func bugReportGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string, *bytes.Buffer) {
+	t.Helper()
+	artifactDir := t.TempDir()
+	logFile, errLogFile := scratchLogFiles(t)
+	stderr := &bytes.Buffer{}
+	logger := output.NewLogger(
+		genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: &bytes.Buffer{}, ErrOut: stderr},
+		output.LoggerOptions{})
+
+	return &Gatherer{
+		opts:         &Options{ArtifactDir: artifactDir},
+		logFile:      logFile,
+		errLogFile:   errLogFile,
+		clientset:    fake.NewClientset(objects...),
+		progress:     logger,
+		fetchPodFile: recordingFetcher(nil),
+	}, artifactDir, stderr
+}
+
+// TestNoDriverPodsIsReported covers the cluster the Mokka lane is: the GPU
+// Operator installed with driver.enabled=false, so no driver daemonset exists
+// at all. The gather has to say so and carry on, because a bundle that is
+// silently missing nvidia-bug-report reads the same as one whose collector
+// failed, and support then asks the customer to run it again.
+func TestNoDriverPodsIsReported(t *testing.T) {
+	const namespace = "gpu-operator"
+
+	g, artifactDir, stderr := bugReportGatherer(t)
+
+	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
+		t.Fatalf("gatherBugReportFromDaemonSet over a driverless cluster: %v", err)
+	}
+
+	if got := strings.Count(stderr.String(), noDriverPodsLine); got != 1 {
+		t.Errorf("stderr carries the skip line %d times, want exactly 1:\n%s", got, stderr.String())
+	}
+	if got := artifactNames(t, artifactDir); len(got) != 0 {
+		t.Errorf("artifact dir holds %v, want nothing collected", got)
+	}
+}
+
+// TestDriverPodsAreNotReportedAsAbsent is the other half of the guard: a
+// cluster that does run driver pods must never be described as driverless. A
+// skip line printed unconditionally would be worse than none, because it tells
+// support to stop looking for a bug report that is in the bundle.
+func TestDriverPodsAreNotReportedAsAbsent(t *testing.T) {
+	const namespace = "gpu-operator"
+
+	g, artifactDir, stderr := bugReportGatherer(t,
+		driverPod(t, namespace, "nvidia-driver-daemonset-aaaaa", "worker-a"))
+
+	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
+		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	}
+
+	if strings.Contains(stderr.String(), "no driver pods found") {
+		t.Errorf("stderr calls a cluster with a driver pod driverless:\n%s", stderr.String())
+	}
+	want := []string{"nvidia-bug-report_worker-a.log.gz"}
+	if got := artifactNames(t, artifactDir); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("artifact dir holds %v, want %v", got, want)
+	}
 }
