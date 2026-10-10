@@ -40,7 +40,11 @@ MOKKA_PROFILE ?= t4
 E2E_FLAGS ?= -tags e2e -count=1 -timeout 30m
 MOKKA_CLUSTER := kubectl-nv-$(MOKKA_LANE)
 MOKKA_CONTEXT := kind-$(MOKKA_CLUSTER)
-MOKKA_KUBECONFIG := $(CURDIR)/hack/mokka/bin/kubeconfig-$(MOKKA_LANE)
+# The same variable up.sh and down.sh read, so that the kubeconfig this target
+# points the suite at and the one those scripts write are one file by
+# construction rather than by two definitions agreeing.
+MOKKA_BIN_DIR ?= $(CURDIR)/hack/mokka/bin
+MOKKA_KUBECONFIG := $(MOKKA_BIN_DIR)/kubeconfig-$(MOKKA_LANE)
 # Where a failed run leaves what it saw. Under bin/, which is already ignored,
 # and never under hack/mokka/bin, which holds the lane's credentials.
 E2E_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(MOKKA_LANE)
@@ -49,29 +53,59 @@ E2E_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(MOKKA_LANE)
 # Both have to be absolute paths: go test runs the test binary with the package
 # directory as its working directory, so a relative one resolves somewhere the
 # caller did not mean.
+#
+# The suite runs a must-gather against whatever cluster it is pointed at, so the
+# current context has to be a lane of ours unless the caller says otherwise with
+# E2E_ANY_CLUSTER=1. An unset KUBECONFIG is left to the suite, which reports it
+# and never falls back to the caller's default kubeconfig; asking kubectl about
+# an empty one here would read exactly that file.
 e2e:
+	@set -u; \
+	if [ "$${E2E_ANY_CLUSTER:-}" != "1" ] && [ -n "$${KUBECONFIG:-}" ]; then \
+	    ctx="$$(kubectl --kubeconfig "$${KUBECONFIG}" config current-context 2>/dev/null || true)"; \
+	    case "$${ctx}" in \
+	    kind-kubectl-nv-*) ;; \
+	    *) printf 'make e2e: current context is %s, which is not a kubectl-nv lane\n' "$${ctx:-<none>}" >&2; \
+	       printf 'make e2e: set E2E_ANY_CLUSTER=1 to run against it anyway\n' >&2; \
+	       exit 2;; \
+	    esac; \
+	fi; \
 	$(GO_CMD) test $(E2E_FLAGS) ./test/e2e/...
 
 # Brings a Mokka lane up, runs the suite against it, and tears it down again
 # whichever way the suite ended. The lane kubeconfig is named explicitly: it is
 # not the caller's default one, and nothing here may touch that.
 #
-# A failed suite dumps what the cluster looked like before the trap runs, since
-# by the time the trap has returned there is nothing left to ask. Every command
-# in that dump is a read and may fail without changing the exit code.
+# A lane that failed to come up is worth a dump too: the reason it did not come
+# up is in the pods and the events, and both are gone a second after the
+# teardown. So the trap is armed as soon as up.sh has been allowed to touch the
+# cluster, and the dump runs for any non-zero result, up.sh's or the suite's.
 #
-# The teardown trap is armed only once the lane is up, so that a lane this
-# target did not create, which up.sh refuses with exit 4, is never deleted by
-# it. A lane that failed to come up is left for whoever has to read why.
+# The one exception is up.sh exit 4, which means a cluster of that name was
+# already there and nothing was touched. That lane belongs to someone else: it
+# is neither dumped nor deleted.
+#
+# INT and TERM turn into an ordinary exit, which runs the EXIT trap and nothing
+# more, so a cancelled CI job tears its lane down exactly once rather than once
+# per signal.
 e2e-mokka: build
-	@set -eu; \
-	hack/mokka/up.sh $(MOKKA_LANE) $(MOKKA_PROFILE); \
-	trap 'hack/mokka/down.sh $(MOKKA_LANE) || printf "e2e-mokka: down.sh failed; cluster kubectl-nv-%s may still be up\n" "$(MOKKA_LANE)" >&2' EXIT INT TERM; \
-	set +e; \
-	KUBECONFIG=$(MOKKA_KUBECONFIG) \
-	KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
-	    $(GO_CMD) test $(E2E_FLAGS) ./test/e2e/...; \
-	rc=$$?; \
+	@set -u; \
+	export MOKKA_BIN_DIR="$(MOKKA_BIN_DIR)"; \
+	hack/mokka/up.sh $(MOKKA_LANE) $(MOKKA_PROFILE); up=$$?; \
+	if [ $$up -eq 4 ]; then \
+	    printf 'e2e-mokka: %s already exists and was not created here; nothing touched\n' "$(MOKKA_CLUSTER)" >&2; \
+	    exit 4; \
+	fi; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	trap 'hack/mokka/down.sh $(MOKKA_LANE) || printf "e2e-mokka: down.sh failed; cluster %s may still be up\n" "$(MOKKA_CLUSTER)" >&2' EXIT; \
+	rc=$$up; \
+	if [ $$rc -eq 0 ]; then \
+	    KUBECONFIG=$(MOKKA_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test $(E2E_FLAGS) ./test/e2e/...; \
+	    rc=$$?; \
+	fi; \
 	if [ $$rc -ne 0 ]; then \
 	    mkdir -p $(E2E_DIAG_DIR); \
 	    kubectl --kubeconfig $(MOKKA_KUBECONFIG) --context $(MOKKA_CONTEXT) \
@@ -82,7 +116,6 @@ e2e-mokka: build
 	        > $(E2E_DIAG_DIR)/kind-export.txt 2>&1 || true; \
 	    printf 'e2e-mokka: diagnostics in %s\n' "$(E2E_DIAG_DIR)" >&2; \
 	fi; \
-	set -e; \
 	exit $$rc
 
 verify:
