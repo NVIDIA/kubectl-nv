@@ -174,7 +174,11 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 		if len(row) != len(columns) {
 			return fmt.Errorf("row %d has %d cells, want %d", i, len(row), len(columns))
 		}
-		if _, err := fmt.Fprintln(tw, strings.Join(row, "\t")); err != nil {
+		cells := make([]string, 0, len(row))
+		for _, cell := range row {
+			cells = append(cells, sanitizeCell(cell))
+		}
+		if _, err := fmt.Fprintln(tw, strings.Join(cells, "\t")); err != nil {
 			return fmt.Errorf("writing row %d: %w", i, err)
 		}
 	}

@@ -109,7 +109,7 @@ func (l *Logger) Errorf(format string, a ...any) {
 // the error stream. A write that fails is dropped: progress output is not worth
 // failing a run over, and the caller has no better stream to be told about it on.
 func (l *Logger) write(color, format string, a ...any) {
-	msg := sanitize(fmt.Sprintf(format, a...))
+	msg := sanitizeLine(fmt.Sprintf(format, a...))
 	if l.color && color != "" {
 		msg = color + msg + colorReset
 	}
@@ -120,13 +120,37 @@ func (l *Logger) write(color, format string, a ...any) {
 	fmt.Fprintln(l.out, msg)
 }
 
-// sanitize removes the C0 control characters, keeping the tab and the newline
-// that a terminal lays text out with. Node names, taints and container logs
-// come from the cluster: without this, anything that can write a node name can
-// move the cursor, repaint the screen or hide what it just did.
-func sanitize(s string) string {
+// isControl reports whether r is a control character that must never reach a
+// terminal: C0 (U+0000 to U+001F), DEL, and C1 (U+0080 to U+009F). C1 matters
+// as much as C0 because U+009B is a CSI on its own, so stripping only ESC
+// would leave a working escape sequence behind.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
+}
+
+// sanitizeLine removes the control characters from text bound for the error
+// stream, keeping the tab and the newline that a terminal lays text out with.
+// Node names, taints and container logs come from the cluster: without this,
+// anything that can write a node name can move the cursor, repaint the screen
+// or hide what it just did.
+func sanitizeLine(s string) string {
 	return strings.Map(func(r rune) rune {
-		if r < 0x20 && r != '\n' && r != '\t' {
+		if isControl(r) && r != '\n' && r != '\t' {
+			return -1
+		}
+
+		return r
+	}, s)
+}
+
+// sanitizeCell does the same for a table cell, where a tab or a newline would
+// break the columns apart, so both become a space instead of being kept.
+func sanitizeCell(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return ' '
+		case isControl(r):
 			return -1
 		}
 
