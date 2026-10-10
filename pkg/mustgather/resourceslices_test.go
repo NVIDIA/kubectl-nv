@@ -85,23 +85,37 @@ func TestResourceSlicesAreCollectedForTheNVIDIADriver(t *testing.T) {
 	}
 }
 
-// TestResourceSlicesToleratesAClusterWithoutThem is the common case today: the
-// API is not served, or the user cannot list it. Neither is a reason to throw
-// away the rest of a bug report, but both belong in the error log.
+// TestResourceSlicesToleratesAClusterWithoutThem covers the two ways the
+// slices can be out of reach, which a reader has to be able to tell apart.
+//
+// A cluster that does not serve the API has no slices, which is a fact about
+// the cluster: the bundle says so with an empty list, so that it reads the
+// same as a live cluster without DRA and nobody has to decide whether a
+// missing file means "none" or "not collected".
+//
+// A user who may not list them is the other case: the slices exist and we did
+// not see them, so there is no file to write and the gap goes to the error
+// log.
 func TestResourceSlicesToleratesAClusterWithoutThem(t *testing.T) {
 	gvr := schema.GroupVersionResource{Group: "resource.k8s.io", Version: "v1", Resource: "resourceslices"}
 
 	cases := []struct {
-		name string
-		err  error
+		name      string
+		err       error
+		wantFile  bool
+		wantInLog string
 	}{
 		{
-			name: "the API is not served",
-			err:  apierrors.NewNotFound(gvr.GroupResource(), ""),
+			name:      "the API is not served",
+			err:       apierrors.NewNotFound(gvr.GroupResource(), ""),
+			wantFile:  true,
+			wantInLog: "resourceslices",
 		},
 		{
-			name: "the user may not list them",
-			err:  apierrors.NewForbidden(gvr.GroupResource(), "", nil),
+			name:      "the user may not list them",
+			err:       apierrors.NewForbidden(gvr.GroupResource(), "", nil),
+			wantFile:  false,
+			wantInLog: "resourceslices",
 		},
 	}
 
@@ -117,17 +131,39 @@ func TestResourceSlicesToleratesAClusterWithoutThem(t *testing.T) {
 				t.Fatalf("gatherResourceSlices returned %v, want the gather to carry on", err)
 			}
 
-			if _, err := os.Stat(filepath.Join(dir, "resourceslices.yaml")); !os.IsNotExist(err) {
-				t.Errorf("resourceslices.yaml exists, want no file when the slices could not be listed")
+			path := filepath.Join(dir, "resourceslices.yaml")
+			data, err := os.ReadFile(path)
+			switch {
+			case !c.wantFile:
+				if !os.IsNotExist(err) {
+					t.Errorf("resourceslices.yaml exists, want no file when the slices could not be listed")
+				}
+			case err != nil:
+				t.Fatalf("expected an empty list to have been written: %v", err)
+			default:
+				var list resourcev1.ResourceSliceList
+				if uerr := yaml.Unmarshal(data, &list); uerr != nil {
+					t.Fatalf("resourceslices.yaml does not parse: %v\n%s", uerr, data)
+				}
+				if list.APIVersion != "resource.k8s.io/v1" || list.Kind != "ResourceSliceList" {
+					t.Errorf("apiVersion/kind = %q/%q, want resource.k8s.io/v1 ResourceSliceList",
+						list.APIVersion, list.Kind)
+				}
+				if len(list.Items) != 0 {
+					t.Errorf("got %d slices, want an empty list", len(list.Items))
+				}
+				if !strings.Contains(string(data), "items: []") {
+					t.Errorf("the empty list is not written as an empty items array:\n%s", data)
+				}
 			}
 
 			g.errLogFile.Sync()
-			errLog, err := os.ReadFile(filepath.Join(dir, "must-gather.stderr.log"))
-			if err != nil {
-				t.Fatal(err)
+			errLog, rerr := os.ReadFile(filepath.Join(dir, "must-gather.stderr.log"))
+			if rerr != nil {
+				t.Fatal(rerr)
 			}
-			if !strings.Contains(string(errLog), "resourceslices") {
-				t.Errorf("error log does not mention the slices it could not collect:\n%s", errLog)
+			if !strings.Contains(string(errLog), c.wantInLog) {
+				t.Errorf("error log does not mention the slices:\n%s", errLog)
 			}
 		})
 	}
