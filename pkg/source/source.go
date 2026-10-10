@@ -24,8 +24,8 @@ package source
 
 import (
 	"context"
+	"errors"
 	"sort"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -72,6 +72,13 @@ type Source interface {
 	// this set and Nodes.
 	HintedNodes(ctx context.Context) ([]corev1.Node, error)
 
+	// ClassifyNodes returns both sets from one read. Nodes and HintedNodes
+	// are the halves of it, and a caller that wants both should ask for both
+	// here rather than call them in turn: that is one pass over the cluster
+	// instead of two, and the two halves are then guaranteed to describe the
+	// same moment.
+	ClassifyNodes(ctx context.Context) (gpu, hinted []corev1.Node, err error)
+
 	// Pods returns the pods in namespace matching selector. An empty
 	// namespace means every namespace, and an empty selector means every pod.
 	Pods(ctx context.Context, namespace, selector string) ([]corev1.Pod, error)
@@ -83,25 +90,51 @@ type Source interface {
 	ClusterPolicies(ctx context.Context) ([]unstructured.Unstructured, error)
 }
 
-// PartialError reports that a read succeeded for some resources and failed for
-// others. The items returned alongside it are usable: a caller must not treat
-// a PartialError as "no result". Resources names what could not be read, so a
-// command can tell the user which RBAC rule or which bundle file is missing.
+// PartialError reports that one resource could not be read while the rest of
+// the run succeeded. The items returned alongside it are usable: a caller must
+// not treat a PartialError as "no result".
+//
+// It is deliberately narrow. Only two things produce one: an RBAC denial on a
+// secondary resource (pods, resourceslices, clusterpolicies), and a file a
+// must-gather bundle does not contain. Everything else, a node list that
+// failed, a transport error, a dead context, an expired or rejected
+// credential, means the run did not happen and is reported as a plain error.
+// The difference is the exit code, and the exit code is the contract: 3 says
+// "these findings are incomplete, here is what I could not see", 4 says
+// "conclude nothing from this run".
+//
+// When more than one resource is lost, each gets its own PartialError and they
+// are combined with errors.Join, so every name survives and errors.As still
+// reaches one.
 type PartialError struct {
-	// Resources names what could not be read: an API resource for a live
+	// Resource names what could not be read: an API resource for a live
 	// cluster ("resourceslices"), a file name for a bundle ("nodes.yaml").
-	Resources []string
+	Resource string
 	// Err is the underlying failure, kept so that callers can test it with
 	// apierrors.IsForbidden and friends.
 	Err error
 }
 
 func (e *PartialError) Error() string {
-	return "could not read " + strings.Join(e.Resources, ", ") + ": " + e.Err.Error()
+	return "could not read " + e.Resource + ": " + e.Err.Error()
 }
 
 // Unwrap exposes the underlying failure to errors.Is and errors.As.
 func (e *PartialError) Unwrap() error { return e.Err }
+
+// ExitCode makes this error carry its own exit status, which is what
+// output.ExitCodeFor reads. The value is output.ExitPartial; it is written out
+// rather than imported so that this package does not depend on the one that
+// formats its results.
+func (e *PartialError) ExitCode() int { return 3 }
+
+// ErrNotInstalled reports that the GPU Operator is not installed: the cluster
+// serves no nvidia.com/v1 clusterpolicies resource, because the CRD was never
+// applied. That is an answer, not a failure, so it carries no exit code and
+// the caller decides what to make of it. A command that only reports on the
+// operator will want to say so plainly; one that also checks nodes can carry
+// on without it.
+var ErrNotInstalled = errors.New("the GPU Operator is not installed: the cluster serves no nvidia.com/v1 clusterpolicies")
 
 // GPU-node membership, and why the labels do not decide it.
 //

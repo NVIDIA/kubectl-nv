@@ -619,9 +619,18 @@ func clusterPolicy(name string) *unstructured.Unstructured {
 }
 
 // TestLiveClusterPoliciesPaginates pins both the resource the dynamic client
-// is pointed at and the fact that the read is paginated. The fake only serves
-// the GVR it was told about, so a typo in the group, version or resource
-// yields nothing at all.
+// is pointed at and the fact that the read follows the continue token. The
+// fake only serves the GVR it was told about, so a typo in the group, version
+// or resource yields nothing at all.
+//
+// The pages are counted by the reactor rather than sliced from the request,
+// because a cluster-scoped list cannot carry them through the fake:
+// testing.NewRootListActionWithOptions assigns the caller's ListOptions and
+// then overwrites the field with a fresh value holding only the selectors, so
+// Limit and Continue never reach a reactor. The namespaced constructor keeps
+// them, which is why the node and pod tests can assert on Limit directly. The
+// discrimination here is the item count: a read that stops after one page
+// returns 500 of the 1200.
 func TestLiveClusterPoliciesPaginates(t *testing.T) {
 	counter := newCallCounter()
 	var items []unstructured.Unstructured
@@ -631,15 +640,16 @@ func TestLiveClusterPoliciesPaginates(t *testing.T) {
 
 	dyn := newDynamicFake(t)
 	dyn.PrependReactor("list", "clusterpolicies", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		page := counter.get("list", action.GetResource().String())
 		counter.record("list", action.GetResource().String())
-		list := action.(k8stesting.ListActionImpl)
-		start := 0
-		if tok := list.ListOptions.Continue; tok != "" {
-			start, _ = strconv.Atoi(tok)
+
+		start := page * pageLimit
+		if start > len(items) {
+			start = len(items)
 		}
-		end := len(items)
-		if lim := int(list.ListOptions.Limit); lim > 0 && start+lim < end {
-			end = start + lim
+		end := start + pageLimit
+		if end > len(items) {
+			end = len(items)
 		}
 		out := &unstructured.UnstructuredList{
 			Object: map[string]any{"apiVersion": "nvidia.com/v1", "kind": "ClusterPolicyList"},
@@ -656,7 +666,7 @@ func TestLiveClusterPoliciesPaginates(t *testing.T) {
 		t.Fatalf("ClusterPolicies() error = %v, want nil", err)
 	}
 	if len(got) != 1200 {
-		t.Errorf("ClusterPolicies() returned %d objects, want 1200", len(got))
+		t.Errorf("ClusterPolicies() returned %d objects, want 1200; an unpaginated read stops at %d", len(got), pageLimit)
 	}
 	const wantGVR = "nvidia.com/v1, Resource=clusterpolicies"
 	if n := counter.get("list", wantGVR); n != 3 {

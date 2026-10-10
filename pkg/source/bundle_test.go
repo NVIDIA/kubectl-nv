@@ -346,8 +346,8 @@ func TestBundleWithoutResourceSlices(t *testing.T) {
 			if !errors.As(err, &pe) {
 				t.Fatalf("%s() error = %v (%T), want *PartialError", c.name, err, err)
 			}
-			if len(pe.Resources) != 1 || pe.Resources[0] != "resourceslices" {
-				t.Fatalf("PartialError.Resources = %v, want [resourceslices]", pe.Resources)
+			if pe.Resource != "resourceslices" {
+				t.Fatalf("PartialError.Resource = %q, want resourceslices", pe.Resource)
 			}
 			for _, n := range got {
 				if n == "worker-slice-only" {
@@ -386,8 +386,8 @@ func TestBundleMissingFilesArePartial(t *testing.T) {
 			if !errors.As(err, &pe) {
 				t.Fatalf("error = %v (%T), want *PartialError", err, err)
 			}
-			if len(pe.Resources) != 1 || pe.Resources[0] != c.want {
-				t.Fatalf("PartialError.Resources = %v, want [%s]", pe.Resources, c.want)
+			if pe.Resource != c.want {
+				t.Fatalf("PartialError.Resource = %q, want %q", pe.Resource, c.want)
 			}
 		})
 	}
@@ -495,6 +495,10 @@ func TestBundleRejectsOversizeFile(t *testing.T) {
 	// it through.
 	body := "items: []\n# " + strings.Repeat("x", 4096) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "nodes.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A slice file too, so that the only thing left to fail is the size.
+	if err := os.WriteFile(filepath.Join(dir, "resourceslices.yaml"), []byte("items: []\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
