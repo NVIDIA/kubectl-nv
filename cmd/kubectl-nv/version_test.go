@@ -32,6 +32,9 @@ func TestVersionComesFromLdflags(t *testing.T) {
 		t.Fatalf("unstamped version = %q, want the %q default", version, "dev")
 	}
 
+	// No isolation here on purpose: this test shells out to "go build", whose
+	// caches live under HOME, and it never builds a client. "--version" and
+	// "version" read no kubeconfig, which the credential-plugin guard checks.
 	const stamped = "v9.9.9-ldflags-test"
 	binary := filepath.Join(t.TempDir(), "kubectl-nv")
 

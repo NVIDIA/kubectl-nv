@@ -85,6 +85,8 @@ func TestEveryCommandIsReadOnly(t *testing.T) {
 				t.Fatalf("no fixture for leaf %q: add one to leafFixtures so the guard covers it", name)
 			}
 
+			isolateKubeconfig(t)
+
 			rec := newRecorder(t, name)
 			cmd := newTestCommand(t, rec)
 
@@ -318,4 +320,15 @@ users:
 		t.Fatalf("writing kubeconfig: %v", err)
 	}
 	return path
+}
+
+// isolateKubeconfig keeps a test away from the kubeconfig of whoever is
+// running it. KUBECONFIG has to name a path that does not exist rather than be
+// emptied: client-go treats an empty KUBECONFIG as unset and falls back to the
+// default location, which is the file this is protecting.
+func isolateKubeconfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KUBECONFIG", filepath.Join(home, "no-kubeconfig-here"))
 }

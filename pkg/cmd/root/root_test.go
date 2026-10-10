@@ -36,6 +36,8 @@ import (
 // "set means true": the urfave tree failed on a value it could not parse, and
 // a silent fallback would hide a typo in a support engineer's shell.
 func TestRootRejectsUnparseableDebugEnvironment(t *testing.T) {
+	isolateKubeconfig(t)
+
 	t.Setenv("DEBUG", "yesplease")
 	kubeconfig := writeKubeconfig(t)
 
@@ -59,6 +61,8 @@ func TestRootRejectsUnparseableDebugEnvironment(t *testing.T) {
 
 // TestVersionIsReported covers both ways a user asks for the version.
 func TestVersionIsReported(t *testing.T) {
+	isolateKubeconfig(t)
+
 	for _, args := range [][]string{{"--version"}, {"version"}} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out := &bytes.Buffer{}
@@ -86,6 +90,8 @@ func TestVersionIsReported(t *testing.T) {
 // from being reported as a usage mistake: the flags were fine, and forty lines
 // of flag help bury the one line that says what went wrong.
 func TestRuntimeFailureDoesNotPrintUsage(t *testing.T) {
+	isolateKubeconfig(t)
+
 	out := &bytes.Buffer{}
 	cmd := root.NewCommand("test", root.Deps{
 		Streams: genericiooptions.NewTestIOStreamsDiscard(),
@@ -108,6 +114,8 @@ func TestRuntimeFailureDoesNotPrintUsage(t *testing.T) {
 // TestFlagMistakeStillPrintsUsage is the other half: an unknown flag is a usage
 // mistake, and the user should see the flags on offer.
 func TestFlagMistakeStillPrintsUsage(t *testing.T) {
+	isolateKubeconfig(t)
+
 	out := &bytes.Buffer{}
 	cmd := root.NewCommand("test", root.Deps{
 		Streams:    genericiooptions.NewTestIOStreamsDiscard(),
@@ -129,6 +137,8 @@ func TestFlagMistakeStillPrintsUsage(t *testing.T) {
 // adm command used to print its help and exit 0 for "adm must-gaher", so a
 // script that collected nothing reported that it had.
 func TestUnknownSubcommandIsAnError(t *testing.T) {
+	isolateKubeconfig(t)
+
 	cases := []struct {
 		name    string
 		args    []string
@@ -170,6 +180,8 @@ func TestUnknownSubcommandIsAnError(t *testing.T) {
 // defines one of its own would otherwise skip the root's and run with no
 // client factory and no debug setting at all.
 func TestParentHooksRunForASubcommandWithItsOwnHook(t *testing.T) {
+	isolateKubeconfig(t)
+
 	t.Setenv("DEBUG", "1")
 
 	options := &nvcmd.Options{}

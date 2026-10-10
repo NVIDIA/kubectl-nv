@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -130,7 +131,8 @@ func TestMustGatherFlagCompatibility(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			for _, k := range []string{"KUBECONFIG", "ARTIFACT_DIR", "DEBUG"} {
+			isolateKubeconfig(t)
+			for _, k := range []string{"ARTIFACT_DIR", "DEBUG"} {
 				t.Setenv(k, "")
 			}
 			for k, v := range c.env {
@@ -199,4 +201,15 @@ users:
 		t.Fatalf("writing kubeconfig: %v", err)
 	}
 	return path
+}
+
+// isolateKubeconfig keeps a test away from the kubeconfig of whoever is
+// running it. KUBECONFIG has to name a path that does not exist rather than be
+// emptied: client-go treats an empty KUBECONFIG as unset and falls back to the
+// default location, which is the file this is protecting.
+func isolateKubeconfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KUBECONFIG", filepath.Join(home, "no-kubeconfig-here"))
 }

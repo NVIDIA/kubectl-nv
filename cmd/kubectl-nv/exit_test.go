@@ -58,7 +58,8 @@ func TestExitCodes(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			for _, k := range []string{"KUBECONFIG", "ARTIFACT_DIR", "DEBUG"} {
+			isolateKubeconfig(t)
+			for _, k := range []string{"ARTIFACT_DIR", "DEBUG"} {
 				t.Setenv(k, "")
 			}
 			for k, v := range c.env {
@@ -95,6 +96,8 @@ func TestPanicBecomesAnExitCode(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			isolateKubeconfig(t)
+
 			out := &bytes.Buffer{}
 			streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: out, ErrOut: out}
 
@@ -125,6 +128,8 @@ func TestPanicBecomesAnExitCode(t *testing.T) {
 // through the usage flag. A command is free to silence its own usage, and a
 // mistyped flag on it is still the user's to fix, not a failed run.
 func TestFlagErrorsAreUsageErrorsOnTheirOwn(t *testing.T) {
+	isolateKubeconfig(t)
+
 	out := &bytes.Buffer{}
 	streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: out, ErrOut: out}
 

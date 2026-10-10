@@ -18,6 +18,7 @@ package adm
 
 import (
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,8 @@ func TestDefaultArtifactDir(t *testing.T) {
 // TestAdmRejectsAnUnknownSubcommand covers the typo directly on the adm
 // command, where the missing Args check lived.
 func TestAdmRejectsAnUnknownSubcommand(t *testing.T) {
+	isolateKubeconfig(t)
+
 	reached := false
 	o := &cmd.Options{Streams: genericiooptions.NewTestIOStreamsDiscard()}
 	adm := NewCommand(o, func(*mustgather.Options) error { reached = true; return nil })
@@ -68,4 +71,15 @@ func TestAdmRejectsAnUnknownSubcommand(t *testing.T) {
 	if reached {
 		t.Error("the must-gather ran for a subcommand that does not exist")
 	}
+}
+
+// isolateKubeconfig keeps a test away from the kubeconfig of whoever is
+// running it. KUBECONFIG has to name a path that does not exist rather than be
+// emptied: client-go treats an empty KUBECONFIG as unset and falls back to the
+// default location, which is the file this is protecting.
+func isolateKubeconfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KUBECONFIG", filepath.Join(home, "no-kubeconfig-here"))
 }

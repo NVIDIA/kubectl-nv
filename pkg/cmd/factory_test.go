@@ -45,6 +45,8 @@ func TestSetKubernetesDefaults(t *testing.T) {
 // command line is a statement of intent: falling back to KUBECONFIG because
 // that path is missing would gather from a cluster the user did not name.
 func TestExplicitKubeconfigMustExist(t *testing.T) {
+	isolateKubeconfig(t)
+
 	good := filepath.Join(t.TempDir(), "config")
 	if err := os.WriteFile(good, []byte(testKubeconfig), 0o600); err != nil {
 		t.Fatal(err)
@@ -68,8 +70,7 @@ func TestExplicitKubeconfigMustExist(t *testing.T) {
 // --token there is nothing to read from disk, and demanding a kubeconfig file
 // would turn a working invocation into an error.
 func TestServerAndTokenWithoutAKubeconfig(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("KUBECONFIG", "")
+	isolateKubeconfig(t)
 
 	server := "https://127.0.0.1:1"
 	token := "not-a-real-token"
@@ -147,4 +148,15 @@ func TestKubeconfigDisplay(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isolateKubeconfig keeps a test away from the kubeconfig of whoever is
+// running it. KUBECONFIG has to name a path that does not exist rather than be
+// emptied: client-go treats an empty KUBECONFIG as unset and falls back to the
+// default location, which is the file this is protecting.
+func isolateKubeconfig(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("KUBECONFIG", filepath.Join(home, "no-kubeconfig-here"))
 }
