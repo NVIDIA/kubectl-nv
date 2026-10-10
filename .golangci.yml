@@ -1,4 +1,10 @@
 version: "2"
+# The end to end suite is behind the "e2e" build tag. Without it here the
+# linter skips those files entirely, so the only code that talks to a real
+# cluster would be the only code nobody checks.
+run:
+  build-tags:
+    - e2e
 linters:
   disable:
     - errcheck
