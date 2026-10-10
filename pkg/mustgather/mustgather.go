@@ -26,7 +26,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"gopkg.in/yaml.v2"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -48,6 +47,16 @@ type Options struct {
 	// of a driver pod. It is the seam the tests drive the gatherer through
 	// without a cluster to exec into; a nil value means the live one.
 	FetchPodFile PodFileFetcher
+}
+
+// Clients hands the gatherer the clients it works through. The command layer
+// has a factory that satisfies this; a test supplies fakes. It is declared
+// here, where it is used, so that the gatherer stays a library the commands
+// call rather than one that calls back into them.
+type Clients interface {
+	KubernetesClient() (kubernetes.Interface, error)
+	DynamicClient() (dynamic.Interface, error)
+	RESTConfig() (*rest.Config, error)
 }
 
 // RunFunc is the signature a must-gather runs through, so that a caller can put
@@ -169,7 +178,7 @@ type PodInfo struct {
 // 2. Create log files for stdout and stderr.
 // 3. Take the clients from the factory.
 // If any step fails, any opened file resources are closed before returning.
-func NewGatherer(opts *Options, f cmd.Factory, progress io.Writer) (*Gatherer, error) {
+func NewGatherer(opts *Options, f Clients, progress io.Writer) (*Gatherer, error) {
 	// Create the ARTIFACT_DIR.
 	if err := os.MkdirAll(opts.ArtifactDir, os.ModePerm); err != nil {
 		return nil, fmt.Errorf("failed to create artifact directory: %w", err)
@@ -945,7 +954,7 @@ func (g *Gatherer) collectBugReports(label string, pods []v1.Pod, taken map[stri
 // Run collects everything NVIDIA support asks for from the cluster the factory
 // points at, into opts.ArtifactDir. progress carries the running commentary;
 // the artifacts themselves go to files under the artifact directory.
-func Run(opts *Options, f cmd.Factory, progress io.Writer) error {
+func Run(opts *Options, f Clients, progress io.Writer) error {
 	// Initialize the Gatherer with the provided options.
 	g, err := NewGatherer(opts, f, progress)
 	if err != nil {
