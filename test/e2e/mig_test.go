@@ -61,6 +61,20 @@ const (
 	// Two, because the per-worker assertions exist to catch a lane where only
 	// one node got partitioned and a single-worker cluster cannot catch that.
 	migExpectedWorkers = 2
+
+	// What GFD published on the lane run of 2026-10-11, written out as the
+	// literals they were observed to be rather than as "non-empty".
+	//
+	// These three are what a partitioned board CHANGES, and that is why they
+	// are pinned. Under the single strategy GFD renames the product after the
+	// slice, counts partitions rather than boards, and reports the slice's
+	// memory rather than the board's: an unpartitioned H100 would publish
+	// NVIDIA-H100-80GB-HBM3, a count of 2 and 81559 MiB. A test that only
+	// asked for a non-empty product would pass on that node, which is the one
+	// node this lane exists to tell apart from its own.
+	migExpectedProduct = "NVIDIA-H100-80GB-HBM3-MIG-1g.10gb"
+	migExpectedCount   = 14
+	migExpectedMemory  = "10240"
 )
 
 // The GFD labels this lane reads. They are the node's, not the binary's: every
@@ -154,9 +168,19 @@ func TestMIGLane(t *testing.T) {
 			if got := node.Labels[labelMIGCapable]; got != "true" {
 				t.Errorf("%s: label %s is %q, want \"true\"", name, labelMIGCapable, got)
 			}
-			for _, label := range []string{labelGPUProduct, labelGPUCount, labelGPUMemory} {
-				if node.Labels[label] == "" {
-					t.Errorf("%s: label %s is absent", name, label)
+			// The three GFD labels a partitioned board changes, against the
+			// values the lane was observed to publish.
+			for _, pinned := range []struct {
+				label string
+				want  string
+			}{
+				{labelGPUProduct, migExpectedProduct},
+				{labelGPUCount, strconv.Itoa(migExpectedCount)},
+				{labelGPUMemory, migExpectedMemory},
+			} {
+				if got := node.Labels[pinned.label]; got != pinned.want {
+					t.Errorf("%s: label %s is %q, want %q",
+						name, pinned.label, got, pinned.want)
 				}
 			}
 		}
@@ -270,9 +294,17 @@ func TestMIGLane(t *testing.T) {
 			// the product after the slice and counts partitions rather than
 			// boards, so reading them off a whole-GPU node would give the
 			// wrong answer here and the comparison would catch it.
+			if got.Product != migExpectedProduct {
+				t.Errorf("%s: info reports product %q, want %q",
+					name, got.Product, migExpectedProduct)
+			}
 			if got.Product != node.Labels[labelGPUProduct] {
 				t.Errorf("%s: info reports product %q, the node is labelled %s=%q",
 					name, got.Product, labelGPUProduct, node.Labels[labelGPUProduct])
+			}
+			if got.Count != migExpectedCount {
+				t.Errorf("%s: info reports count %d, want %d",
+					name, got.Count, migExpectedCount)
 			}
 			wantCount, err := strconv.Atoi(node.Labels[labelGPUCount])
 			if err != nil {
@@ -283,6 +315,14 @@ func TestMIGLane(t *testing.T) {
 					name, got.Count, labelGPUCount, node.Labels[labelGPUCount])
 			}
 
+			// The memory label has no field of its own on a GPU node, so it
+			// is checked where info does carry it: the node's own labels,
+			// which info reports under metadata.
+			if got := got.Metadata.Labels[labelGPUMemory]; got != migExpectedMemory {
+				t.Errorf("%s: info reports metadata label %s=%q, want %q",
+					name, labelGPUMemory, got, migExpectedMemory)
+			}
+
 			if got.Allocatable != migExpectedGPUs {
 				t.Errorf("%s: info reports allocatable %d, want %d",
 					name, got.Allocatable, migExpectedGPUs)
@@ -290,6 +330,23 @@ func TestMIGLane(t *testing.T) {
 			if len(got.MIG.Resources) != 0 {
 				t.Errorf("%s: info reports %d per-profile MIG resource(s) (%v) under the %s strategy, want none",
 					name, len(got.MIG.Resources), sortedKeysOf(got.MIG.Resources), migExpectedStrategy)
+			}
+
+			// Config and ConfigState are the mig-manager's fields: what
+			// partitioning it was asked to apply and how far it got. This
+			// lane has no mig-manager, because the layout is decided at
+			// install time by the chart and the driver capability surface is
+			// staged once. Both must therefore be empty. A non-empty
+			// ConfigState here would mean the reader is inventing a value
+			// for a label the node does not carry, which is how a
+			// mig-manager rule ends up firing on a node that has none.
+			if got.MIG.Config != "" {
+				t.Errorf("%s: info reports MIG config %q, want \"\": this lane runs no mig-manager",
+					name, got.MIG.Config)
+			}
+			if got.MIG.ConfigState != "" {
+				t.Errorf("%s: info reports MIG config state %q, want \"\": this lane runs no mig-manager",
+					name, got.MIG.ConfigState)
 			}
 		}
 	})
