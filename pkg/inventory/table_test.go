@@ -201,3 +201,92 @@ func TestGPUNodeRow(t *testing.T) {
 		})
 	}
 }
+
+// TestColumnsCarryTheirField pins that every column names the JSON path it
+// renders. --fields keeps a column by that path, and a column that leaves it
+// empty is dropped the moment --fields is given, so an unset Field is an
+// invisible way to lose a column.
+func TestColumnsCarryTheirField(t *testing.T) {
+	t.Parallel()
+
+	list := NewGPUNodeList()
+
+	node := NewGPUNode("n1")
+	node.Topology = map[string]string{"fabric.topograph.run/tier-0": "switch-a"}
+	list.Items = append(list.Items, *node)
+
+	want := map[string]string{
+		"NODE":                        "metadata.name",
+		"PRODUCT":                     "product",
+		"GPUS":                        "capacity",
+		"DRIVER":                      "driverVersion",
+		"CUDA":                        "cudaVersion",
+		"MODE":                        "mode",
+		"MIG":                         "mig",
+		"UPGRADE":                     "upgradeState",
+		"STATUS":                      "ready",
+		"CLIQUE":                      "clique",
+		"FABRIC.TOPOGRAPH.RUN/TIER-0": "topology",
+	}
+
+	for _, wide := range []bool{false, true} {
+		for _, c := range list.TableColumns(wide) {
+			expected, known := want[c.Header]
+			if !known {
+				t.Errorf("column %q is not in the expected set", c.Header)
+
+				continue
+			}
+
+			if c.Field != expected {
+				t.Errorf("column %q has field %q, want %q", c.Header, c.Field, expected)
+			}
+		}
+	}
+}
+
+// TestColumnFieldsArePathsOfTheKind pins that each Field is a path --fields
+// actually accepts. A typo here produces a column nothing can keep, and the
+// table would quietly lose it under --fields with no error anywhere.
+func TestColumnFieldsArePathsOfTheKind(t *testing.T) {
+	t.Parallel()
+
+	list := NewGPUNodeList()
+	node := NewGPUNode("n1")
+	node.Topology = map[string]string{"fabric.topograph.run/tier-0": "switch-a"}
+	list.Items = append(list.Items, *node)
+
+	paths, err := output.FieldPaths(list)
+	if err != nil {
+		t.Fatalf("FieldPaths: %v", err)
+	}
+
+	valid := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		valid[p] = true
+	}
+
+	for _, c := range list.TableColumns(true) {
+		if c.Field == "" {
+			t.Errorf("column %q names no field", c.Header)
+
+			continue
+		}
+
+		if !valid[c.Field] {
+			t.Errorf("column %q names field %q, which is not a path of this kind: %v", c.Header, c.Field, paths)
+		}
+	}
+}
+
+// TestGPUNodeSingleColumnsCarryTheirField pins the same for one node, which is
+// the shape gpu info prints at -o wide.
+func TestGPUNodeSingleColumnsCarryTheirField(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range NewGPUNode("n1").TableColumns(false) {
+		if c.Field == "" {
+			t.Errorf("column %q names no field", c.Header)
+		}
+	}
+}
