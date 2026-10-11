@@ -58,22 +58,41 @@ Every GPU Operator version this plugin supports.
 
 ## Reproduction
 
-On a Mokka lane, point the exporter DaemonSet at a node selector nothing
-matches, leaving the deploy labels alone. The operator still says the
-exporter belongs on the node and no pod is there.
+On a Mokka lane, point the exporter at an image version that does not
+exist, through the ClusterPolicy, and then delete the exporter pod on
+the node under test.
 
 ```shell
-kubectl -n gpu-operator patch daemonset nvidia-dcgm-exporter --type=merge \
-  -p '{"spec":{"template":{"spec":{"nodeSelector":{"nv.example/absent":"yes"}}}}}'
+kubectl patch clusterpolicy cluster-policy --type=merge \
+  -p '{"spec":{"dcgmExporter":{"version":"v0.0.0-absent"}}}'
+kubectl -n gpu-operator delete pod -l app=nvidia-dcgm-exporter \
+  --field-selector spec.nodeName=<node>
 kubectl nv health --fail-on warning
 ```
 
+Through the ClusterPolicy and not the DaemonSet. An earlier draft of
+this entry patched a node selector onto `nvidia-dcgm-exporter`
+directly; the operator owns that DaemonSet and reconciles it, so an
+injection made there is undone on its own schedule and the test passes
+or fails on timing.
+
+The pod deletion is what puts the fault on the node that was asked for.
+A DaemonSet rolling update takes one node at a time and stops at the
+first replacement that never becomes ready, so the patch alone breaks
+whichever node the controller reached first: on the first live run that
+was the other worker, while the node under test kept its healthy pod for
+the whole six minutes. A node with no pod gets one from the template as
+it stands now, whatever the rollout is waiting on.
+
 That is a write to the lane, so it belongs in a lane fixture and never
 in anything `kubectl nv` itself runs: the plugin is read-only toward a
-cluster. Recover by removing the node selector again.
+cluster. Recover by writing the saved version back and deleting the
+broken pod.
 
-E3 scripts both halves as
-`hack/mokka/faults/nv-dcgm-001.sh inject|recover <node>`.
+`hack/mokka/faults/nv-dcgm-001.sh inject|recover <node>` scripts both
+halves. Measured on a t4 lane on 2026-10-11: the finding appears within
+5 seconds and clears within 58 seconds, the exporter's own image pull
+being most of the second number.
 
 ## Next command
 

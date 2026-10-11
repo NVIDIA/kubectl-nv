@@ -97,5 +97,12 @@ kubectl nv health --node <worker>
 
 Only that one label changes, so the node is still one the operator
 targets and the rule still evaluates it. Put it back with
-`nvidia.com/gpu.deploy.device-plugin=true`. E3 scripts both halves as
-`hack/mokka/faults/nv-node-002.sh inject|recover <node>`.
+`nvidia.com/gpu.deploy.device-plugin=true`.
+
+`hack/mokka/faults/nv-node-002.sh inject|recover <worker>` scripts both
+halves, writing back the value it found rather than assuming `true`.
+Measured on a t4 lane on 2026-10-11: capacity stays at 4 while
+allocatable goes to 0, the finding appears within 9 seconds, and it
+clears within 11 seconds of the label being restored. The same change
+also reports NV-OP-002 at info, which is the rule saying the operand was
+switched off rather than broken.

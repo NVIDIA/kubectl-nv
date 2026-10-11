@@ -51,20 +51,33 @@ kubectl nv info <node>
 
 ## Reproduction
 
-On a Mokka lane, remove the label the operator wrote from one worker.
-The PCI label stays, because node feature discovery wrote that one and
-node feature discovery is not an operand.
+`hack/mokka/faults/nv-node-001.sh inject|recover <worker>` does this
+against a Mokka lane, and does three things rather than two.
 
-Stop the operator first, or it writes the label straight back.
+Removing the label with the operator running is not enough: on a t4 lane
+on 2026-10-11 the ClusterPolicy controller wrote it back within five
+seconds. Scaling the operator to zero first keeps the label off, and
+then runs into the other half of the rule, which only fires where the
+operator is installed. `kubectl nv health` reads "installed" as "a pod
+matches `app=gpu-operator`", so with the Deployment at zero replicas the
+rule returns nothing at all: the same lane, with the Deployment drained
+and the label gone, reported 0 errors, 0 warnings and 0 infos.
+
+So the script scales the Deployment to zero, waits for its pods to go,
+plants a stand-in pod carrying `app=gpu-operator` and the operator's own
+image, and then clears the label. That is the fault this code is about:
+an operator that is present and is claiming nothing.
 
 ```shell
 kubectl -n gpu-operator scale deploy/gpu-operator --replicas=0
+# wait for the operator pods to go, then plant a stand-in pod labelled
+# app=gpu-operator in the same namespace
 kubectl label node <worker> nvidia.com/gpu.present-
 kubectl nv health --node <worker>
 ```
 
-Recover by scaling the deployment back to 1 and waiting for the label to
-return. Whether anything else restores it in the meantime is not
-recorded here: E3 runs the injection against a live lane and writes down
-what it observes, in
-`hack/mokka/faults/nv-node-001.sh inject|recover <node>`.
+Observed on a t4 lane on 2026-10-11: the finding appears within 3
+seconds of the label going, and clears within 21 seconds of the label
+being written back and the Deployment scaled up again. The PCI label is
+untouched throughout, because node feature discovery wrote that one and
+node feature discovery is not an operand.

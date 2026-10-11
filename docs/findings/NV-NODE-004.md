@@ -70,6 +70,18 @@ kubectl label node <worker> nvidia.com/gpu.count=7 --overwrite
 kubectl nv health --node <worker>
 ```
 
-GPU feature discovery rewrites the label on its next pass, so the
-finding clears on its own. E3 scripts both halves as
-`hack/mokka/faults/nv-node-004.sh inject|recover <node>`.
+The finding appears on the next run, with no delay worth measuring: the
+rule compares two fields of the node object and the label is already
+there when the write returns.
+
+It does not clear on its own. An earlier draft of this entry said GPU
+feature discovery rewrites the label on its next pass; on a t4 lane on
+2026-10-11 the hand-written value was still 7 after three minutes of
+polling at ten-second intervals, with every operand healthy. Whatever
+the rewrite period is, it is longer than that, so recovery is writing
+the real count back.
+
+`hack/mokka/faults/nv-node-004.sh inject|recover <worker>` scripts both
+halves. It writes one more than the count it reads rather than a fixed
+number, because a script that wrote 7 would inject nothing on a profile
+with seven devices per node.

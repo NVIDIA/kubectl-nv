@@ -58,25 +58,35 @@ kubectl nv info <node>
 
 ## Reproduction
 
-On a Mokka lane, point the device plugin at an image tag that does not
-exist. The pods roll to an image that will never pull, so they stay
-unready while the deploy label and the ClusterPolicy both still say the
-operand belongs there.
+On a Mokka lane, point the device plugin at an image version that does
+not exist, then delete the plugin pod on the node under test. The
+replacement never pulls, so it stays unready while the deploy label and
+the ClusterPolicy both still say the operand belongs there.
 
 ```shell
 kubectl patch clusterpolicy cluster-policy --type=merge \
   -p '{"spec":{"devicePlugin":{"version":"v0.0.0-absent"}}}'
+kubectl -n gpu-operator delete pod -l app=nvidia-device-plugin-daemonset \
+  --field-selector spec.nodeName=<node>
 kubectl nv health
 ```
 
-ClusterPolicy is cluster scoped, so the command carries no `-n`. Save
+ClusterPolicy is cluster scoped, so that command carries no `-n`. Save
 `spec.devicePlugin.version` before the patch and write the saved value
 back to recover.
+
+The pod deletion is not optional. A DaemonSet rolling update takes one
+node at a time and stops at the first replacement that never becomes
+ready, so the patch on its own breaks whichever node the controller
+reached first: on the first live run against this lane that was the
+other worker, and the node under test kept its healthy pod for the whole
+six minutes the run polled for the finding.
 
 The same patch reproduces NV-OP-001, because the policy leaves `ready`
 while an operand it enables is not. Switching the operand off with the
 deploy label instead would suppress this rule on purpose, and reproduce
 NV-NODE-002 and NV-OP-002 rather than this one.
 
-E3 scripts both halves as
-`hack/mokka/faults/nv-dp-001.sh inject|recover <node>`.
+`hack/mokka/faults/nv-dp-001.sh inject|recover <node>` scripts both
+halves. Measured on a t4 lane on 2026-10-11: the finding appears within
+5 seconds and clears within 11 seconds.

@@ -43,8 +43,8 @@ kubectl nv info <node>
 
 ## Reproduction
 
-On a Mokka lane, fail one simulated device on a worker and let the
-device plugin re-advertise what is left.
+On a Mokka lane, fail one simulated device on a worker and then restart
+the device plugin on that node.
 
 ```shell
 POD=$(kubectl -n mokka get pod -l app.kubernetes.io/name=nvml-mock \
@@ -52,17 +52,29 @@ POD=$(kubectl -n mokka get pod -l app.kubernetes.io/name=nvml-mock \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl -n mokka exec "$POD" -- nvml-mock-ctl fail --gpu 0 \
   --mode ecc_uncorrectable --xid 79
+kubectl -n gpu-operator delete pod -l app=nvidia-device-plugin-daemonset \
+  --field-selector spec.nodeName=<node>
 ```
 
-Recover with `--mode healthy` on the same GPU. The flags are the ones
-`docs/nvml-mock-ctl.md` documents in k8s-test-infra v0.4.0, the chart
-version this lane pins.
+Recover with `--mode healthy` on the same GPU and another restart. The
+flags are the ones `docs/nvml-mock-ctl.md` documents in k8s-test-infra
+v0.4.0, the chart version this lane pins.
 
-What the node's allocatable count does in response has not been observed
-here, and this entry does not claim it: the device plugin may drop the
-device, mark it unhealthy, or leave the count alone. E3 runs the
-injection against a live lane and records the answer, in
-`hack/mokka/faults/nv-node-003.sh inject|recover <node>`.
+The restart is not optional, and it is what the first live run against
+this lane found out. The device plugin opens its NVML event set once, at
+startup, so a failure injected under a running plugin is never read:
+capacity and allocatable stayed at 4 and 4 for the six minutes that run
+polled them. Restarted after the injection, the same plugin logs
+`XidCriticalError: Xid=79 on Device=GPU-00000074-...; marking device as
+unhealthy` and the node goes to capacity 4, allocatable 3 within ten
+seconds. The kubelet's device manager keeps unhealthy devices in
+capacity and takes them out of allocatable, which is exactly the gap
+this rule is about.
+
+`hack/mokka/faults/nv-node-003.sh inject|recover <node>` scripts both
+halves, the restart included. Measured on a t4 lane on 2026-10-11: the
+finding appears within 11 seconds of the injection and clears within 11
+seconds of the recovery.
 
 Reserving a GPU through the kubelet's `--system-reserved` produces the
 same split on real hardware.

@@ -67,8 +67,9 @@ kubectl describe clusterpolicy <name>
 
 ## Reproduction
 
-On a Mokka lane, point the device plugin at an image tag that does not
-exist. The operand never becomes ready, so the policy leaves `ready`.
+On a Mokka lane, point the device plugin at an image version that does
+not exist. The operand never becomes ready, so the policy leaves
+`ready`.
 
 ```shell
 kubectl patch clusterpolicy cluster-policy --type=merge \
@@ -80,7 +81,16 @@ ClusterPolicy is cluster scoped, so the command carries no `-n`. Save
 `spec.devicePlugin.version` before the patch and write the saved value
 back to recover.
 
+This finding needs no help reaching a particular node, because it is
+about no node: the policy is one object and the finding it produces is
+cluster scoped. NV-DP-001 uses the same patch and does need the extra
+step; its entry says why.
+
 This writes to the lane, so it belongs in a lane fixture and never in
 anything `kubectl nv` itself runs: the plugin is read-only toward a
-cluster. E3 scripts both halves as
-`hack/mokka/faults/nv-op-001.sh inject|recover <node>`.
+cluster.
+
+`hack/mokka/faults/nv-op-001.sh inject|recover <node>` scripts both
+halves. Measured on a t4 lane on 2026-10-11: `status.state` goes to
+`notReady` and the finding appears within 2 seconds, and both are back
+within 9 seconds of the version being written back.

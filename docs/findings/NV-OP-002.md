@@ -76,5 +76,14 @@ kubectl nv health --node <worker> --fail-on info
 
 `--fail-on info` is what makes the run exit non-zero on it; at the
 default threshold an info finding is printed and does not fail the run.
-Put the label back with `=true`. E3 scripts both halves as
-`hack/mokka/faults/nv-op-002.sh inject|recover <node>`.
+Put the label back with the value it had.
+
+The exporter and not the device plugin: switching the device plugin off
+takes the node's allocatable GPUs with it and reports NV-NODE-002 as
+well, where the exporter's absence is only this finding.
+
+`hack/mokka/faults/nv-op-002.sh inject|recover <worker>` scripts both
+halves. Measured on a t4 lane on 2026-10-11: the finding appears on the
+next run with no measurable delay, and clears within 56 seconds of the
+label being restored, which is the operator putting the exporter pod
+back.
