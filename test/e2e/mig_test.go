@@ -39,9 +39,6 @@ import (
 // parent: a second top-level test here would silently never run.
 
 const (
-	// migCommandGroup is the subcommand the read-only commands live under.
-	migCommandGroup = "gpu"
-
 	// migExpectedGPUs is what a worker in this lane advertises: two H100
 	// boards, each carved into seven 1g.10gb partitions, every partition
 	// published as one nvidia.com/gpu because the device plugin runs with
@@ -75,6 +72,18 @@ const (
 	migExpectedProduct = "NVIDIA-H100-80GB-HBM3-MIG-1g.10gb"
 	migExpectedCount   = 14
 	migExpectedMemory  = "10240"
+
+	// migExpectedNodesChecked is how many nodes health runs its rules over on
+	// this lane: the two partitioned workers plus the control plane, which
+	// nvml-mock labels nvidia.com/gpu.present=true without giving it any
+	// allocatable GPUs and which health therefore carries as a hinted node.
+	//
+	// Three and not two on purpose. The hinted control plane is the node
+	// NV-NODE-002 would fire on if the operator-targets gate stopped
+	// excluding it, so a lane that checked only the workers would be a lane
+	// where that gate was never exercised. The value is what the lane was
+	// observed to report, not what the rules were read to imply.
+	migExpectedNodesChecked = 3
 )
 
 // The GFD labels this lane reads. They are the node's, not the binary's: every
@@ -134,6 +143,37 @@ type migNodeList struct {
 	Items      []migNode `json:"items"`
 }
 
+// migFinding mirrors output.Finding on the wire, with the fields a failure
+// message needs to name which rule fired and where.
+type migFinding struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Node     string `json:"node"`
+	Message  string `json:"message"`
+}
+
+// migSummary mirrors health.Summary on the wire.
+type migSummary struct {
+	Errors         int   `json:"errors"`
+	Warnings       int   `json:"warnings"`
+	Infos          int   `json:"infos"`
+	NodesChecked   int   `json:"nodesChecked"`
+	GPUCapacity    int64 `json:"gpuCapacity"`
+	GPUAllocatable int64 `json:"gpuAllocatable"`
+}
+
+// migHealthReport mirrors health.HealthReport on the wire. The findings sit at
+// the top level and not under a status, because output.ReportStatus is
+// embedded inline: every command in this contract that reports findings puts
+// them in the same place.
+type migHealthReport struct {
+	Kind        string       `json:"kind"`
+	Findings    []migFinding `json:"findings"`
+	Partial     bool         `json:"partial"`
+	Unreachable []any        `json:"unreachable"`
+	Summary     migSummary   `json:"summary"`
+}
+
 func TestMIGLane(t *testing.T) {
 	workers := workerNodeNames(t)
 	if len(workers) != migExpectedWorkers {
@@ -186,17 +226,15 @@ func TestMIGLane(t *testing.T) {
 		}
 	})
 
-	t.Run("gpu list reports every worker's partitions", func(t *testing.T) {
-		res := run(t, migCommandGroup, "list", "-o", "json")
+	t.Run("list reports every worker's partitions", func(t *testing.T) {
+		res := run(t, "list", "-o", "json")
 		if res.code != 0 {
-			t.Fatalf("%s list exited %d, want 0\nstderr:\n%s",
-				migCommandGroup, res.code, res.stderr)
+			t.Fatalf("list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		var list migNodeList
 		if err := json.Unmarshal([]byte(res.stdout), &list); err != nil {
-			t.Fatalf("%s list -o json does not parse: %v\nstdout:\n%s",
-				migCommandGroup, err, res.stdout)
+			t.Fatalf("list -o json does not parse: %v\nstdout:\n%s", err, res.stdout)
 		}
 		if list.Kind != "GPUNodeList" {
 			t.Errorf("kind is %q, want \"GPUNodeList\"", list.Kind)
@@ -209,8 +247,8 @@ func TestMIGLane(t *testing.T) {
 		for _, name := range workers {
 			item, ok := listed[name]
 			if !ok {
-				t.Errorf("%s list does not list worker %s, it lists %v",
-					migCommandGroup, name, sortedNames(listed))
+				t.Errorf("list does not list worker %s, it lists %v",
+					name, sortedNames(listed))
 				continue
 			}
 
@@ -251,21 +289,19 @@ func TestMIGLane(t *testing.T) {
 		}
 	})
 
-	t.Run("gpu info carries the MIG fields", func(t *testing.T) {
+	t.Run("info carries the MIG fields", func(t *testing.T) {
 		for _, name := range workers {
 			node := nodesByName[name]
 
-			res := run(t, migCommandGroup, "info", name, "-o", "json")
+			res := run(t, "info", name, "-o", "json")
 			if res.code != 0 {
-				t.Errorf("%s info %s exited %d, want 0\nstderr:\n%s",
-					migCommandGroup, name, res.code, res.stderr)
+				t.Errorf("info %s exited %d, want 0\nstderr:\n%s", name, res.code, res.stderr)
 				continue
 			}
 
 			var got migNode
 			if err := json.Unmarshal([]byte(res.stdout), &got); err != nil {
-				t.Errorf("%s info %s -o json does not parse: %v\nstdout:\n%s",
-					migCommandGroup, name, err, res.stdout)
+				t.Errorf("info %s -o json does not parse: %v\nstdout:\n%s", name, err, res.stdout)
 				continue
 			}
 
@@ -351,34 +387,92 @@ func TestMIGLane(t *testing.T) {
 		}
 	})
 
-	// The healthy-partitioned-node gate. A correctly partitioned lane is the
-	// one shape a MIG rule must NOT fire on: NV-MIG-001 is about a node whose
-	// partitioning did not take, NV-NODE-002 about a node that advertises GPU
-	// hints and no GPUs, NV-NODE-004 about an operand that is not running. All
-	// three are false here, so a finding at warning or above means a rule is
-	// firing on a healthy node.
-	t.Run("gpu health finds nothing at warning or above", func(t *testing.T) {
-		res := run(t, migCommandGroup, "health", "--fail-on", "warning", "-o", "json")
+	// The healthy-partitioned-node gate.
+	//
+	// A correctly partitioned lane is the one shape the MIG and node rules
+	// must NOT fire on. NV-MIG-001 is about a node whose partitioning did not
+	// take. NV-NODE-002 is about a node that advertises GPU hints and no GPUs,
+	// which this lane's control plane looks exactly like: nvml-mock tolerates
+	// every taint, so it carries nvidia.com/gpu.present=true and no
+	// allocatable at all. It is kept quiet by the operator-targets gate, not
+	// by luck, and this lane is where that holds or does not. NV-NODE-004
+	// compares gpu.count with capacity, and on a partitioned node under the
+	// single strategy both are 14 rather than the 2 boards underneath.
+	//
+	// "Exit 0 and no findings" is not enough on its own: a run that looked at
+	// nothing satisfies it. The summary is decoded and asserted so the gate
+	// says what was checked as well as what was found.
+	t.Run("health finds nothing at warning or above", func(t *testing.T) {
+		res := run(t, "health", "--fail-on", "warning", "-o", "json")
 
-		// Checked before the report is walked: a command that printed no
-		// report at all has an exit code and a stderr that say why, and
-		// "unexpected end of JSON input" does not.
+		// Checked before the report is read: a command that printed no report
+		// at all has an exit code and a stderr that say why, and "unexpected
+		// end of JSON input" does not.
 		if !json.Valid([]byte(res.stdout)) {
-			t.Fatalf("%s health --fail-on warning exited %d and did not print a JSON report\nstdout:\n%s\nstderr:\n%s",
-				migCommandGroup, res.code, res.stdout, res.stderr)
+			t.Fatalf("health --fail-on warning exited %d and did not print a JSON report\nstdout:\n%s\nstderr:\n%s",
+				res.code, res.stdout, res.stderr)
 		}
 
-		raised := findingsAtOrAbove(t, res.stdout, "warning")
+		var report migHealthReport
+		if err := json.Unmarshal([]byte(res.stdout), &report); err != nil {
+			t.Fatalf("health -o json does not parse: %v\nstdout:\n%s", err, res.stdout)
+		}
+
+		if report.Kind != "HealthReport" {
+			t.Errorf("kind is %q, want \"HealthReport\"", report.Kind)
+		}
+
+		// Partial means the run could not see part of the cluster. A partial
+		// report with no findings is not a healthy lane, it is a lane nobody
+		// managed to look at, and without this it would pass.
+		if report.Partial {
+			t.Errorf("health reported a partial run; it could not reach: %v", report.Unreachable)
+		}
+
+		// What was checked. These three are what stop the gate passing
+		// vacuously: 28 whole GPUs can only be the sum over both partitioned
+		// workers, so a run that skipped either of them, or that looked at no
+		// node at all, fails here rather than reporting a clean cluster.
+		if report.Summary.NodesChecked != migExpectedNodesChecked {
+			t.Errorf("health checked %d node(s), want %d (%d partitioned workers plus the hinted control plane)",
+				report.Summary.NodesChecked, migExpectedNodesChecked, migExpectedWorkers)
+		}
+		wantGPUs := int64(migExpectedGPUs * migExpectedWorkers)
+		if report.Summary.GPUCapacity != wantGPUs {
+			t.Errorf("health summed %d GPUs of capacity, want %d",
+				report.Summary.GPUCapacity, wantGPUs)
+		}
+		if report.Summary.GPUAllocatable != wantGPUs {
+			t.Errorf("health summed %d allocatable GPUs, want %d",
+				report.Summary.GPUAllocatable, wantGPUs)
+		}
+
+		// What was found. The summary counts and the findings themselves are
+		// both read: a summary that counts zero while the report carries a
+		// finding is its own bug, and either one alone would miss it.
+		if report.Summary.Errors != 0 || report.Summary.Warnings != 0 {
+			t.Errorf("health summarised %d error(s) and %d warning(s) on a healthy partitioned lane, want none of either",
+				report.Summary.Errors, report.Summary.Warnings)
+		}
+
+		var raised []string
+		for _, finding := range report.Findings {
+			if finding.Severity == "warning" || finding.Severity == "error" {
+				raised = append(raised, fmt.Sprintf("%s (%s) on %q: %s",
+					finding.Code, finding.Severity, finding.Node, finding.Message))
+			}
+		}
+		sort.Strings(raised)
 		if len(raised) != 0 {
-			t.Errorf("%s health raised %d finding(s) at warning or above on a healthy partitioned lane:\n  %s",
-				migCommandGroup, len(raised), strings.Join(raised, "\n  "))
+			t.Errorf("health raised %d finding(s) at warning or above on a healthy partitioned lane:\n  %s",
+				len(raised), strings.Join(raised, "\n  "))
 		}
 
-		// Checked after the findings, so a failure reports which rule fired
-		// rather than only that the exit code was not zero.
+		// Checked after the findings, so a failure names the rule that fired
+		// rather than only reporting that the exit code was not zero.
 		if res.code != 0 {
-			t.Errorf("%s health --fail-on warning exited %d, want 0\nstdout:\n%s\nstderr:\n%s",
-				migCommandGroup, res.code, res.stdout, res.stderr)
+			t.Errorf("health --fail-on warning exited %d, want 0\nstdout:\n%s\nstderr:\n%s",
+				res.code, res.stdout, res.stderr)
 		}
 	})
 }
@@ -395,66 +489,6 @@ func migNodesByName(t *testing.T) map[string]v1.Node {
 	}
 
 	return byName
-}
-
-// findingsAtOrAbove returns a readable line per finding in the report whose
-// severity is at or above the threshold.
-//
-// The report is walked rather than decoded into a struct. The HealthReport
-// envelope is Track E's and is still settling; what is fixed is the shape of a
-// finding, which carries both a "code" and a "severity". Walking for that pair
-// finds every finding wherever the envelope puts it, and a finding that moves
-// to a different field keeps being counted instead of silently vanishing from
-// a decode that no longer matches.
-func findingsAtOrAbove(t *testing.T, stdout, threshold string) []string {
-	t.Helper()
-
-	var doc any
-	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
-		t.Fatalf("health -o json does not parse: %v\nstdout:\n%s", err, stdout)
-	}
-
-	// info < warning < error, as pkg/output ranks them.
-	rank := map[string]int{"info": 0, "warning": 1, "error": 2}
-	want, ok := rank[threshold]
-	if !ok {
-		t.Fatalf("findingsAtOrAbove: %q is not a severity", threshold)
-	}
-
-	var raised []string
-	var walk func(any)
-	walk = func(node any) {
-		switch value := node.(type) {
-		case map[string]any:
-			code, hasCode := value["code"].(string)
-			severity, hasSeverity := value["severity"].(string)
-			if hasCode && hasSeverity {
-				got, known := rank[severity]
-				if !known {
-					t.Errorf("finding %s carries severity %q, which is not one of info, warning, error",
-						code, severity)
-				} else if got >= want {
-					message, _ := value["message"].(string)
-					node, _ := value["node"].(string)
-					raised = append(raised, fmt.Sprintf("%s (%s) on %q: %s",
-						code, severity, node, message))
-				}
-				// A finding has no findings inside it; no need to descend.
-				return
-			}
-			for _, child := range value {
-				walk(child)
-			}
-		case []any:
-			for _, child := range value {
-				walk(child)
-			}
-		}
-	}
-	walk(doc)
-	sort.Strings(raised)
-
-	return raised
 }
 
 // sortedNames lists the keys of a node map, for a failure message.
