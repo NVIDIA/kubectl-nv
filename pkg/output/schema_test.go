@@ -437,8 +437,16 @@ func TestSchemaGenerationIsDeterministic(t *testing.T) {
 // through, so a kind registered with RegisterSchema has to be the kind
 // SchemaFor and RegisteredKinds answer about. Three names on one registry
 // would otherwise be three registries.
+//
+// The default registry is swapped for the duration and put back afterwards.
+// Registering into the real one would make this test the only reason a kind is
+// in it: the run would leak into whatever else reads it, and a second run in
+// the same process would panic on the duplicate.
 func TestThePackageLevelFunctionsShareOneRegistry(t *testing.T) {
 	const probe = "DefaultRegistryProbe"
+
+	restore := swapDefaultSchemaRegistry(NewSchemaRegistry())
+	t.Cleanup(restore)
 
 	RegisterSchema(probe, &healthReport{})
 
@@ -465,5 +473,112 @@ func TestThePackageLevelFunctionsShareOneRegistry(t *testing.T) {
 	RegisterCommandKind("default-registry-probe", probe)
 	if !slices.Contains(DefaultSchemaRegistry().Commands(), "default-registry-probe") {
 		t.Error("RegisterCommandKind did not write to the default registry")
+	}
+}
+
+// The swap has to put the registry back, or the next test in this package sees
+// the probe and the drift check sees a kind nothing registers.
+func TestSwappingTheDefaultRegistryIsReversible(t *testing.T) {
+	before := DefaultSchemaRegistry()
+
+	func() {
+		restore := swapDefaultSchemaRegistry(NewSchemaRegistry())
+		defer restore()
+
+		RegisterSchema("SwapProbe", &healthReport{})
+		if DefaultSchemaRegistry() == before {
+			t.Fatal("the swap did not take effect")
+		}
+	}()
+
+	if DefaultSchemaRegistry() != before {
+		t.Fatal("the swap was not undone")
+	}
+	if slices.Contains(RegisteredKinds(), "SwapProbe") {
+		t.Error("a kind registered during the swap is still in the real registry")
+	}
+}
+
+// A schema is only worth publishing if what the command actually prints
+// validates against it. The helper is what a command package calls in its own
+// test, so a kind that drifts from its schema fails where it is defined.
+func TestValidateAgainstSchemaAcceptsASampleAndRejectsAWrongOne(t *testing.T) {
+	t.Parallel()
+
+	r := NewSchemaRegistry()
+	r.Register(KindGPUNodeList, &gpuNodeList{})
+
+	good := &gpuNodeList{
+		TypeMeta: TypeMetaFor(KindGPUNodeList),
+		Items: []gpuNode{{
+			TypeMeta:   TypeMetaFor(KindGPUNode),
+			ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+			Status:     gpuNodeStatus{GPUs: 4},
+		}},
+	}
+	if err := r.ValidateAgainstSchema(KindGPUNodeList, good); err != nil {
+		t.Fatalf("a sample the command would print did not validate: %v", err)
+	}
+
+	// The schema types items as an array, and a kind that renders an empty one
+	// as null does not satisfy it. That is the whole reason for validating a
+	// sample rather than trusting the generator: the Go type and the published
+	// schema disagree, and nothing else would say so.
+	plain := &gpuNodeList{TypeMeta: TypeMetaFor(KindGPUNodeList)}
+	if err := r.ValidateAgainstSchema(KindGPUNodeList, plain); err == nil {
+		t.Error("a list whose empty items marshals as null satisfied a schema that says array")
+	}
+
+	// A kind that guarantees the empty array does satisfy it.
+	stamped := NewSchemaRegistry()
+	stamped.Register(KindGPUNodeList, &stampedList{})
+	if err := stamped.ValidateAgainstSchema(KindGPUNodeList, &stampedList{}); err != nil {
+		t.Errorf("an empty list that renders items as [] did not validate: %v", err)
+	}
+
+	// A kind stamped with the wrong apiVersion is exactly what the const in the
+	// schema is there to catch.
+	wrong := good.DeepCopyObject().(*gpuNodeList)
+	wrong.APIVersion = "v1"
+	if err := r.ValidateAgainstSchema(KindGPUNodeList, wrong); err == nil {
+		t.Error("a list stamped with the wrong apiVersion validated")
+	}
+
+	if err := r.ValidateAgainstSchema("NoSuchKind", good); err == nil {
+		t.Error("validating against a kind nobody registered was accepted")
+	}
+}
+
+// A schema that only says apiVersion and kind are required when the kind has
+// them keeps a payload type that carries neither from claiming fields it does
+// not have.
+func TestRequiredOnlyNamesPropertiesTheKindHas(t *testing.T) {
+	t.Parallel()
+
+	schema := schemaOf(t, "PlainPayload", &plainPayload{})
+	if required, present := schema["required"]; present {
+		for _, name := range required.([]any) {
+			if name == "apiVersion" || name == "kind" {
+				t.Errorf("required names %v, which this kind has no property for", name)
+			}
+		}
+	}
+}
+
+// plainPayload is a payload type with no TypeMeta, as a type nested inside a
+// kind is.
+type plainPayload struct {
+	Note string `json:"note,omitempty"`
+}
+
+// A slice without omitempty marshals as [] and never disappears, so the schema
+// has to require it rather than leave a consumer to guess.
+func TestANonOmitemptySliceIsRequiredInTheSchema(t *testing.T) {
+	t.Parallel()
+
+	schema := schemaOf(t, KindHealthReport, &healthReport{})
+	status := at(t, schema, "properties", "status")
+	if !requires(status, "findings") {
+		t.Errorf("status.required is %v, want it to carry findings: the field always marshals", status["required"])
 	}
 }

@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"sigs.k8s.io/yaml"
 )
@@ -535,7 +536,7 @@ func TestLimitAndFieldsComposeOnTheSameRun(t *testing.T) {
 	}
 }
 
-// A single object is not a list: there is nothing to limit, and the projection
+// A single object is not a list: --limit is refused on it, and the projection
 // still applies.
 func TestBoundedOutputOnASingleObject(t *testing.T) {
 	t.Parallel()
@@ -549,7 +550,7 @@ func TestBoundedOutputOnASingleObject(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	streams := genericiooptions.IOStreams{Out: &out, ErrOut: &errOut}
-	if err := PrintBounded(streams, "json", BoundedOptions{Limit: 1, Fields: []string{"spec.driver"}}, node); err != nil {
+	if err := PrintBounded(streams, "json", BoundedOptions{Fields: []string{"spec.driver"}}, node); err != nil {
 		t.Fatalf("printing: %v", err)
 	}
 	if errOut.Len() != 0 {
@@ -580,5 +581,219 @@ func TestPrintBoundedRejectsAnUnknownFormat(t *testing.T) {
 	}
 	if got := ExitCodeFor(err); got != ExitUsage {
 		t.Errorf("exit code is %d, want %d", got, ExitUsage)
+	}
+}
+
+// stampedList is a kind that marshals itself, as a real list kind does when it
+// stamps its envelope or guarantees a non-null items array. Reflection has to
+// see through that at the root: a kind whose own MarshalJSON stops the walk
+// offers no --fields paths at all, so every path a caller names is rejected as
+// unknown.
+type stampedList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitzero"`
+
+	Items []gpuNode `json:"items"`
+}
+
+// MarshalJSON stamps the envelope and renders a nil Items as an empty array.
+func (l stampedList) MarshalJSON() ([]byte, error) {
+	type listJSON stampedList
+
+	out := listJSON(l)
+	out.TypeMeta = TypeMetaFor(KindGPUNodeList)
+	if out.Items == nil {
+		out.Items = []gpuNode{}
+	}
+
+	return json.Marshal(out)
+}
+
+func (l *stampedList) DeepCopyObject() runtime.Object {
+	clone := *l
+	clone.Items = append([]gpuNode(nil), l.Items...)
+
+	return &clone
+}
+
+func (l *stampedList) TableColumns(wide bool) []Column { return (&gpuNode{}).TableColumns(wide) }
+
+func (l *stampedList) TableRows(wide bool) [][]string {
+	rows := make([][]string, 0, len(l.Items))
+	for i := range l.Items {
+		rows = append(rows, l.Items[i].TableRows(wide)...)
+	}
+
+	return rows
+}
+
+func TestFieldPathsSeeThroughAKindThatMarshalsItself(t *testing.T) {
+	t.Parallel()
+
+	paths, err := FieldPaths(&stampedList{})
+	if err != nil {
+		t.Fatalf("FieldPaths: %v", err)
+	}
+	want := []string{
+		"apiVersion",
+		"kind",
+		"metadata.annotations",
+		"metadata.creationTimestamp",
+		"metadata.labels",
+		"metadata.name",
+		"metadata.namespace",
+		"spec.driver",
+		"status.gpus",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Errorf("paths are %v,\nwant %v: a kind that stamps its own envelope still has fields", paths, want)
+	}
+}
+
+func TestFieldsWorkOnAKindThatMarshalsItself(t *testing.T) {
+	t.Parallel()
+
+	list := &stampedList{Items: threeNodes(t).Items}
+
+	var out, errOut bytes.Buffer
+	streams := genericiooptions.IOStreams{Out: &out, ErrOut: &errOut}
+	if err := PrintBounded(streams, "json", BoundedOptions{Fields: []string{"status.gpus"}}, list); err != nil {
+		t.Fatalf("printing: %v", err)
+	}
+
+	items := decodeItems(t, out.String())
+	if len(items) != 3 {
+		t.Fatalf("got %d items, want 3", len(items))
+	}
+	want := map[string]any{"gpus": float64(4)}
+	if got := items.byName(t, "node-a")["status"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("status is %v, want %v", got, want)
+	}
+}
+
+// YAML goes through the same projection as JSON, and it was the one format
+// whose projection nothing checked.
+func TestFieldsProjectYAMLAsWellAsJSON(t *testing.T) {
+	t.Parallel()
+
+	out, _, err := printBounded(t, "yaml", BoundedOptions{Fields: []string{"spec.driver"}}, threeNodes(t))
+	if err != nil {
+		t.Fatalf("printing: %v", err)
+	}
+
+	var decoded struct {
+		Items decodedItems `json:"items"`
+	}
+	if err := yaml.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("decoding the printed YAML: %v\n%s", err, out)
+	}
+	if len(decoded.Items) != 3 {
+		t.Fatalf("got %d items, want 3", len(decoded.Items))
+	}
+
+	node := decoded.Items.byName(t, "node-a")
+	want := map[string]any{
+		"apiVersion": APIVersion,
+		"kind":       KindGPUNode,
+		"metadata":   map[string]any{"name": "node-a"},
+		"spec":       map[string]any{"driver": "575.51"},
+	}
+	if !reflect.DeepEqual(node, want) {
+		t.Errorf("projected YAML item is %v,\nwant %v", node, want)
+	}
+	if strings.Contains(out, "gpus") {
+		t.Errorf("the YAML still carries status.gpus, which was not asked for:\n%s", out)
+	}
+}
+
+// --limit means "the first N items". A kind with no items cannot honour it, and
+// answering a bounded request with an unbounded one is worse than refusing.
+func TestLimitOnAKindWithoutItemsIsAUsageError(t *testing.T) {
+	t.Parallel()
+
+	node := &gpuNode{
+		TypeMeta:   TypeMetaFor(KindGPUNode),
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a"},
+	}
+
+	var out, errOut bytes.Buffer
+	streams := genericiooptions.IOStreams{Out: &out, ErrOut: &errOut}
+	err := PrintBounded(streams, "json", BoundedOptions{Limit: 1}, node)
+	if err == nil {
+		t.Fatal("--limit was accepted on a kind that has no items")
+	}
+	want := "--limit cannot be used on GPUNode, which is not a list"
+	if err.Error() != want {
+		t.Errorf("error is %q, want %q", err.Error(), want)
+	}
+	if got := ExitCodeFor(err); got != ExitUsage {
+		t.Errorf("exit code is %d, want %d", got, ExitUsage)
+	}
+}
+
+// A command has to be able to reject a bad --fields before it reads anything
+// from the cluster: making the caller wait for a scan to be told it misspelled
+// a field is a scan nobody needed.
+func TestValidateRejectsAnUnknownFieldBeforeAnyClusterWork(t *testing.T) {
+	t.Parallel()
+
+	b := BoundedOptions{Fields: []string{"status.redy"}}
+	err := b.Validate(&gpuNodeList{})
+	if err == nil {
+		t.Fatal("Validate accepted an unknown --fields path")
+	}
+	if got := ExitCodeFor(err); got != ExitUsage {
+		t.Errorf("exit code is %d, want %d", got, ExitUsage)
+	}
+	if !strings.Contains(err.Error(), "status.gpus") {
+		t.Errorf("the error does not list the valid paths: %v", err)
+	}
+
+	if err := (BoundedOptions{Fields: []string{"status.gpus"}}).Validate(&gpuNodeList{}); err != nil {
+		t.Errorf("Validate rejected a path the kind has: %v", err)
+	}
+	if err := (BoundedOptions{Limit: -1}).Validate(&gpuNodeList{}); err == nil {
+		t.Error("Validate accepted a negative --limit")
+	}
+}
+
+// AddOutputFlags is what every list-like command calls, so that -o, --fields
+// and --limit are one decision rather than three per command.
+func TestAddOutputFlagsRegistersTheWholeOutputInterface(t *testing.T) {
+	t.Parallel()
+
+	c := &cobra.Command{Use: "list"}
+	o := AddOutputFlags(c)
+	if o == nil {
+		t.Fatal("AddOutputFlags returned nil")
+	}
+
+	format := c.Flags().Lookup("output")
+	if format == nil {
+		t.Fatal("--output was not registered")
+	}
+	if format.Shorthand != "o" {
+		t.Errorf("--output has shorthand %q, want %q", format.Shorthand, "o")
+	}
+	if format.DefValue != string(FormatTable) {
+		t.Errorf("--output defaults to %q, want %q", format.DefValue, FormatTable)
+	}
+	for _, name := range []string{"fields", "limit"} {
+		if c.Flags().Lookup(name) == nil {
+			t.Errorf("--%s was not registered alongside --output", name)
+		}
+	}
+
+	if err := c.ParseFlags([]string{"-o", "json", "--limit", "3", "--fields", "status.gpus"}); err != nil {
+		t.Fatalf("parsing the flags: %v", err)
+	}
+	if o.Format != "json" {
+		t.Errorf("Format is %q, want json", o.Format)
+	}
+	if o.Bounded.Limit != 3 {
+		t.Errorf("Limit is %d, want 3", o.Bounded.Limit)
+	}
+	if want := []string{"status.gpus"}; !reflect.DeepEqual(o.Bounded.Fields, want) {
+		t.Errorf("Fields is %v, want %v", o.Bounded.Fields, want)
 	}
 }
