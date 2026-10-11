@@ -60,32 +60,53 @@ func requestedByNode(pods []corev1.Pod) map[string]int64 {
 	return out
 }
 
-// podGPURequest is the nvidia.com/gpu a pod asks the scheduler for, by the
-// scheduler's own rule.
+// PodSpecGPURequest is the number of GPUs one pod asks the scheduler for, by
+// the scheduler's own rule.
 //
-// The containers run together, so their requests add up. The init containers
-// run one at a time and before the containers, so only the largest of them
-// counts, and it counts against the containers rather than on top of them.
+// It takes a PodSpec rather than a Pod so that a caller holding a pod template
+// can use it: a Job's spec.template.spec is a PodSpec, and the question "how
+// many GPUs will each of this Job's pods need" has to be answered before any
+// of those pods exist. The node inventory and that question then come out of
+// one rule rather than two that agree until one of them is edited.
 //
-// A restartable init container, that is, a sidecar, is the exception: it keeps
-// running once it has started, so it is held for the whole life of the pod. It
-// adds to the container sum, and it also adds to every init container that
-// starts after it, because those two do run at the same time.
+// The rule:
 //
-// This is k8s.io/component-helpers' PodRequests narrowed to one resource.
+//   - The containers run together, so their requests add up.
+//   - The init containers run one at a time and before the containers, so only
+//     the largest of them counts, and it counts against the container sum
+//     rather than on top of it.
+//   - A restartable init container, that is, a sidecar, is the exception. It
+//     keeps running once it has started, so it is held for the whole life of
+//     the pod: it adds to the container sum, and it also adds to every init
+//     container that starts after it, because those two do run at once.
+//
+// Two resource names are counted and summed, nvidia.com/gpu and
+// nvidia.com/gpu.shared, because under renameByDefault the second is the only
+// name a workload can ask for. A request written as a limit alone counts as
+// that limit. A MIG profile does not count: it is a different unit.
+//
+// What this cannot do is decide whether the pod still holds those GPUs. A
+// PodSpec carries no status, so the phase filter belongs to the caller;
+// requestedByNode applies it for the node inventory.
+//
+// This is k8s.io/component-helpers' PodRequests narrowed to these resources.
 // Reimplementing it rather than vendoring that package keeps the rule visible
 // next to the tests that pin it; getting it wrong is how a half full node
 // reads as a full one.
-func podGPURequest(pod *corev1.Pod) int64 {
+func PodSpecGPURequest(spec *corev1.PodSpec) int64 {
+	if spec == nil {
+		return 0
+	}
+
 	var containers int64
-	for i := range pod.Spec.Containers {
-		containers += gpuRequest(&pod.Spec.Containers[i])
+	for i := range spec.Containers {
+		containers += gpuRequest(&spec.Containers[i])
 	}
 
 	var sidecars, peak int64
 
-	for i := range pod.Spec.InitContainers {
-		c := &pod.Spec.InitContainers[i]
+	for i := range spec.InitContainers {
+		c := &spec.InitContainers[i]
 		if isRestartable(c) {
 			sidecars += gpuRequest(c)
 			peak = max(peak, sidecars)
@@ -99,6 +120,12 @@ func podGPURequest(pod *corev1.Pod) int64 {
 	}
 
 	return max(peak, containers+sidecars)
+}
+
+// podGPURequest is PodSpecGPURequest over a whole pod. It is the one call the
+// node inventory makes, so that the two can never be different rules.
+func podGPURequest(pod *corev1.Pod) int64 {
+	return PodSpecGPURequest(&pod.Spec)
 }
 
 // isRestartable reports whether an init container is a sidecar, that is, one
