@@ -61,7 +61,7 @@ type commandTiming struct {
 	MedianMS    int64        `json:"medianMs"`
 	MaxMS       int64        `json:"maxMs"`
 	ThresholdMS int64        `json:"thresholdMs"`
-	WithinMS    bool         `json:"withinThreshold"`
+	Within      bool         `json:"withinThreshold"`
 }
 
 // scaleReport is what the workflow uploads.
@@ -203,12 +203,12 @@ func timeCommand(t *testing.T, n int, threshold time.Duration, want map[int]bool
 	median := medianDuration(durations)
 	timing.MedianMS = median.Milliseconds()
 	timing.MaxMS = maxDuration(durations).Milliseconds()
-	timing.WithinMS = median <= threshold
+	timing.Within = median <= threshold
 
 	t.Logf("scale: %v median %v max %v over %d runs (threshold %v)",
 		args, median, maxDuration(durations), n, threshold)
 
-	if !timing.WithinMS {
+	if !timing.Within {
 		t.Errorf("%v median %v over %d runs, want at most %v (runs: %v)",
 			args, median, n, threshold, durations)
 	}

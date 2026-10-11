@@ -94,19 +94,47 @@ KWOK_OWNER_LABEL="kubectl-nv.nvidia.com/kwok-node"
 # ---------------------------------------------------------------------------
 #
 # A T4 class node as the t4 lane's own workers present it, so that the lane is
-# one population and not two. The GPU count is 8 rather than the 4 the nvml-mock
-# t4 profile gives a real worker: the brief fixes it at 8, and it is the number
-# the gpu.count label and both resource lists are built from, so the two never
-# disagree. Override it with KWOK_GPU_COUNT.
+# one population and not two. Every value below was read off
+# kubectl-nv-scale-worker on 2026-10-11, on a lane brought up by
+# "hack/mokka/up.sh scale t4", rather than written from memory.
 #
-# The driver and CUDA versions are what GFD writes on the lane. They are
-# overridable because they move with the GPU Operator version, and a fake node
-# claiming a driver the real workers do not have is a difference a reader would
-# have to chase.
+# The one deliberate difference is the GPU count. The nvml-mock t4 profile
+# gives a real worker 4 (mokka::profile_gpu_count in lib.sh); the brief fixes
+# the fake nodes at 8. It is one number here, and the gpu.count label and both
+# resource lists are built from it, so whatever it is set to the node never
+# contradicts itself. Override it with KWOK_GPU_COUNT.
+#
+# What is NOT written here is as deliberate. nvidia.com/mig.strategy does not
+# appear on this lane's workers, so it does not appear on a fake node either.
+# nvidia.com/gpu.deploy.* is written by the GPU Operator's own state labeller,
+# which adopts any node carrying the PCI label within seconds of it appearing;
+# setting those here would be a second writer for a label that already has one.
 KWOK_GPU_COUNT="${KWOK_GPU_COUNT:-8}"
-KWOK_GPU_PRODUCT="${KWOK_GPU_PRODUCT:-Tesla-T4}"
-KWOK_DRIVER_VERSION="${KWOK_DRIVER_VERSION:-550.54.15}"
+KWOK_GPU_PRODUCT="${KWOK_GPU_PRODUCT:-NVIDIA-T4}"
+KWOK_GPU_FAMILY="${KWOK_GPU_FAMILY:-turing}"
+KWOK_GPU_MEMORY="${KWOK_GPU_MEMORY:-16384}"
+KWOK_COMPUTE_MAJOR="${KWOK_COMPUTE_MAJOR:-7}"
+KWOK_COMPUTE_MINOR="${KWOK_COMPUTE_MINOR:-5}"
+KWOK_DRIVER_VERSION="${KWOK_DRIVER_VERSION:-550.163.01}"
 KWOK_CUDA_VERSION="${KWOK_CUDA_VERSION:-12.4}"
+
+# The inventory builder reads two generations of the CUDA labels: the current
+# cuda.driver-version.* and cuda.runtime-version.* names, and the older
+# cuda.driver.* and cuda.runtime.* ones. The lane carries both, so a fake node
+# carries both, and both are split from the one version above rather than
+# written out again: two sources for one number is how they come to disagree.
+if ! [[ ${KWOK_DRIVER_VERSION} =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    mokka::die 2 "kwok-nodes.sh: KWOK_DRIVER_VERSION must be <major>.<minor>.<revision>, got '${KWOK_DRIVER_VERSION}'"
+fi
+KWOK_DRIVER_MAJOR="${BASH_REMATCH[1]}"
+KWOK_DRIVER_MINOR="${BASH_REMATCH[2]}"
+KWOK_DRIVER_REV="${BASH_REMATCH[3]}"
+
+if ! [[ ${KWOK_CUDA_VERSION} =~ ^([0-9]+)\.([0-9]+)$ ]]; then
+    mokka::die 2 "kwok-nodes.sh: KWOK_CUDA_VERSION must be <major>.<minor>, got '${KWOK_CUDA_VERSION}'"
+fi
+KWOK_CUDA_MAJOR="${BASH_REMATCH[1]}"
+KWOK_CUDA_MINOR="${BASH_REMATCH[2]}"
 
 # How many objects go into one kubectl call. Two thousand nodes one call at a
 # time is two thousand process spawns; one call is a request body the API
@@ -269,13 +297,37 @@ metadata:
     feature.node.kubernetes.io/pci-10de.present: "true"
     nvidia.com/gpu.present: "true"
     nvidia.com/gpu.product: ${KWOK_GPU_PRODUCT}
+    nvidia.com/gpu.machine: ${KWOK_GPU_PRODUCT}
+    nvidia.com/gpu.family: ${KWOK_GPU_FAMILY}
     nvidia.com/gpu.count: "${KWOK_GPU_COUNT}"
+    nvidia.com/gpu.memory: "${KWOK_GPU_MEMORY}"
+    nvidia.com/gpu.mode: compute
+    nvidia.com/gpu.compute.major: "${KWOK_COMPUTE_MAJOR}"
+    nvidia.com/gpu.compute.minor: "${KWOK_COMPUTE_MINOR}"
     nvidia.com/gpu.replicas: "1"
     nvidia.com/gpu.sharing-strategy: none
-    nvidia.com/mig.strategy: single
+    nvidia.com/mig.capable: "true"
+    nvidia.com/mps.capable: "false"
+    nvidia.com/vgpu.present: "false"
     nvidia.com/cuda.driver-version.full: "${KWOK_DRIVER_VERSION}"
+    nvidia.com/cuda.driver-version.major: "${KWOK_DRIVER_MAJOR}"
+    nvidia.com/cuda.driver-version.minor: "${KWOK_DRIVER_MINOR}"
+    nvidia.com/cuda.driver-version.revision: "${KWOK_DRIVER_REV}"
+    nvidia.com/cuda.driver.major: "${KWOK_DRIVER_MAJOR}"
+    nvidia.com/cuda.driver.minor: "${KWOK_DRIVER_MINOR}"
+    nvidia.com/cuda.driver.rev: "${KWOK_DRIVER_REV}"
     nvidia.com/cuda.runtime-version.full: "${KWOK_CUDA_VERSION}"
+    nvidia.com/cuda.runtime-version.major: "${KWOK_CUDA_MAJOR}"
+    nvidia.com/cuda.runtime-version.minor: "${KWOK_CUDA_MINOR}"
+    nvidia.com/cuda.runtime.major: "${KWOK_CUDA_MAJOR}"
+    nvidia.com/cuda.runtime.minor: "${KWOK_CUDA_MINOR}"
 spec:
+  # NoSchedule and not NoExecute. It keeps an ordinary pod off a node that
+  # cannot run one, which is the point. What it does not do is keep off a
+  # DaemonSet whose toleration is "operator: Exists" and nothing else:
+  # kube-proxy and the CNI both ship that way, and a taint has no answer to
+  # it. Those pods are fakes too, marked Running by KWOK's pod Stages, so
+  # they cost an API object each and no compute.
   taints:
     - key: ${KWOK_NODE_ANNOTATION}
       value: fake
@@ -351,6 +403,8 @@ mokka::phase
 printf '\n'
 printf 'lane %s: %d fake nodes (kwok-gpu-1 .. kwok-gpu-%d), %s simulated GPUs each, KWOK %s\n' \
     "${LANE}" "${COUNT}" "${COUNT}" "${KWOK_GPU_COUNT}" "${KWOK_VERSION}"
-printf 'they carry the %s=fake taint, so no real pod lands on them\n' "${KWOK_NODE_ANNOTATION}"
+printf 'they carry the %s=fake taint, which keeps ordinary pods off them.\n' "${KWOK_NODE_ANNOTATION}"
+printf 'it does NOT keep off a DaemonSet that tolerates everything: kube-proxy and\n'
+printf 'the CNI do, and a 20 node smoke on 2026-10-11 found 26 pods on the fake nodes.\n'
 printf 'remove them with\n'
 printf '  hack/mokka/kwok-nodes.sh --delete %s\n' "${LANE}"
