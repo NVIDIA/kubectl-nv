@@ -1,0 +1,32 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# The MIG lane's second GPU Operator values file. It is passed AFTER
+# hack/mokka/gpu-operator-values.yaml, which it overrides in exactly two
+# places; everything else about the operator install is that file's, unchanged,
+# so the two lanes do not drift apart for reasons nobody wrote down.
+#
+# Values files only, never --set, for the reason the first file states.
+
+# The operator's own device plugin is replaced, not reconfigured.
+#
+# It resolves MIG capabilities through /proc/driver/nvidia-caps/mig-minors, at
+# a hardcoded absolute path, while it builds its device map, so a plugin that
+# cannot read that file advertises nothing at all rather than falling back to
+# whole GPUs. A volume mount cannot deliver that path, because runc refuses any
+# mount whose target is inside /proc, and the operator's DaemonSet spec is not
+# ours to give a privileged self-mount to. Mokka's own plugin manifest, which
+# does exactly that, takes its place: hack/mokka/mig/device-plugin-mock-mig.yaml.
+#
+# Two plugins advertising nvidia.com/gpu on one node would race, which is why
+# this is false rather than a second plugin alongside.
+devicePlugin:
+  enabled: false
+
+# What the rest of the operator is told the node looks like. GFD reads this to
+# decide which nvidia.com/mig.* labels to publish, and it has to agree with the
+# --mig-strategy=single the replacement plugin runs with: under single every
+# partition is published as nvidia.com/gpu, so the node advertises fourteen
+# whole-looking GPUs rather than one resource name per profile.
+mig:
+  strategy: single

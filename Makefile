@@ -180,3 +180,76 @@ mdlint:
 	--workdir /workdir \
 	ruby:slim \
 	/workdir/hack/mdlint.sh
+
+# ---------------------------------------------------------------------------
+# The MIG lane
+# ---------------------------------------------------------------------------
+#
+# A second Mokka lane whose workers are partitioned: two simulated H100 boards
+# each carved into seven 1g.10gb slices, so a worker advertises 14
+# nvidia.com/gpu. It is a lane of its own and not a profile of e2e-mokka
+# because it is built from an upstream commit rather than from the released
+# chart, which cannot partition a board; hack/mokka/mig/lib.sh says why.
+.PHONY: e2e-mig
+
+MIG_LANE ?= mig
+MIG_CLUSTER := kubectl-nv-$(MIG_LANE)
+MIG_CONTEXT := kind-$(MIG_CLUSTER)
+# The same MOKKA_BIN_DIR the whole-GPU lane uses, so both lanes' kubeconfigs
+# live in the one gitignored, mode 0700 directory the scripts write.
+MIG_KUBECONFIG := $(MOKKA_BIN_DIR)/kubeconfig-$(MIG_LANE)
+E2E_MIG_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(MIG_LANE)
+
+# test/e2e/mig_test.go is behind "e2e && mig" and the rest of the suite is not,
+# so this runs with both tags and then selects. The selection is needed: the
+# must-gather test asserts the GPU Operator's own device plugin is on every
+# worker, and this lane deliberately replaces it.
+E2E_MIG_RUN := ^TestMIGLane$$
+E2E_MIG_FLAGS ?= -tags e2e,mig -count=1 -timeout 45m -run '$(E2E_MIG_RUN)'
+
+e2e-mig: build
+	@set -u; \
+	export MOKKA_BIN_DIR="$(MOKKA_BIN_DIR)"; \
+	hack/mokka/mig/build-image.sh || exit $$?; \
+	hack/mokka/mig/up.sh $(MIG_LANE); up=$$?; \
+	if [ $$up -eq 4 ]; then \
+	    printf 'e2e-mig: %s already exists and was not created here; nothing touched\n' "$(MIG_CLUSTER)" >&2; \
+	    exit 4; \
+	fi; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	trap 'hack/mokka/mig/down.sh $(MIG_LANE) || printf "e2e-mig: down.sh failed; cluster %s may still be up\n" "$(MIG_CLUSTER)" >&2' EXIT; \
+	rc=$$up; \
+	if [ $$rc -eq 0 ]; then \
+	    matched="$$(KUBECONFIG=$(MIG_KUBECONFIG) \
+	        KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test -tags e2e,mig -list '$(E2E_MIG_RUN)' ./test/e2e/... 2>/dev/null \
+	        | grep -c '$(E2E_MIG_RUN)')"; \
+	    if [ "$$matched" -ne 1 ]; then \
+	        printf 'e2e-mig: -run %s matches %s test(s), want 1\n' "$(E2E_MIG_RUN)" "$$matched" >&2; \
+	        printf 'e2e-mig: a renamed or deleted TestMIGLane would otherwise run nothing and report success\n' >&2; \
+	        rc=2; \
+	    fi; \
+	fi; \
+	if [ $$rc -eq 0 ]; then \
+	    KUBECONFIG=$(MIG_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test $(E2E_MIG_FLAGS) ./test/e2e/...; \
+	    rc=$$?; \
+	fi; \
+	if [ $$rc -ne 0 ]; then \
+	    mkdir -p $(E2E_MIG_DIAG_DIR); \
+	    kubectl --kubeconfig $(MIG_KUBECONFIG) --context $(MIG_CONTEXT) \
+	        get pods -A -o wide > $(E2E_MIG_DIAG_DIR)/pods.txt 2>&1 || true; \
+	    kubectl --kubeconfig $(MIG_KUBECONFIG) --context $(MIG_CONTEXT) \
+	        get nodes -o yaml > $(E2E_MIG_DIAG_DIR)/nodes.yaml 2>&1 || true; \
+	    kubectl --kubeconfig $(MIG_KUBECONFIG) --context $(MIG_CONTEXT) \
+	        --namespace kube-system logs -l name=nvidia-device-plugin-mock --tail=-1 \
+	        > $(E2E_MIG_DIAG_DIR)/device-plugin-mock.log 2>&1 || true; \
+	    kubectl --kubeconfig $(MIG_KUBECONFIG) --context $(MIG_CONTEXT) \
+	        get events -A --sort-by=.lastTimestamp > $(E2E_MIG_DIAG_DIR)/events.txt 2>&1 || true; \
+	    kind export logs $(E2E_MIG_DIAG_DIR)/kind --name $(MIG_CLUSTER) \
+	        > $(E2E_MIG_DIAG_DIR)/kind-export.txt 2>&1 || true; \
+	    printf 'e2e-mig: diagnostics in %s\n' "$(E2E_MIG_DIAG_DIR)" >&2; \
+	fi; \
+	exit $$rc

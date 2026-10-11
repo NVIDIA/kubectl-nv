@@ -1,0 +1,44 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# nvml-mock values for the MIG lane: two H100 boards per node, each carved into
+# seven 1g.10gb partitions, so a worker carries fourteen.
+#
+# Provenance: the layout is the one in docs/guides/mig/README.md "Partition at
+# install time" in NVIDIA/k8s-test-infra at commit
+# 4ce11e5ae533416415e223ab43da58435d0df48c, written as a values file rather
+# than as the README's five --set flags. These values interact (a board that is
+# MIG-enabled with no layout publishes no GPU resource at all, and a layout
+# that is not uniform is refused by the device plugin's --mig-strategy=single),
+# and a --set spread across a command line is not something a reviewer can
+# check.
+#
+# Why each board is filled with its SMALLEST slice: --mig-strategy=single
+# publishes every partition as nvidia.com/gpu and rejects a node whose
+# partitions do not all carry one profile. For h100 the smallest slice is
+# 1g.10gb and a board takes seven of them. See the profile table in that same
+# README.
+
+gpu:
+  profile: h100
+  # Two boards and not the profile's eight: fourteen partitions per worker is
+  # already enough to show the shape change, and each extra board is more
+  # staging work on a node that is simulating all of it.
+  count: 2
+  mig:
+    enabled: true
+    gpuInstances:
+      - profile: "1g.10gb"
+        count: 7
+
+# The image is built from the pinned commit and `kind load`ed, because ghcr.io
+# publishes no nvml-mock image for an arbitrary commit and the released ones
+# cannot partition. The two strings below are MIG_NVML_MOCK_IMAGE and
+# MIG_NVML_MOCK_IMAGE_TAG in hack/mokka/mig/lib.sh; up_test.sh fails if this
+# file and that one ever disagree.
+image:
+  repository: nvml-mock
+  tag: mig-4ce11e5a
+  # The image exists only inside the kind nodes. Anything that tries to pull it
+  # fails, so this has to be IfNotPresent.
+  pullPolicy: IfNotPresent
