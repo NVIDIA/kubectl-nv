@@ -98,6 +98,14 @@ var leafFixtures = map[string]leafFixture{
 	"explain": {
 		args: func(*testing.T) []string { return []string{"NV-NODE-002"} },
 	},
+	"health": {
+		// The fixture cluster's node is hinted, which is a finding, so the
+		// run exits non-zero at a threshold that counts one. --fail-on info
+		// would make the guard assert on the finding rather than on the
+		// reads, so the default threshold is left alone and nothing here is
+		// at error.
+		args: func(*testing.T) []string { return nil },
+	},
 	"debug": {
 		// The same hinted node, and a directory of its own: debug runs the
 		// whole gather after the inventory read, so this leaf walks both the

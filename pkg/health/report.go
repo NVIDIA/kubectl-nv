@@ -109,7 +109,7 @@ func plural(n int, one, many string) string {
 	return strconv.Itoa(n) + " " + many
 }
 
-// HealthReport is the result of one gpu health run: what the rules found, what
+// HealthReport is the result of one kubectl nv health run: what the rules found, what
 // the run could not see, and the arithmetic over what it looked at.
 //
 // Build one with NewHealthReport. The cli-runtime printers read TypeMeta off
@@ -197,20 +197,29 @@ func (r *HealthReport) ExitCode(failOn output.Severity) int {
 // needs every row to have one.
 const noNode = "-"
 
+// findingsField is the projection path every column of this table renders
+// from. --fields matches a column against it, and output.FieldPaths stops at
+// the findings slice rather than descending into a Finding, so "findings" is
+// the only path that names any of these columns. All of them carry it: asking
+// for --fields findings keeps the table whole, and asking for anything else
+// drops it whole, which is the only honest answer when the projection cannot
+// address one column of it.
+const findingsField = "findings"
+
 // TableColumns implements output.TableRows.
 func (r *HealthReport) TableColumns(wide bool) []output.Column {
 	columns := []output.Column{
-		{Header: "NODE"},
-		{Header: "CODE"},
-		{Header: "SEVERITY"},
-		{Header: "COMPONENT"},
-		{Header: "MESSAGE"},
+		{Header: "NODE", Field: findingsField},
+		{Header: "CODE", Field: findingsField},
+		{Header: "SEVERITY", Field: findingsField},
+		{Header: "COMPONENT", Field: findingsField},
+		{Header: "MESSAGE", Field: findingsField},
 	}
 
 	// The next command is the whole point of a finding and the widest thing in
 	// it, so it waits for -o wide rather than pushing the message off screen.
 	if wide {
-		columns = append(columns, output.Column{Header: "NEXT"})
+		columns = append(columns, output.Column{Header: "NEXT", Field: findingsField})
 	}
 
 	return columns
