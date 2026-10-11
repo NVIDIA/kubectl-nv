@@ -451,11 +451,40 @@ assert_applied "effect: NoSchedule" "the KWOK taint is NoSchedule"
 assert_applied "nvidia.com/gpu.present: \"true\"" "the gpu.present label"
 assert_applied "feature.node.kubernetes.io/pci-10de.present: \"true\"" "the PCI label"
 assert_applied "nvidia.com/gpu.count: \"8\"" "the gpu.count label matches the capacity"
-assert_applied "nvidia.com/gpu.product:" "the product label"
-assert_applied "nvidia.com/cuda.driver-version.full:" "the driver version label"
-assert_applied "nvidia.com/cuda.runtime-version.full:" "the CUDA runtime label"
 assert_applied_count 6 "nvidia.com/gpu: \"8\"" "capacity and allocatable on each of the three nodes carry the GPU resource"
 assert_applied "${OWNER_LABEL}: \"true\"" "every node is labelled as this script's"
+
+# The values GFD writes on the t4 lane's own workers, read off
+# kubectl-nv-scale-worker on 2026-10-11. A fake node that claimed a product or
+# a driver the real workers do not have would be a difference every reader of
+# a 2,000 node list has to chase before deciding it means nothing.
+assert_applied "nvidia.com/gpu.product: NVIDIA-T4" "the product label is the lane's own"
+assert_applied "nvidia.com/gpu.machine: NVIDIA-T4" "the machine label"
+assert_applied "nvidia.com/gpu.family: turing" "the family label"
+assert_applied "nvidia.com/gpu.memory: \"16384\"" "the memory label"
+assert_applied "nvidia.com/gpu.compute.major: \"7\"" "the compute capability major"
+assert_applied "nvidia.com/gpu.compute.minor: \"5\"" "the compute capability minor"
+assert_applied "nvidia.com/gpu.mode: compute" "the gpu.mode label"
+assert_applied "nvidia.com/mig.capable: \"true\"" "the mig.capable label"
+
+# Both naming families: the inventory builder reads the current
+# cuda.driver-version.* names and the older cuda.driver.* ones, and a lane
+# that only ever carried one of them cannot tell a builder that dropped the
+# other apart from one that did not.
+assert_applied "nvidia.com/cuda.driver-version.full: \"550.163.01\"" "the current driver version label"
+assert_applied "nvidia.com/cuda.driver-version.major: \"550\"" "the current driver major"
+assert_applied "nvidia.com/cuda.driver.major: \"550\"" "the older driver major"
+assert_applied "nvidia.com/cuda.driver.rev: \"01\"" "the older driver revision"
+assert_applied "nvidia.com/cuda.runtime-version.full: \"12.4\"" "the current CUDA runtime label"
+assert_applied "nvidia.com/cuda.runtime.major: \"12\"" "the older CUDA runtime major"
+
+# GFD does not write mig.strategy on this lane, so neither does a fake node.
+assert_applied_count 0 "nvidia.com/mig.strategy" "no label the real workers do not carry"
+
+# The GPU Operator's state labeller writes nvidia.com/gpu.deploy.* itself, on
+# any node carrying the PCI label, within seconds of the node appearing. The
+# script must not write them: two writers for one label is a fight nobody wins.
+assert_applied_count 0 "nvidia.com/gpu.deploy." "the operator's own labels are left to the operator"
 
 # A fake node that advertised a different GPU count from its gpu.count label
 # would make the health rules fire for a reason this lane did not intend.
@@ -466,6 +495,24 @@ KWOK_GPU_COUNT=4 run_subject 1
 assert_rc 0 "an overridden GPU count"
 assert_applied "nvidia.com/gpu.count: \"4\"" "the overridden count reaches the label"
 assert_applied_count 2 "nvidia.com/gpu: \"4\"" "the overridden count reaches capacity and allocatable"
+
+# The driver version is one string in the label GFD writes and three numbers
+# in the older labels. Overriding it has to move all four together, or a lane
+# ends up advertising two different drivers for one node.
+reset_fixtures
+export FAKE_READY_COUNT=1
+KWOK_DRIVER_VERSION=570.86.15 run_subject 1
+assert_rc 0 "an overridden driver version"
+assert_applied "nvidia.com/cuda.driver-version.full: \"570.86.15\"" "the override reaches the full driver label"
+assert_applied "nvidia.com/cuda.driver-version.major: \"570\"" "the override reaches the driver major"
+assert_applied "nvidia.com/cuda.driver.minor: \"86\"" "the override reaches the older driver minor"
+assert_applied "nvidia.com/cuda.driver.rev: \"15\"" "the override reaches the older driver revision"
+assert_applied_count 0 "550" "no part of the default driver version survives an override"
+
+reset_fixtures
+export FAKE_READY_COUNT=1
+KWOK_DRIVER_VERSION=570 run_subject 1
+assert_rc 2 "a driver version that is not three dotted parts"
 
 # ---------------------------------------------------------------------------
 # Batching
