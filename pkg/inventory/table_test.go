@@ -124,7 +124,10 @@ func TestGPUNodeRow(t *testing.T) {
 			node: func() *GPUNode {
 				n := NewGPUNode("worker-1")
 				n.Product = "NVIDIA-T4"
-				n.Capacity, n.Allocatable = 4, 4
+				// Three different numbers on purpose: with capacity and
+				// allocatable equal, a cell that printed one where the other
+				// belongs would read correctly.
+				n.Capacity, n.Allocatable = 8, 6
 				n.Requested, n.RequestedKnown = 1, true
 				n.DriverVersion, n.CUDAVersion = "550.107.02", "12.5"
 				n.Mode = ModeDevicePlugin
@@ -132,19 +135,19 @@ func TestGPUNodeRow(t *testing.T) {
 
 				return n
 			},
-			want: []string{"worker-1", "NVIDIA-T4", "1/4/4", "550.107.02", "12.5", "device-plugin", "", "", "Ready"},
+			want: []string{"worker-1", "NVIDIA-T4", "1/6/8", "550.107.02", "12.5", "device-plugin", "", "", "Ready"},
 		},
 		{
 			name: "requested is unknown under --no-pods",
 			node: func() *GPUNode {
 				n := NewGPUNode("worker-1")
-				n.Capacity, n.Allocatable = 8, 8
+				n.Capacity, n.Allocatable = 8, 5
 				n.Mode = ModeDRA
 				n.Ready = true
 
 				return n
 			},
-			want: []string{"worker-1", "", "?/8/8", "", "", "dra", "", "", "Ready"},
+			want: []string{"worker-1", "", "?/5/8", "", "", "dra", "", "", "Ready"},
 		},
 		{
 			name: "a cordoned node reads like kubectl",

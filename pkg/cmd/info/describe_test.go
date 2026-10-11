@@ -221,3 +221,73 @@ func sectionLine(t *testing.T, text, key string) string {
 
 	return ""
 }
+
+// fieldValue returns the value of one "Key: value" line of a description.
+//
+// Assertions go through this rather than through strings.Contains over the
+// whole output: a description holds forty values, several of them substrings
+// of each other, so "the output mentions true" passes while the field under
+// test says false.
+func fieldValue(t *testing.T, text, key string) string {
+	t.Helper()
+
+	prefix := key + ":"
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+	}
+
+	t.Fatalf("the description has no %q line in:\n%s", key, text)
+
+	return ""
+}
+
+// TestDescribeFieldValuesAreExact pins the fields a reader acts on by value
+// rather than by the whole output carrying the word somewhere.
+func TestDescribeFieldValuesAreExact(t *testing.T) {
+	t.Parallel()
+
+	hinted := inventory.NewGPUNode("control-plane")
+	hinted.Hinted = true
+	hinted.Mode = inventory.ModeNone
+	hinted.Ready = true
+
+	var buf bytes.Buffer
+	if err := describe(&buf, hinted); err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+
+	for _, tt := range []struct{ key, want string }{
+		{key: "Name", want: "control-plane"},
+		{key: "Hinted", want: "true"},
+		{key: "Mode", want: "none"},
+		{key: "Status", want: "Ready"},
+	} {
+		if got := fieldValue(t, buf.String(), tt.key); got != tt.want {
+			t.Errorf("%s = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+// TestDescribeHintedIsFalseForARealGPUNode is the other side of the same
+// assertion: a view that hard-coded "true" would pass the test above.
+func TestDescribeHintedIsFalseForARealGPUNode(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := describe(&buf, fullNode()); err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+
+	if got := fieldValue(t, buf.String(), "Hinted"); got != "false" {
+		t.Errorf("Hinted = %q, want false", got)
+	}
+
+	if got := fieldValue(t, buf.String(), "Mode"); got != inventory.ModeBoth {
+		t.Errorf("Mode = %q, want %q", got, inventory.ModeBoth)
+	}
+}

@@ -185,8 +185,8 @@ func TestInfoUnknownNode(t *testing.T) {
 			}
 
 			want := "node " + name + " has no GPUs and no GPU labels"
-			if err.Error() != want && !strings.Contains(err.Error(), want) {
-				t.Errorf("error = %q, want %q", err, want)
+			if err.Error() != want {
+				t.Errorf("error = %q, want exactly %q", err, want)
 			}
 
 			if code := output.ExitCodeFor(err); code != output.ExitUsage {

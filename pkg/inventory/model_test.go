@@ -286,15 +286,22 @@ func TestBuildNode(t *testing.T) {
 			name: "the full label wins over the deprecated parts",
 			node: testNode("gfd-both-1",
 				map[string]string{
-					"nvidia.com/cuda.driver-version.full": "550.107.02",
-					"nvidia.com/cuda.driver.major":        "535",
-					"nvidia.com/cuda.driver.minor":        "129",
-					"nvidia.com/cuda.driver.rev":          "03",
+					// The two spellings disagree on purpose. GFD writes both
+					// sets at once, so a node carrying only one value proves
+					// nothing about which one was read.
+					"nvidia.com/cuda.driver-version.full":  "550.107.02",
+					"nvidia.com/cuda.driver.major":         "535",
+					"nvidia.com/cuda.driver.minor":         "129",
+					"nvidia.com/cuda.driver.rev":           "03",
+					"nvidia.com/cuda.runtime-version.full": "12.5",
+					"nvidia.com/cuda.runtime.major":        "12",
+					"nvidia.com/cuda.runtime.minor":        "2",
 				},
 				map[string]string{"nvidia.com/gpu": "1"},
 				map[string]string{"nvidia.com/gpu": "1"}),
 			check: func(t *testing.T, got *GPUNode) {
 				equal(t, "DriverVersion", got.DriverVersion, "550.107.02")
+				equal(t, "CUDAVersion", got.CUDAVersion, "12.5")
 			},
 		},
 		{

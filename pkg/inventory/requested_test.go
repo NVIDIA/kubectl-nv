@@ -71,6 +71,38 @@ func TestPodGPURequest(t *testing.T) {
 		want int64
 	}{
 		{
+			name: "a limit with no request still counts",
+			pod: testPod("limit-only", "n1", corev1.PodRunning, nil, []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{
+					// An extended resource may be written as a limit alone,
+					// and the API server defaults the request to it. A pod
+					// read out of a bundle, or admitted before that
+					// defaulting, arrives with only the limit set, and
+					// counting it as zero reports an occupied node as free.
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": *resource.NewQuantity(2, resource.DecimalSI),
+					},
+				},
+			}}),
+			want: 2,
+		},
+		{
+			name: "the request wins over a larger limit",
+			pod: testPod("both", "n1", corev1.PodRunning, nil, []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						"nvidia.com/gpu": *resource.NewQuantity(1, resource.DecimalSI),
+					},
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": *resource.NewQuantity(4, resource.DecimalSI),
+					},
+				},
+			}}),
+			want: 1,
+		},
+		{
 			name: "no container asks for a GPU",
 			pod:  testPod("none", "n1", corev1.PodRunning, nil, []corev1.Container{gpuContainer("app", 0)}),
 			want: 0,

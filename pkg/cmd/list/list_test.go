@@ -94,18 +94,24 @@ func runList(t *testing.T, objects []runtime.Object, args ...string) (*streams, 
 
 // gpuNode is a node the device plugin advertises GPUs on.
 func gpuNode(name string, gpus int64, labels map[string]string) *corev1.Node {
+	return gpuNodeWithAllocatable(name, gpus, gpus, labels)
+}
+
+// gpuNodeWithAllocatable is a node whose allocatable count differs from its
+// capacity, which is what a node with a reserved or unhealthy device looks
+// like. The two are worth keeping apart in a fixture: with them equal, a cell
+// that printed one where the other belongs still reads correctly.
+func gpuNodeWithAllocatable(name string, capacity, allocatable int64, labels map[string]string) *corev1.Node {
 	all := map[string]string{}
 	for k, v := range labels {
 		all[k] = v
 	}
 
-	q := *resource.NewQuantity(gpus, resource.DecimalSI)
-
 	return &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: all},
 		Status: corev1.NodeStatus{
-			Capacity:    corev1.ResourceList{"nvidia.com/gpu": q},
-			Allocatable: corev1.ResourceList{"nvidia.com/gpu": q},
+			Capacity:    corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(capacity, resource.DecimalSI)},
+			Allocatable: corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(allocatable, resource.DecimalSI)},
 			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 		},
 	}
@@ -166,17 +172,16 @@ func lines(s string) []string {
 func TestListTable(t *testing.T) {
 	t.Parallel()
 
+	labels := map[string]string{
+		"nvidia.com/gpu.product":               "NVIDIA-T4",
+		"nvidia.com/cuda.driver-version.full":  "550.107.02",
+		"nvidia.com/cuda.runtime-version.full": "12.5",
+	}
 	objects := []runtime.Object{
-		gpuNode("worker-2", 4, map[string]string{
-			"nvidia.com/gpu.product":               "NVIDIA-T4",
-			"nvidia.com/cuda.driver-version.full":  "550.107.02",
-			"nvidia.com/cuda.runtime-version.full": "12.5",
-		}),
-		gpuNode("worker-1", 4, map[string]string{
-			"nvidia.com/gpu.product":               "NVIDIA-T4",
-			"nvidia.com/cuda.driver-version.full":  "550.107.02",
-			"nvidia.com/cuda.runtime-version.full": "12.5",
-		}),
+		// Capacity 4, allocatable 3, requested 2: three different numbers, so
+		// that a cell printing the wrong one of the three is visible.
+		gpuNodeWithAllocatable("worker-2", 4, 3, labels),
+		gpuNodeWithAllocatable("worker-1", 4, 3, labels),
 		gpuPod("trainer", "team-ml", "worker-1", 2),
 	}
 
@@ -196,12 +201,12 @@ func TestListTable(t *testing.T) {
 	}
 
 	// Sorted by name, and the pod on worker-1 is the only requested GPU.
-	wantFirst := []string{"worker-1", "NVIDIA-T4", "2/4/4", "550.107.02", "12.5", "device-plugin", "Ready"}
+	wantFirst := []string{"worker-1", "NVIDIA-T4", "2/3/4", "550.107.02", "12.5", "device-plugin", "Ready"}
 	if row := cells(got[1]); !equalStrings(row, wantFirst) {
 		t.Errorf("first row = %v, want %v", row, wantFirst)
 	}
 
-	wantSecond := []string{"worker-2", "NVIDIA-T4", "0/4/4", "550.107.02", "12.5", "device-plugin", "Ready"}
+	wantSecond := []string{"worker-2", "NVIDIA-T4", "0/3/4", "550.107.02", "12.5", "device-plugin", "Ready"}
 	if row := cells(got[2]); !equalStrings(row, wantSecond) {
 		t.Errorf("second row = %v, want %v", row, wantSecond)
 	}
@@ -435,6 +440,24 @@ func TestListSelectorAndNode(t *testing.T) {
 		}
 	})
 
+	t.Run("by node, against a name that is a prefix of another", func(t *testing.T) {
+		t.Parallel()
+
+		// A node name is matched whole. Matched as a prefix or a substring,
+		// "--node w" would report w2 as well, and on the Mokka lane every
+		// worker name is a prefix of the next one.
+		prefixed := []runtime.Object{gpuNode("w", 4, nil), gpuNode("w2", 8, nil)}
+
+		s, err := runList(t, prefixed, "--node", "w", "-o", "name")
+		if err != nil {
+			t.Fatalf("gpu list --node w: %v", err)
+		}
+
+		if got := lines(s.out.String()); !equalStrings(got, []string{"gpunode/w"}) {
+			t.Errorf("output = %v, want only w", got)
+		}
+	})
+
 	t.Run("a selector that does not parse is a usage error", func(t *testing.T) {
 		t.Parallel()
 
@@ -475,6 +498,13 @@ func TestListFromBundleMissing(t *testing.T) {
 	_, err := runList(t, nil, "--from-bundle", "testdata/there-is-no-bundle-here")
 	if err == nil {
 		t.Fatal("gpu list accepted a bundle directory that does not exist")
+	}
+
+	// The path is something the user typed, so it is theirs to fix. Exit 4
+	// would say the cluster could not be reached, and there is no cluster in
+	// this invocation at all.
+	if code := output.ExitCodeFor(err); code != output.ExitUsage {
+		t.Errorf("exit code = %d, want %d: %v", code, output.ExitUsage, err)
 	}
 }
 
