@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // none is what an empty section says, as kubectl describe does, so that an
@@ -48,7 +49,7 @@ func describe(w io.Writer, n *inventory.GPUNode) error {
 	p.kv("Clique", valueOr(n.Clique, none))
 	p.kv("Upgrade state", valueOr(n.UpgradeState, none))
 
-	p.section("GPUs")
+	p.section("GPUs:")
 	p.kv("  Capacity", strconv.FormatInt(n.Capacity, 10))
 	p.kv("  Allocatable", strconv.FormatInt(n.Allocatable, 10))
 
@@ -61,14 +62,14 @@ func describe(w io.Writer, n *inventory.GPUNode) error {
 
 	p.kv("  Requested", requested)
 
-	p.section("MIG")
+	p.section("MIG:")
 	p.kv("  Strategy", valueOr(n.MIG.Strategy, none))
 	p.kv("  Capable", strconv.FormatBool(n.MIG.Capable))
 	p.kv("  Config", valueOr(n.MIG.Config, none))
 	p.kv("  Config state", valueOr(n.MIG.ConfigState, none))
 
 	if len(n.MIG.Resources) > 0 {
-		p.section("  Profiles")
+		p.section("  Profiles:")
 
 		for _, name := range sortedResourceKeys(n.MIG.Resources) {
 			count := n.MIG.Resources[name]
@@ -76,7 +77,7 @@ func describe(w io.Writer, n *inventory.GPUNode) error {
 		}
 	}
 
-	p.section("Sharing")
+	p.section("Sharing:")
 	p.kv("  Strategy", valueOr(n.Sharing.Strategy, none))
 	p.kv("  Replicas", strconv.Itoa(n.Sharing.Replicas))
 
@@ -97,7 +98,7 @@ func describe(w io.Writer, n *inventory.GPUNode) error {
 }
 
 func describeTaints(p *printer, n *inventory.GPUNode) {
-	p.section("Taints")
+	p.section("Taints:")
 
 	if len(n.Taints) == 0 {
 		p.line("  " + none)
@@ -111,7 +112,7 @@ func describeTaints(p *printer, n *inventory.GPUNode) {
 }
 
 func describeConditions(p *printer, n *inventory.GPUNode) {
-	p.section("Conditions")
+	p.section("Conditions:")
 
 	if len(n.Conditions) == 0 {
 		p.line("  " + none)
@@ -126,7 +127,7 @@ func describeConditions(p *printer, n *inventory.GPUNode) {
 }
 
 func describeSlices(p *printer, n *inventory.GPUNode) {
-	p.section("Resource slices")
+	p.section("Resource slices:")
 
 	if len(n.ResourceSlices) == 0 {
 		p.line("  " + none)
@@ -140,7 +141,7 @@ func describeSlices(p *printer, n *inventory.GPUNode) {
 }
 
 func describeOperands(p *printer, n *inventory.GPUNode) {
-	p.section("Operands")
+	p.section("Operands:")
 
 	if len(n.Operands) == 0 {
 		p.line("  " + none)
@@ -194,25 +195,28 @@ type printer struct {
 	err error
 }
 
-// kv writes a key and its value in the key column.
+// kv writes a key and its value in the key column. Both halves are sanitised:
+// a key is as likely to be hostile as a value, because a label key is written
+// by whoever wrote the label.
 func (p *printer) kv(key, value string) {
-	p.write(fmt.Sprintf("%-*s %s\n", keyWidth, key+":", value))
+	key = output.SanitizeCell(key)
+	p.write(fmt.Sprintf("%-*s %s\n", keyWidth, key+":", output.SanitizeCell(value)))
 }
 
 // section starts a group, as kubectl describe does: a heading whose value is
 // the indented lines under it.
 func (p *printer) section(name string) {
-	p.write(name + ":\n")
+	p.write(output.SanitizeCell(name) + "\n")
 }
 
 // line writes a line that is not a key and value pair.
 func (p *printer) line(text string) {
-	p.write(text + "\n")
+	p.write(output.SanitizeCell(text) + "\n")
 }
 
 // mapSection writes a map of labels, sorted, or <none>.
 func (p *printer) mapSection(name string, m map[string]string) {
-	p.section(name)
+	p.section(name + ":")
 
 	if len(m) == 0 {
 		p.line("  " + none)
