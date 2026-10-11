@@ -66,9 +66,17 @@ type JobFit struct {
 	GPUsPerPod int64 `json:"gpusPerPod" yaml:"gpusPerPod"`
 	// Levels is one entry per level of the report, narrowest first.
 	Levels []LevelFit `json:"levels" yaml:"levels"`
-	// Smallest is the name of the narrowest level with a group that fits, and
-	// is empty when the job fits nowhere.
+	// Smallest is the name of the narrowest level with a group that fits.
+	//
+	// It is empty only when the job fits nowhere at all: the report always
+	// carries the implicit node and cluster levels, so a job that fits
+	// anywhere has one of them to be answered with.
 	Smallest string `json:"smallest" yaml:"smallest"`
+	// Excluded names the nodes left out of this answer because nothing can
+	// be placed on them: cordoned, not Ready, or with nothing known about
+	// what already runs on them. Their GPUs are still counted in the group
+	// totals, which answer a different question from this one.
+	Excluded []string `json:"excluded" yaml:"excluded"`
 }
 
 // jobFitJSON breaks the method set so that MarshalJSON does not recurse.
@@ -79,6 +87,9 @@ func (f JobFit) MarshalJSON() ([]byte, error) {
 	out := jobFitJSON(f)
 	if out.Levels == nil {
 		out.Levels = []LevelFit{}
+	}
+	if out.Excluded == nil {
+		out.Excluded = []string{}
 	}
 
 	raw, err := json.Marshal(out)
@@ -108,7 +119,7 @@ type JobRequest struct {
 // than read off the groups because the answer turns on the free GPUs of each
 // node separately, which a group total cannot express.
 func (r *TopologyReport) FitJob(req JobRequest, nodes []inventory.GPUNode) *JobFit {
-	free := freeByNode(nodes)
+	free, excluded := placeableNodes(nodes)
 
 	fit := &JobFit{
 		Namespace:  req.Namespace,
@@ -116,22 +127,22 @@ func (r *TopologyReport) FitJob(req JobRequest, nodes []inventory.GPUNode) *JobF
 		Pods:       req.Pods,
 		GPUsPerPod: req.GPUsPerPod,
 		Levels:     make([]LevelFit, 0, len(r.Levels)),
+		Excluded:   excluded,
 	}
 
 	for _, level := range r.Levels {
 		at := LevelFit{Level: level.Name, Label: level.Label, Groups: []string{}}
 		for _, group := range level.Groups {
-			if !group.RequestedKnown {
-				// Nothing is known about what runs on these nodes, so
-				// nothing can be promised about what would fit beside it.
-				continue
-			}
 			if fits(freeOfGroup(group, free), req.Pods, req.GPUsPerPod) {
 				at.Groups = append(at.Groups, group.Value)
 			}
 		}
 		sort.Strings(at.Groups)
 
+		// The levels run narrowest first, so the first one with a group that
+		// takes the job is the answer. Keeping the last would hand back the
+		// widest placement that fits, which gives up the interconnect the
+		// question was about.
 		if fit.Smallest == "" && len(at.Groups) > 0 {
 			fit.Smallest = level.Name
 		}
@@ -141,21 +152,43 @@ func (r *TopologyReport) FitJob(req JobRequest, nodes []inventory.GPUNode) *JobF
 	return fit
 }
 
-// freeByNode is the free GPUs of every node, by name, clamped at zero.
-func freeByNode(nodes []inventory.GPUNode) map[string]int64 {
-	out := make(map[string]int64, len(nodes))
+// placeableNodes is the free GPUs of every node a pod could actually land on,
+// by name, with the names of the ones left out.
+//
+// A cordoned node and a node that is not Ready both have free GPUs the
+// scheduler will not use, and a node whose running pods were never listed has
+// free GPUs nobody counted. Offering any of them as room for a job answers
+// "it fits" about a placement that will sit Pending, which is the outcome the
+// question was asked to avoid. They are excluded from the fit and named, and
+// their GPUs stay in the group totals, which say what the group has rather
+// than what can be placed on it right now.
+func placeableNodes(nodes []inventory.GPUNode) (free map[string]int64, excluded []string) {
+	free = make(map[string]int64, len(nodes))
+	excluded = []string{}
+
 	for i := range nodes {
-		out[nodes[i].Name] = freeOn(&nodes[i])
+		n := &nodes[i]
+		if n.Unschedulable || !n.Ready || !n.RequestedKnown {
+			excluded = append(excluded, n.Name)
+			continue
+		}
+		free[n.Name] = freeOn(n)
 	}
 
-	return out
+	sort.Strings(excluded)
+
+	return free, excluded
 }
 
-// freeOfGroup is the free GPUs of a group, one entry per node.
+// freeOfGroup is the free GPUs of a group, one entry per node that can take a
+// pod. A node missing from free was excluded, and contributes nothing rather
+// than a zero, which is the same thing here and says why.
 func freeOfGroup(g Group, free map[string]int64) []int64 {
 	out := make([]int64, 0, len(g.Nodes))
 	for _, name := range g.Nodes {
-		out = append(out, free[name])
+		if available, placeable := free[name]; placeable {
+			out = append(out, available)
+		}
 	}
 
 	return out

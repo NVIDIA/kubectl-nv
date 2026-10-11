@@ -25,6 +25,7 @@ import (
 
 	"github.com/spf13/cobra"
 	batchv1 "k8s.io/api/batch/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
@@ -43,7 +44,7 @@ type reader interface {
 
 	Topologies(ctx context.Context) ([]unstructured.Unstructured, error)
 	ResourceFlavors(ctx context.Context) ([]unstructured.Unstructured, error)
-	Jobs(ctx context.Context, namespace string) ([]batchv1.Job, error)
+	Job(ctx context.Context, namespace, name string) (*batchv1.Job, error)
 }
 
 // options is the state one run of the command carries.
@@ -135,16 +136,30 @@ func build(ctx context.Context, src reader, o *cmd.Options, jobName string) (*to
 	}
 
 	in := topology.Input{Nodes: nodes}
-	in.Kueue, in.Topologies, err = readKueue(ctx, src)
-	if err != nil {
-		partial = append(partial, err)
+
+	var kueueErr error
+	in.Kueue, in.Topologies, kueueErr = readKueue(ctx, src)
+	switch {
+	case kueueErr == nil:
+	case isPartial(kueueErr):
+		partial = append(partial, kueueErr)
+	default:
+		// The cluster could not be talked to. Nothing was read, so nothing is
+		// printed: a report that came back from a failed run reads as an
+		// answer, and exit 4 says there is no answer here.
+		return nil, nil, kueueErr
 	}
 
 	report := topology.Build(in)
 
 	if jobName != "" {
-		if err := answerForJob(ctx, src, o, report, nodes, jobName); err != nil {
-			return nil, nil, err
+		jobErr := answerForJob(ctx, src, o, report, nodes, jobName)
+		switch {
+		case jobErr == nil:
+		case isPartial(jobErr):
+			partial = append(partial, jobErr)
+		default:
+			return nil, nil, jobErr
 		}
 	}
 
@@ -155,6 +170,12 @@ func build(ctx context.Context, src reader, o *cmd.Options, jobName string) (*to
 }
 
 // answerForJob reads the job and fills in the fit.
+//
+// A job that is not there is a question about something that does not exist,
+// which is the user's to fix and exits 2. A job that could not be read is a
+// different thing: the levels were still read, so the report is printed
+// without a fit and the run exits 3, with the denied read named in the
+// status so that a reader can see why the answer is missing.
 func answerForJob(
 	ctx context.Context,
 	src reader,
@@ -165,58 +186,48 @@ func answerForJob(
 ) error {
 	namespace := namespaceOf(o)
 
-	jobs, err := src.Jobs(ctx, namespace)
-	if err != nil && !isPartial(err) {
+	job, err := src.Job(ctx, namespace, jobName)
+	switch {
+	case apierrors.IsNotFound(err):
+		return output.NewUsageError("no job %q in namespace %q", jobName, namespace)
+	case err != nil:
+		if isPartial(err) {
+			o.Log().Warnf("Cannot answer about job %s/%s: %v", namespace, jobName, err)
+		}
+
 		return err
 	}
 
-	for i := range jobs {
-		if jobs[i].Name != jobName {
-			continue
-		}
-
-		req, err := topology.JobRequestFrom(&jobs[i])
-		if err != nil {
-			return err
-		}
-
-		report.Fit = report.FitJob(req, nodes)
-
-		return nil
+	req, err := topology.JobRequestFrom(job)
+	if err != nil {
+		return err
 	}
 
-	// A job that is not there is a question about something that does not
-	// exist, which is exit 2 and not a report of nothing.
-	return output.NewUsageError("no job %q in namespace %q", jobName, namespace)
+	report.Fit = report.FitJob(req, nodes)
+
+	return nil
 }
 
 // readKueue reads the Kueue topology levels, reporting what it found rather
 // than failing when there is nothing to find.
+//
+// Whether Kueue is installed is discovery's answer, not the list's. A cluster
+// that serves the topology API and then refuses the read is a cluster with
+// Kueue on it and an RBAC rule in the way, and reporting it as not installed
+// would send the user to install something they already have.
 func readKueue(ctx context.Context, src reader) (topology.KueueStatus, []topology.KueueTopology, error) {
 	topologies, err := src.Topologies(ctx)
-	switch {
-	case errors.Is(err, source.ErrKueueNotInstalled):
-		return topology.KueueStatus{Reason: "the cluster serves no kueue.x-k8s.io topologies"}, nil, nil
-	case isPartial(err):
-		return topology.KueueStatus{Reason: "reading the Kueue topologies was not allowed"}, nil, err
-	case err != nil:
-		return topology.KueueStatus{}, nil, err
+	if status, stop := kueueProblem(err, "topologies"); stop {
+		return status, nil, passPartial(err)
 	}
 
 	flavors, err := src.ResourceFlavors(ctx)
-	switch {
-	case errors.Is(err, source.ErrKueueNotInstalled):
-		return topology.KueueStatus{
-			Installed: true,
-			Reason:    "the cluster serves no kueue.x-k8s.io resourceflavors",
-		}, nil, nil
-	case isPartial(err):
-		return topology.KueueStatus{
-			Installed: true,
-			Reason:    "reading the Kueue resource flavors was not allowed",
-		}, nil, err
-	case err != nil:
-		return topology.KueueStatus{Installed: true}, nil, err
+	if status, stop := kueueProblem(err, "resource flavors"); stop {
+		// The topologies were readable, so Kueue is installed whatever the
+		// flavors did.
+		status.Installed = true
+
+		return status, nil, passPartial(err)
 	}
 
 	referenced, parseErr := topology.ReferencedTopologies(topologies, flavors)
@@ -230,6 +241,51 @@ func readKueue(ctx context.Context, src reader) (topology.KueueStatus, []topolog
 	}
 
 	return status, referenced, nil
+}
+
+// kueueProblem turns a failed Kueue read into the status to report, and says
+// whether the read can go on. A nil error is no problem and no status.
+func kueueProblem(err error, what string) (topology.KueueStatus, bool) {
+	switch {
+	case err == nil:
+		return topology.KueueStatus{}, false
+
+	case errors.Is(err, source.ErrKueueNotInstalled):
+		return topology.KueueStatus{
+			Reason: "the cluster serves no kueue.x-k8s.io " + what,
+		}, true
+
+	case errors.Is(err, source.ErrKueueDiscovery):
+		// The cluster would not say what it serves, so whether Kueue is there
+		// is simply not known, and claiming either way would be a guess.
+		return topology.KueueStatus{
+			Reason: "the cluster would not say whether it serves the Kueue API: " + err.Error(),
+		}, true
+
+	case isPartial(err):
+		return topology.KueueStatus{
+			Installed: true,
+			Reason:    "reading the Kueue " + what + " was not allowed: " + err.Error(),
+		}, true
+
+	default:
+		return topology.KueueStatus{}, true
+	}
+}
+
+// passPartial returns err when it is one the run can carry on from, and the
+// error itself otherwise. A read that failed for any other reason means the
+// cluster was not read at all.
+func passPartial(err error) error {
+	if err == nil || isPartial(err) {
+		return err
+	}
+	if errors.Is(err, source.ErrKueueNotInstalled) {
+		// Not an error: a cluster without Kueue is an answer.
+		return nil
+	}
+
+	return err
 }
 
 // isPartial reports whether err is a partial read, that is, whether the run

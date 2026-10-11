@@ -19,7 +19,6 @@ package topology
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,12 +89,31 @@ func buildNode(n *corev1.Node) *inventory.GPUNode {
 	out.Clique = n.Labels[LabelClique]
 	out.Topology = map[string]string{}
 	for label, value := range n.Labels {
-		if label == LabelDomain || strings.HasPrefix(label, LabelTierPrefix) {
+		if isTopographLabel(label) {
 			out.Topology[label] = value
 		}
 	}
 
+	// Whether a pod could land here at all. A node missing either of these is
+	// a node the fit has to leave out, so a builder that does not read them
+	// hands back a cluster where nothing fits anywhere.
+	out.Unschedulable = n.Spec.Unschedulable
+	out.Ready = isReady(n)
+
 	return out
+}
+
+// isReady reports whether the node's Ready condition is True. A node with no
+// conditions at all is not Ready: nothing said it was, and reading an absent
+// condition as healthy turns a node that never registered into a placement.
+func isReady(n *corev1.Node) bool {
+	for i := range n.Status.Conditions {
+		if n.Status.Conditions[i].Type == corev1.NodeReady {
+			return n.Status.Conditions[i].Status == corev1.ConditionTrue
+		}
+	}
+
+	return false
 }
 
 // requestedByNode sums the GPUs the pods on each node are holding.

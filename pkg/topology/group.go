@@ -27,32 +27,62 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 )
 
-// The node labels this package groups by. The clique is the GPU operator's;
-// the tier prefix and the domain are Topograph's.
+// The node labels this package groups by. The clique is the GPU operator's,
+// the fabric and accelerator labels are Topograph's, and the hostname is
+// Kubernetes' own.
 const (
 	// LabelClique is the NVLink or IMEX clique a node's GPUs belong to.
 	LabelClique = "nvidia.com/gpu.clique"
-	// LabelTierPrefix prefixes one label per fabric tier, the number of the
-	// tier following it: fabric.topograph.run/tier-1, tier-2 and so on, with
-	// the lower numbers nearer the node.
-	LabelTierPrefix = "fabric.topograph.run/tier-"
-	// LabelDomain is the accelerator domain, which spans the fabric tiers.
+	// LabelSubDomain is the accelerator sub-domain, an optional division
+	// inside an accelerator domain, so it is the narrower of the two.
+	LabelSubDomain = "accelerator.topograph.run/sub-domain"
+	// LabelDomain is the accelerator domain, the NVLink domain a node is in.
 	LabelDomain = "accelerator.topograph.run/domain"
+	// LabelTierPrefix prefixes one label per fabric tier, the number of the
+	// tier following it: fabric.topograph.run/tier-0, tier-1 and so on. Tier
+	// 0 is the one closest to the node and the numbers increase outwards.
+	LabelTierPrefix = "fabric.topograph.run/tier-"
+	// LabelHostname is the node's own name as a label. It is the node level,
+	// and the label a Kueue Topology names when it declares one.
+	LabelHostname = "kubernetes.io/hostname"
 )
 
-// Where a level came from. It is in the output because the three have
-// different owners, and a reader looking at a level that is wrong needs to
-// know which component to go and ask.
+// Where a level came from. It is in the output because these have different
+// owners, and a reader looking at a level that is wrong needs to know which
+// component to go and ask.
 const (
+	// SourceNode is the implicit level of one node.
+	SourceNode = "node"
 	// SourceClique is the GPU operator's clique label.
 	SourceClique = "clique"
-	// SourceTier is one of Topograph's fabric tiers.
-	SourceTier = "tier"
+	// SourceSubDomain is Topograph's accelerator sub-domain.
+	SourceSubDomain = "accelerator-sub-domain"
 	// SourceDomain is Topograph's accelerator domain.
 	SourceDomain = "accelerator-domain"
+	// SourceTier is one of Topograph's fabric tiers.
+	SourceTier = "tier"
 	// SourceKueue is a level declared by a Kueue Topology object.
 	SourceKueue = "kueue"
+	// SourceCluster is the implicit level of the whole cluster.
+	SourceCluster = "cluster"
 )
+
+// The names of the two implicit levels.
+const (
+	// LevelNode is the narrowest level there is: one node.
+	LevelNode = "node"
+	// LevelCluster is the widest: every GPU node the run saw.
+	LevelCluster = "cluster"
+)
+
+// topographLabels reports whether a label is one Topograph writes. It is what
+// decides whether a node counts as partially labelled, which is NV-TOPO-001's
+// question and is asked about Topograph's labels alone.
+func isTopographLabel(label string) bool {
+	return label == LabelDomain ||
+		label == LabelSubDomain ||
+		strings.HasPrefix(label, LabelTierPrefix)
+}
 
 // Group is the set of nodes that share one value of one level's label, with
 // what they have between them.
@@ -216,7 +246,7 @@ type levelKey struct {
 }
 
 // Build groups the nodes by every level the cluster has, narrowest first, and
-// names the nodes that carry some of the labels and not the rest.
+// names the nodes that carry some of the Topograph labels and not the rest.
 func Build(in Input) *TopologyReport {
 	report := NewTopologyReport()
 	report.Kueue = in.Kueue
@@ -228,71 +258,91 @@ func Build(in Input) *TopologyReport {
 			Name:   key.name,
 			Label:  key.label,
 			Source: key.source,
-			Groups: groupsAt(in.Nodes, key.label),
+			Groups: key.group(in.Nodes),
 		})
 	}
 
-	report.PartialNodes = partialNodes(in.Nodes, keys)
+	report.PartialNodes = partialNodes(in.Nodes)
 
 	return report
 }
 
-// levelsOf collects the levels of a cluster in the order they are reported:
-// the clique, the fabric tiers by their number, the accelerator domain, and
-// then the Kueue levels in the order their Topology objects declare them.
+// group returns the groups of one level.
+func (k levelKey) group(nodes []inventory.GPUNode) []Group {
+	switch k.source {
+	case SourceNode:
+		return groupsPerNode(nodes)
+	case SourceCluster:
+		return groupsWholeCluster(nodes)
+	default:
+		return groupsAt(nodes, k.label)
+	}
+}
+
+// levelsOf collects the levels of a cluster, narrowest first. The order is
+// the contract --for is read through, so it is written out here in full:
 //
-// The domain sits between the tiers and the Kueue levels because it spans the
-// tiers: an accelerator domain holds whole fabrics, so it is wider than any
-// of them. The Kueue levels come last because they are the scheduler's own
-// division of the same cluster and nothing says how they nest against the
-// hardware labels; reporting them after the hardware keeps the part of the
-// order that is known from being mixed with the part that is not.
+//  1. the node, implicit, one group per node;
+//  2. nvidia.com/gpu.clique;
+//  3. accelerator.topograph.run/sub-domain;
+//  4. accelerator.topograph.run/domain;
+//  5. fabric.topograph.run/tier-0 upwards, by number;
+//  6. the Kueue levels, from the last declared to the first;
+//  7. the cluster, implicit, one group.
 //
-// A level nobody carries is left out: an empty level is a row of nothing in
-// the table and a group list nothing can be placed in.
+// Three of those need saying out loud.
+//
+// The NVLink hierarchy comes before the network one. A clique, a sub-domain
+// and a domain are NVLink groupings, and a fabric tier is a switch level;
+// Topograph describes them as separate hierarchies, and the NVLink side is
+// the tighter interconnect, so a job that fits inside it belongs there rather
+// than spread across a switch. A sub-domain is a division inside a domain, so
+// it is the narrower of those two.
+//
+// The Kueue levels are walked backwards because a Topology declares them
+// widest first. The CRD refuses any list whose last entry is not
+// kubernetes.io/hostname, calling that "the lowest level of topology", and
+// the upstream sample declares block, rack, hostname. Reading them forwards
+// answers every --for with the widest placement that fits.
+//
+// The node and the cluster are always there, whatever the cluster is
+// labelled with. Without them, a job that fits on one node has no level to be
+// answered with, and a cluster with no topology labels at all has no levels
+// and no answer.
+//
+// A label nobody carries is left out: an empty level is a row of nothing in
+// the table and a group list nothing can be placed in. A Kueue level naming a
+// label one of the levels above already reads is left out too, and the report
+// then names that level rather than carrying it twice: a Topology that
+// declares kubernetes.io/hostname is declaring the node level, and one that
+// declares nvidia.com/gpu.clique is declaring the clique.
 func levelsOf(in Input) []levelKey {
 	present := labelsInUse(in.Nodes)
-
-	keys := make([]levelKey, 0, len(present))
-	if _, found := present[LabelClique]; found {
-		keys = append(keys, levelKey{name: "clique", label: LabelClique, source: SourceClique})
+	has := func(label string) bool {
+		_, found := present[label]
+		return found
 	}
 
-	tiers := make([]levelKey, 0, len(present))
-	for label := range present {
-		if !strings.HasPrefix(label, LabelTierPrefix) {
-			continue
+	// The node level reads the hostname label so that a Kueue level naming it
+	// is recognised as an alias, but it groups by the node's name, which
+	// every node has whether or not the label is set.
+	keys := []levelKey{{name: LevelNode, label: LabelHostname, source: SourceNode}}
+
+	for _, fixed := range []struct {
+		name   string
+		label  string
+		source string
+	}{
+		{name: "clique", label: LabelClique, source: SourceClique},
+		{name: "accelerator-sub-domain", label: LabelSubDomain, source: SourceSubDomain},
+		{name: "accelerator-domain", label: LabelDomain, source: SourceDomain},
+	} {
+		if has(fixed.label) {
+			keys = append(keys, levelKey{name: fixed.name, label: fixed.label, source: fixed.source})
 		}
-		// An unparseable tier number sorts after the numbered ones rather
-		// than as tier 0, which would put a label nobody can order at the
-		// narrowest end of the report.
-		number, err := strconv.Atoi(strings.TrimPrefix(label, LabelTierPrefix))
-		if err != nil {
-			number = math.MaxInt
-		}
-		tiers = append(tiers, levelKey{
-			name:   strings.TrimPrefix(label, "fabric.topograph.run/"),
-			label:  label,
-			source: SourceTier,
-			tier:   number,
-		})
 	}
 
-	// By number, and then by label so that two unparseable ones still have an
-	// order. A string sort over the labels alone puts tier-10 before tier-2,
-	// which reverses two fabric levels.
-	sort.Slice(tiers, func(i, j int) bool {
-		if tiers[i].tier != tiers[j].tier {
-			return tiers[i].tier < tiers[j].tier
-		}
-
-		return tiers[i].label < tiers[j].label
-	})
-	keys = append(keys, tiers...)
-
-	if _, found := present[LabelDomain]; found {
-		keys = append(keys, levelKey{name: "accelerator-domain", label: LabelDomain, source: SourceDomain})
-	}
+	keys = append(keys, tierLevels(present)...)
 
 	seen := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
@@ -300,7 +350,9 @@ func levelsOf(in Input) []levelKey {
 	}
 
 	for _, topo := range in.Topologies {
-		for _, label := range topo.Levels {
+		// Backwards: the last level a Topology declares is its narrowest.
+		for i := len(topo.Levels) - 1; i >= 0; i-- {
+			label := topo.Levels[i]
 			if _, done := seen[label]; done {
 				continue
 			}
@@ -315,12 +367,49 @@ func levelsOf(in Input) []levelKey {
 		}
 	}
 
-	return keys
+	return append(keys, levelKey{name: LevelCluster, source: SourceCluster})
+}
+
+// tierLevels returns the fabric tier levels in use, ordered by their number.
+func tierLevels(present map[string]struct{}) []levelKey {
+	tiers := make([]levelKey, 0, len(present))
+	for label := range present {
+		if !strings.HasPrefix(label, LabelTierPrefix) {
+			continue
+		}
+		// A tier whose suffix is not a number cannot be placed among the
+		// numbered ones, and the far end is the safe end: sorting it as tier
+		// 0 would make it the narrowest level in the report and the first
+		// answer --for gives.
+		number, err := strconv.Atoi(strings.TrimPrefix(label, LabelTierPrefix))
+		if err != nil {
+			number = math.MaxInt
+		}
+		tiers = append(tiers, levelKey{
+			name:   strings.TrimPrefix(label, "fabric.topograph.run/"),
+			label:  label,
+			source: SourceTier,
+			tier:   number,
+		})
+	}
+
+	// By number, and then by label so that two unnumbered ones still have an
+	// order. A string sort over the labels alone puts tier-10 before tier-2,
+	// which reverses two fabric levels.
+	sort.Slice(tiers, func(i, j int) bool {
+		if tiers[i].tier != tiers[j].tier {
+			return tiers[i].tier < tiers[j].tier
+		}
+
+		return tiers[i].label < tiers[j].label
+	})
+
+	return tiers
 }
 
 // labelsInUse collects the label keys at least one node carries, out of the
-// three sources a level can come from: the clique field, the Topograph labels
-// kept in Topology, and the node's own labels for a Kueue level.
+// two sources a fixed level can come from: the clique field and the Topograph
+// labels kept in Topology.
 func labelsInUse(nodes []inventory.GPUNode) map[string]struct{} {
 	out := make(map[string]struct{}, 4)
 	for i := range nodes {
@@ -373,6 +462,37 @@ func valueAt(n *inventory.GPUNode, label string) string {
 	}
 
 	return n.Labels[label]
+}
+
+// groupsPerNode is the implicit node level: one group per node, keyed by its
+// name, so that a job of one pod can be answered with the node it fits on.
+// It groups by the name rather than by the hostname label because a node
+// without that label is still a node.
+func groupsPerNode(nodes []inventory.GPUNode) []Group {
+	groups := make([]Group, 0, len(nodes))
+	for i := range nodes {
+		groups = append(groups, groupOf(nodes[i].Name, []*inventory.GPUNode{&nodes[i]}))
+	}
+
+	sort.Slice(groups, func(i, j int) bool { return groups[i].Value < groups[j].Value })
+
+	return groups
+}
+
+// groupsWholeCluster is the implicit cluster level: every GPU node the run
+// saw, in one group. A job that fits nowhere narrower still has to be told
+// whether the cluster as a whole can take it.
+func groupsWholeCluster(nodes []inventory.GPUNode) []Group {
+	if len(nodes) == 0 {
+		return []Group{}
+	}
+
+	all := make([]*inventory.GPUNode, 0, len(nodes))
+	for i := range nodes {
+		all = append(all, &nodes[i])
+	}
+
+	return []Group{groupOf(LevelCluster, all)}
 }
 
 // groupsAt groups the nodes by their value of one label, sorted by value,
@@ -457,36 +577,48 @@ func freeOn(n *inventory.GPUNode) int64 {
 	return free
 }
 
-// partialNodes names the nodes carrying some of the cluster's topology labels
-// and not the rest.
+// partialNodes names the nodes carrying some of the cluster's Topograph
+// labels and not the rest.
 //
-// The set a node is measured against is the set of levels the report has,
-// that is, the labels at least one node in the cluster carries. A node
-// carrying none of them is not partial: it is a node outside the fabric
-// entirely, and saying it is missing every label would bury the nodes that
-// are missing one.
-func partialNodes(nodes []inventory.GPUNode, keys []levelKey) []PartialNode {
-	if len(keys) == 0 {
+// The set a node is measured against is the Topograph labels in use anywhere
+// in the cluster: the fabric tiers, the accelerator domain and its
+// sub-domain. That is NV-TOPO-001's question, and it is asked about those
+// labels alone. A clique is not one of them, and neither is a Kueue level: a
+// fleet of GB200 nodes with cliques beside H100 nodes without them is an
+// ordinary mixed cluster, not one where half the nodes lost a label, and
+// counting the clique would report every such cluster as broken.
+//
+// A node carrying none of them is not partial either: it is a node outside
+// the fabric entirely, and saying it is missing every label would bury the
+// nodes that are missing one.
+func partialNodes(nodes []inventory.GPUNode) []PartialNode {
+	universe := make([]string, 0, 4)
+	for label := range labelsInUse(nodes) {
+		if isTopographLabel(label) {
+			universe = append(universe, label)
+		}
+	}
+	sort.Strings(universe)
+
+	if len(universe) == 0 {
 		return []PartialNode{}
 	}
 
 	out := make([]PartialNode, 0, len(nodes))
 	for i := range nodes {
 		var present, missing []string
-		for _, key := range keys {
-			if valueAt(&nodes[i], key.label) != "" {
-				present = append(present, key.label)
+		for _, label := range universe {
+			if valueAt(&nodes[i], label) != "" {
+				present = append(present, label)
 				continue
 			}
-			missing = append(missing, key.label)
+			missing = append(missing, label)
 		}
 
 		if len(present) == 0 || len(missing) == 0 {
 			continue
 		}
 
-		sort.Strings(present)
-		sort.Strings(missing)
 		out = append(out, PartialNode{Name: nodes[i].Name, Present: present, Missing: missing})
 	}
 

@@ -163,7 +163,7 @@ func (r *TopologyReport) TableRows(wide bool) [][]string {
 				row = append(row, strings.Join(group.Nodes, ","))
 			}
 			if r.Fit != nil {
-				row = append(row, yesNo(fits[level.Name][group.Value]))
+				row = append(row, r.fitCell(fits, level.Name, group.Value))
 			}
 			rows = append(rows, row)
 		}
@@ -202,12 +202,19 @@ func unknownOr(known bool, value int64) string {
 	return strconv.FormatInt(value, 10)
 }
 
-func yesNo(value bool) string {
-	if value {
-		return "yes"
+// fitCell says whether one group takes the job, and marks the rows of the
+// narrowest level that does. The answer to --for is one level out of several,
+// and a reader scanning a long table should not have to remember the level
+// order to find which one it was.
+func (r *TopologyReport) fitCell(fits map[string]map[string]bool, level, group string) string {
+	if !fits[level][group] {
+		return "no"
+	}
+	if r.Fit != nil && r.Fit.Smallest == level {
+		return "yes (smallest)"
 	}
 
-	return "no"
+	return "yes"
 }
 
 // The deep copies are written by hand, as pkg/inventory's are and for the
@@ -270,6 +277,10 @@ func (f *JobFit) DeepCopyInto(out *JobFit) {
 		for i := range f.Levels {
 			f.Levels[i].DeepCopyInto(&out.Levels[i])
 		}
+	}
+	if f.Excluded != nil {
+		out.Excluded = make([]string, len(f.Excluded))
+		copy(out.Excluded, f.Excluded)
 	}
 }
 

@@ -34,20 +34,32 @@ const kueueGroup = "kueue.x-k8s.io"
 // kueueVersions are the versions of that group this package will read, newest
 // first.
 //
-// Both are in the field. Kueue served v1beta1 alone up to v0.17; v0.18
-// introduced v1beta2 and made it the storage version while v1beta1 stayed
-// served and deprecated; v0.20 stopped serving v1beta1. Asking only for the
-// newer one reads an endpoint that does not exist on a v0.17 cluster, and the
-// answer would be "this cluster has no topology levels" rather than "I asked
-// the wrong version".
+// All three are in the field, read from the CRDs of the releases that moved
+// them:
 //
-// The two versions carry the same two fields this package reads,
+//	v0.13.0  Topology is v1alpha1, served and storage; no v1beta1 of it
+//	v0.14.0  Topology is v1beta1; v1alpha1 is gone
+//	v0.15.0  v1beta2 is served, v1beta1 is still the storage version
+//	v0.16.0  v1beta2 is the storage version
+//	v0.20.0  v1beta1 is no longer served
+//
+// Asking only for the newest reads an endpoint that does not exist on an
+// older cluster, and the answer would be "this cluster has no topology
+// levels" rather than "I asked the wrong version".
+//
+// The versions are chosen per resource, not once for the group, because the
+// two resources did not move together: at v0.13 the Topology is v1alpha1
+// while the ResourceFlavor is already v1beta1, and one version picked for
+// both would read one of them from an endpoint that is not there.
+//
+// Every version carries the same two fields this package reads,
 // spec.levels[].nodeLabel on a Topology and spec.topologyName on a
-// ResourceFlavor, so whichever answers is read the same way. The objects are
-// taken as unstructured rather than through Kueue's Go types: the fields are
-// two strings, and a module dependency on a scheduler to read two strings is
-// a dependency that will have to be upgraded in lockstep with it.
-var kueueVersions = []string{"v1beta2", "v1beta1"}
+// ResourceFlavor, checked against the v0.13.0, v0.19.0 and v0.20.1 CRDs, so
+// whichever answers is read the same way. The objects are taken as
+// unstructured rather than through Kueue's Go types: the fields are two
+// strings, and a module dependency on a scheduler to read two strings is one
+// that has to be upgraded in lockstep with it.
+var kueueVersions = []string{"v1beta2", "v1beta1", "v1alpha1"}
 
 // ErrKueueNotInstalled reports that the cluster serves no Kueue topology API:
 // no version of the group answers for the resource, because the CRDs were
@@ -57,6 +69,16 @@ var kueueVersions = []string{"v1beta2", "v1beta1"}
 // cluster whose topology levels are the NVIDIA and Topograph labels and
 // nothing else, which is an answer the command prints rather than a failure.
 var ErrKueueNotInstalled = errors.New("kueue is not installed: the cluster serves no kueue.x-k8s.io topologies")
+
+// ErrKueueDiscovery reports that the cluster would not say which versions of
+// the Kueue group it serves.
+//
+// It is wrapped in the PartialError that carries it, so that a caller can
+// tell the two denied reads apart. A denied discovery leaves "is Kueue
+// installed" unanswered; a denied list has already been told that it is, and
+// a report that said otherwise would send the user to install something they
+// already have.
+var ErrKueueDiscovery = errors.New("the cluster would not say which kueue.x-k8s.io versions it serves")
 
 // listKueue walks one Kueue resource at the newest version the cluster
 // actually serves.
@@ -76,7 +98,7 @@ func (l *Live) listKueue(ctx context.Context, resource string) ([]unstructured.U
 		served, err := l.servesKueue(ctx, version, resource)
 		switch {
 		case apierrors.IsForbidden(err):
-			return nil, &PartialError{Resource: resource, Err: err}
+			return nil, &PartialError{Resource: resource, Err: fmt.Errorf("%w: %w", ErrKueueDiscovery, err)}
 		case err != nil:
 			return nil, fmt.Errorf("asking which %s/%s resources the cluster serves: %w", kueueGroup, version, err)
 		case !served:

@@ -24,39 +24,42 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// Jobs lists the batch/v1 Jobs in namespace. An empty namespace means every
-// namespace, which is the convention Pods already follows.
+// Job returns the batch/v1 Job named in namespace.
 //
-// It is a list rather than a get by name because that is the shape a bundle
-// can refuse uniformly and the shape the pager already walks. The caller
-// picks the job it was asked about out of the result, and an absent one is a
-// question about something that is not there rather than a failed read.
+// It is a Get rather than a list filtered by name: the caller knows both the
+// namespace and the name, so one object is what it wants. A list would need
+// list RBAC over every job in the namespace and would carry all of them back
+// to find one, on a cluster where a namespace can hold thousands.
 //
-// A denied list is a partial read: the topology itself was still readable, so
+// NotFound is passed through as the API server reported it, so that the
+// caller can tell "there is no such job", which is a question the user got
+// wrong and exits 2, from "this run could not read it".
+//
+// A denied read is a partial read: the topology itself was still readable, so
 // the levels and their free GPUs are worth printing with a note that the job
 // could not be looked up.
-func (l *Live) Jobs(ctx context.Context, namespace string) ([]batchv1.Job, error) {
-	jobs, err := listAll[batchv1.Job](ctx, "", func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
-		return l.clientset.BatchV1().Jobs(namespace).List(ctx, opts)
-	})
+func (l *Live) Job(ctx context.Context, namespace, name string) (*batchv1.Job, error) {
+	job, err := l.clientset.BatchV1().Jobs(namespace).Get(ctx, name, metav1.GetOptions{})
 	switch {
 	case err == nil:
-		return jobs, nil
+		return job, nil
+	case apierrors.IsNotFound(err):
+		return nil, err
 	case apierrors.IsForbidden(err):
 		return nil, &PartialError{Resource: "jobs", Err: err}
 	default:
-		return nil, fmt.Errorf("listing jobs in namespace %q: %w", namespace, err)
+		return nil, fmt.Errorf("reading job %s/%s: %w", namespace, name, err)
 	}
 }
 
-// Jobs reports that a bundle cannot answer. must-gather records the
-// operator's own pods and nothing of the workload, so there is no job list in
-// it; an empty success would read as a namespace with no jobs.
-func (b *Bundle) Jobs(_ context.Context, _ string) ([]batchv1.Job, error) {
-	return []batchv1.Job{}, &PartialError{
+// Job reports that a bundle cannot answer. must-gather records the operator's
+// own pods and nothing of the workload, so there is no job in it; reporting
+// NotFound would tell the user their job does not exist, which this bundle
+// has no way of knowing.
+func (b *Bundle) Job(_ context.Context, _, _ string) (*batchv1.Job, error) {
+	return nil, &PartialError{
 		Resource: "jobs",
 		Err:      errors.New("must-gather does not collect the workload objects"),
 	}
