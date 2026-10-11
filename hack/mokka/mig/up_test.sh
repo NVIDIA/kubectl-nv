@@ -815,7 +815,8 @@ fi
 # without --wait returns before the workloads it created are running, so the
 # gates that follow it race it; one without --timeout inherits helm's 5m
 # default, which a cold image pull on a simulated node overruns.
-for release in nvml-mock gpu-operator; do
+for release in nvml-mock \
+    gpu-operator; do
     install_line="$(grep -F "upgrade --install ${release}" "${MOKKA_CALL_LOG}" | head -1)"
     case "${install_line}" in
         *"--wait --timeout "*)
