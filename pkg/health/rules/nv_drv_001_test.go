@@ -145,6 +145,10 @@ func TestDriverPodNotReadyReportsARestartInsideTheWindow(t *testing.T) {
 		"lastExitCode":                 "1",
 		"restartWindow":                "10m0s",
 	})
+
+	if finding.Severity != output.SeverityError {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	}
 }
 
 // A restart outside the window is history. A driver that crashed during this
@@ -170,6 +174,27 @@ func TestDriverPodNotReadyStaysQuietOnAnUndatableRestart(t *testing.T) {
 	in := drvInput(driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12)))
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// A termination time this code cannot read is not a time inside the window.
+// It arrives as a string off a cluster, and reading an unparsable one as now
+// would report every pod that ever restarted on the first cluster whose
+// timestamps have a shape this has not seen.
+func TestDriverPodNotReadyStaysQuietOnAnUnreadableTerminationTime(t *testing.T) {
+	t.Parallel()
+
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12))
+	withLastTermination(inventory.ComponentDriver, 1, drvNow.Add(-time.Minute))(&node)
+
+	for i := range node.Operands {
+		if node.Operands[i].Component == inventory.ComponentDriver {
+			node.Operands[i].LastTermination.FinishedAt = "last Tuesday"
+		}
+	}
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), drvInput(node)); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }
@@ -212,6 +237,10 @@ func TestDriverPodNotReadyReportsTheVGPUManager(t *testing.T) {
 		"ready":                              "false",
 		"restarts":                           "0",
 	})
+
+	if finding.Severity != output.SeverityError {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	}
 }
 
 // A driver DaemonSet the NVIDIADriver CR produces reaches the rule as
@@ -305,6 +334,10 @@ func TestDriverPodNotReadyReportsAHintedWorker(t *testing.T) {
 		"ready":                        "false",
 		"restarts":                     "7",
 	})
+
+	if finding.Severity != output.SeverityError {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	}
 }
 
 // Walking the hinted nodes must not reopen the control plane problem. The

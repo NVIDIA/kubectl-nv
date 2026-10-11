@@ -1,4 +1,4 @@
-# NV-TOPO-001: the node is missing Topograph labels its peers carry
+# NV-TOPO-001: the node is missing Topograph tiers its peers carry
 
 Severity: info. Component: `node`.
 
