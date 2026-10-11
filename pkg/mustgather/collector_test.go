@@ -17,20 +17,27 @@
 package mustgather
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // TestRegistryIsWellFormed covers what the rest of the gather assumes about the
@@ -392,4 +399,283 @@ func newCustomResourceGatherer(t *testing.T, objects ...runtime.Object) (*Gather
 	t.Cleanup(g.Close)
 
 	return g, dir
+}
+
+// TestCustomResourcesRunBeforeGPUNodes pins the order the base and the
+// gpu-operator script both use: the cluster's own configuration first, the
+// node survey after. The registry had moved the GPU node collector in front
+// of it, so a cluster with no PCI-labelled node lost its ClusterPolicy too,
+// which is the first file support asks for.
+func TestCustomResourcesRunBeforeGPUNodes(t *testing.T) {
+	order := make(map[string]int)
+	for i, c := range Collectors() {
+		order[c.Name] = i
+	}
+
+	gpuNodes, ok := order["gpu-nodes"]
+	if !ok {
+		t.Fatal("the registry has no gpu-nodes collector")
+	}
+	for _, name := range []string{
+		"cluster-policy", "nvidia-drivers", "gpu-cluster",
+		"hyperconverged", "kubevirt", "device-classes", "resource-slices",
+	} {
+		at, listed := order[name]
+		if !listed {
+			t.Errorf("the registry has no %s collector", name)
+			continue
+		}
+		if at > gpuNodes {
+			t.Errorf("%s runs at %d, after gpu-nodes at %d: the cluster's own resources come first",
+				name, at, gpuNodes)
+		}
+	}
+}
+
+// TestNoGPUNodesStillCollectsTheClusterPolicy is the same regression from the
+// outside. A cluster whose feature discovery has not labelled anything yet is
+// exactly the cluster someone runs a must-gather on, and the bundle has to
+// carry the operator's configuration so support can see why.
+func TestNoGPUNodesStillCollectsTheClusterPolicy(t *testing.T) {
+	plain := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cpu-node-1"}}
+	operator := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gpu-operator-0",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{"app": "gpu-operator"},
+		},
+		Spec:   v1.PodSpec{NodeName: "cpu-node-1", Containers: []v1.Container{{Name: "gpu-operator"}}},
+		Status: v1.PodStatus{Phase: v1.PodRunning},
+	}
+
+	dir, names, err := runGatherWithCustomResources(t, &Options{},
+		[]runtime.Object{plain, operator},
+		unstructuredOf("nvidia.com/v1", "ClusterPolicy", "", "cluster-policy"))
+	if err != nil {
+		t.Fatalf("Run returned %v, want the gather to carry on past a cluster with no GPU node", err)
+	}
+
+	if !contains(names, "cluster_policy.yaml") {
+		t.Errorf("the bundle holds no cluster_policy.yaml: %v", names)
+	}
+
+	m := readManifest(t, dir)
+	if got := m.statusOf(t, "gpu-nodes"); got != "skipped:no GPU nodes" {
+		t.Errorf("gpu-nodes status = %q, want %q", got, "skipped:no GPU nodes")
+	}
+	if got := m.statusOf(t, "cluster-policy"); got != StatusOK {
+		t.Errorf("cluster-policy status = %q, want %q", got, StatusOK)
+	}
+}
+
+// TestOneCollectorFailureDoesNotStopTheRest covers what a bundle is for. The
+// gather stopped at the first failing collector, so an API server that refused
+// one list cost the user every artifact behind it: a support engineer got a
+// bundle that stops mid-cluster with no record of what was left out.
+func TestOneCollectorFailureDoesNotStopTheRest(t *testing.T) {
+	clientset := fake.NewSimpleClientset(twoNodeCluster()...)
+	clientset.PrependReactor("list", "daemonsets", failWith(errors.New("the API server is having a bad day")))
+
+	dir, names, err := runGatherWith(t, &Options{}, clientset)
+	if err == nil {
+		t.Fatal("Run returned nil, want the daemonset failure reported")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("exit code = %d, want %d (error: %v)", got, output.ExitPartial, err)
+	}
+
+	// The daemonsets collector runs before the exec collectors, so a gather
+	// that stopped at it would ship no bug report at all.
+	if !contains(names, "nvidia-bug-report_gpu-node-1.log.gz") {
+		t.Errorf("the gather stopped at the failing collector: %v", names)
+	}
+
+	m := readManifest(t, dir)
+	if status := m.statusOf(t, "daemonsets"); !strings.HasPrefix(status, "error:") {
+		t.Errorf("daemonsets status = %q, want it to start with error:", status)
+	}
+	if status := m.statusOf(t, "bug-report"); status != StatusOK {
+		t.Errorf("bug-report status = %q, want it to have run anyway", status)
+	}
+
+	// Every collector of the registry is accounted for, including the ones
+	// after the failure.
+	for _, c := range Collectors() {
+		if got := m.statusOf(t, c.Name); got == "" {
+			t.Errorf("collector %q has no manifest entry", c.Name)
+		}
+	}
+}
+
+// TestLogErrorWrapsItsCause keeps the error chain intact. logError built its
+// message with fmt.Errorf(format+": %w", err) over a format that already
+// carried a %v, so the verb count never matched: every error it produced ended
+// in "%!w(MISSING)" and errors.Is could not reach the cause.
+func TestLogErrorWrapsItsCause(t *testing.T) {
+	g, dir := newTestGatherer(t)
+
+	cause := errors.New("the API server is having a bad day")
+	got := g.logError("error getting daemonSets: %v", cause)
+
+	if !errors.Is(got, cause) {
+		t.Errorf("errors.Is could not reach the cause through %v", got)
+	}
+	if strings.Contains(got.Error(), "%!") {
+		t.Errorf("the error carries a formatting fault: %q", got.Error())
+	}
+	if !strings.Contains(got.Error(), cause.Error()) {
+		t.Errorf("error = %q, want it to carry the cause", got.Error())
+	}
+	if errLog := readArtifact(t, dir, "must-gather.stderr.log"); !strings.Contains(errLog, cause.Error()) {
+		t.Errorf("the error log does not record the cause:\n%s", errLog)
+	}
+}
+
+// TestDescribeNotFoundIsAPerObjectNote covers a pod that is deleted between
+// the listing and its description. That is one line of the bundle missing, not
+// a reason to call the whole collector failed.
+func TestDescribeNotFoundIsAPerObjectNote(t *testing.T) {
+	clientset := fake.NewSimpleClientset(twoNodeCluster()...)
+	clientset.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		get, ok := action.(k8stesting.GetAction)
+		if !ok || get.GetName() != "plugin-2" {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "plugin-2")
+	})
+
+	dir, _, err := runGatherWith(t, &Options{}, clientset)
+	if err != nil {
+		t.Fatalf("Run returned %v, want a pod that went away not to fail its collector", err)
+	}
+
+	m := readManifest(t, dir)
+	if got := m.statusOf(t, "pod-descriptions"); got != StatusOK {
+		t.Errorf("pod-descriptions status = %q, want %q", got, StatusOK)
+	}
+	if errLog := readArtifact(t, dir, "must-gather.stderr.log"); !strings.Contains(errLog, "plugin-2") {
+		t.Errorf("the error log does not note the pod that went away:\n%s", errLog)
+	}
+}
+
+// TestNVIDIADriversAcrossNamespaces covers the "-A" the script uses. A cluster
+// can run an NVIDIADriver per namespace, and a collector that got only one of
+// them writes a file that looks complete and is not.
+func TestNVIDIADriversAcrossNamespaces(t *testing.T) {
+	g, dir := newCustomResourceGatherer(t,
+		unstructuredOf("nvidia.com/v1alpha1", "NVIDIADriver", "gpu-operator", "driver-a"),
+		unstructuredOf("nvidia.com/v1alpha1", "NVIDIADriver", "nvidia-gpu-operator", "driver-b"))
+
+	mustRunCollector(t, g, "nvidia-drivers")
+
+	data := readArtifact(t, dir, "nvidia_driver.yaml")
+	var list struct {
+		Items []struct {
+			Metadata struct {
+				Name      string `json:"name"`
+				Namespace string `json:"namespace"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+	if err := yaml.Unmarshal([]byte(data), &list); err != nil {
+		t.Fatalf("nvidia_driver.yaml does not parse: %v\n%s", err, data)
+	}
+
+	got := make([]string, 0, len(list.Items))
+	for _, item := range list.Items {
+		got = append(got, item.Metadata.Namespace+"/"+item.Metadata.Name)
+	}
+	sort.Strings(got)
+	want := "gpu-operator/driver-a,nvidia-gpu-operator/driver-b"
+	if strings.Join(got, ",") != want {
+		t.Errorf("nvidia_driver.yaml lists %v, want both namespaces (%s)", got, want)
+	}
+}
+
+// TestForbiddenCustomResourceMarkerSaysForbidden is the difference between
+// "the operator is not installed" and "you may not read its configuration".
+// They have different owners, and a marker that says the wrong one sends a
+// support engineer to the wrong person.
+func TestForbiddenCustomResourceMarkerSaysForbidden(t *testing.T) {
+	cases := map[string]struct {
+		resource string
+		marker   string
+	}{
+		"cluster policy": {resource: "clusterpolicies", marker: "cluster_policy.missing"},
+		"nvidia driver":  {resource: "nvidiadrivers", marker: "nvidia_driver.missing"},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			g, dir := newCustomResourceGatherer(t)
+			g.dynClient.(*dynamicfake.FakeDynamicClient).PrependReactor("list", c.resource,
+				failWith(apierrors.NewForbidden(
+					schema.GroupResource{Group: "nvidia.com", Resource: c.resource}, "", errors.New("nope"))))
+
+			collector := "cluster-policy"
+			if c.resource == "nvidiadrivers" {
+				collector = "nvidia-drivers"
+			}
+			mustRunCollector(t, g, collector)
+
+			if got := strings.TrimSpace(readArtifact(t, dir, c.marker)); got != "forbidden" {
+				t.Errorf("%s = %q, want exactly %q", c.marker, got, "forbidden")
+			}
+		})
+	}
+}
+
+// TestAllDriverPodsUnreachableIsSkipped covers a cluster whose driver pods are
+// all there and none of them can be asked: every one is pending or not running.
+// Reporting that as a clean run with nothing to show reads as "this cluster has
+// no driver", which is a different cluster.
+func TestAllDriverPodsUnreachableIsSkipped(t *testing.T) {
+	pending := driverPodWith("driver-a", "", map[string]string{"app": "nvidia-driver-daemonset"})
+	pending.Status.Phase = v1.PodPending
+	failed := driverPodWith("driver-b", "node-b", map[string]string{"app": "nvidia-driver-daemonset"})
+	failed.Status.Phase = v1.PodFailed
+
+	g, _ := newTestGatherer(t, pending, failed)
+
+	var skipped errSkipped
+	err := g.gatherBugReportFromDaemonSet(&gatherState{operatorNamespace: "gpu-operator", prepared: true})
+	if !errors.As(err, &skipped) {
+		t.Fatalf("the bug report collector returned %v, want it recorded as skipped", err)
+	}
+	if skipped.reason != "no driver pod could be reached" {
+		t.Errorf("skip reason = %q, want %q", skipped.reason, "no driver pod could be reached")
+	}
+}
+
+// runGatherWithCustomResources runs a whole gather over a cluster that also
+// holds custom resources, which the plain helper's dynamic client has none of.
+func runGatherWithCustomResources(t *testing.T, opts *Options,
+	objects []runtime.Object, customResources ...runtime.Object) (string, []string, error) {
+	t.Helper()
+
+	opts.ArtifactDir = filepath.Join(t.TempDir(), "artifacts")
+	if opts.FetchPodFile == nil {
+		opts.FetchPodFile = func(_ context.Context, pod *v1.Pod, destPath string) error {
+			return os.WriteFile(destPath, []byte(pod.Spec.NodeName), 0o600)
+		}
+	}
+
+	err := Run(opts, stubFactory{
+		clientset: fake.NewSimpleClientset(objects...),
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds(), customResources...),
+		config: offlineConfig(),
+	}, discardProgress{})
+
+	entries, rerr := os.ReadDir(opts.ArtifactDir)
+	if rerr != nil {
+		t.Fatalf("reading the bundle: %v", rerr)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+
+	return opts.ArtifactDir, names, err
 }

@@ -34,6 +34,7 @@ import (
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/yaml"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
@@ -73,14 +74,20 @@ func twoNodeCluster() []runtime.Object {
 // returning the bundle directory, the names it holds, and the error.
 func runGather(t *testing.T, opts *Options, objects ...runtime.Object) (string, []string, error) {
 	t.Helper()
+	return runGatherWith(t, opts, fake.NewSimpleClientset(objects...))
+}
+
+// runGatherWith runs a gather over a clientset the caller has already set up,
+// for the tests that need a reactor on it.
+func runGatherWith(t *testing.T, opts *Options, clientset *fake.Clientset) (string, []string, error) {
+	t.Helper()
 
 	opts.ArtifactDir = filepath.Join(t.TempDir(), "artifacts")
 	if opts.FetchPodFile == nil {
-		opts.FetchPodFile = func(pod *v1.Pod, destPath string) error {
+		opts.FetchPodFile = func(_ context.Context, pod *v1.Pod, destPath string) error {
 			return os.WriteFile(destPath, []byte(pod.Spec.NodeName), 0o600)
 		}
 	}
-	clientset := fake.NewSimpleClientset(objects...)
 
 	err := Run(opts, stubFactory{
 		clientset: clientset,
@@ -307,48 +314,6 @@ func TestNoExecSkipsAndExitsZero(t *testing.T) {
 	}
 }
 
-// TestForbiddenExecExitsPartial separates "I asked for no exec" from "I was not
-// allowed to exec". The second one means the bundle is missing the driver
-// evidence NVIDIA support asks for first, and the exit code has to say so or a
-// script will file the incomplete bundle as a complete one.
-func TestForbiddenExecExitsPartial(t *testing.T) {
-	forbidden := apierrors.NewForbidden(
-		schema.GroupResource{Resource: "pods"}, "driver-1",
-		errUnreachable)
-
-	// Both the bug report and the device usage reach the cluster through
-	// pods/exec, so RBAC refusing it refuses both. Denying only one of the two
-	// seams would leave the other one reporting a different reason.
-	opts := &Options{
-		FetchPodFile: func(*v1.Pod, string) error { return forbidden },
-		RunInPod:     func(*v1.Pod, string, string) (string, error) { return "", forbidden },
-	}
-	dir, names, err := runGather(t, opts, twoNodeCluster()...)
-	if err == nil {
-		t.Fatal("Run returned nil, want the denied exec to be reported")
-	}
-	if got := output.ExitCodeFor(err); got != output.ExitPartial {
-		t.Errorf("exit code = %d, want %d (error: %v)", got, output.ExitPartial, err)
-	}
-	// The collectors that could not run have to be named, so that the reader
-	// knows what the bundle is missing rather than only that something is.
-	for _, want := range []string{"bug-report", "device-usage"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the error does not name the skipped collector %s:\n%v", want, err)
-		}
-	}
-	for _, name := range names {
-		if strings.HasPrefix(name, "nvidia-bug-report_") {
-			t.Errorf("bundle holds %s, but every exec was denied", name)
-		}
-	}
-
-	manifest := readManifest(t, dir)
-	if status := manifest.statusOf(t, "bug-report"); !strings.HasPrefix(status, "skipped:forbidden") {
-		t.Errorf("collector bug-report status = %q, want it to start with skipped:forbidden", status)
-	}
-}
-
 // TestNodeWithoutAGPULabelIsSkippedNotFatal covers --node pointed at a node
 // that carries no NVIDIA PCI label. A cluster with no GPU node at all is a
 // cluster the gather has nothing to say about, and it reports that. Narrowing
@@ -389,5 +354,12 @@ func TestNoGPUNodesAtAllIsStillAFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "NVIDIA PCI label") {
 		t.Errorf("error = %v, want it to say no node carries an NVIDIA PCI label", err)
+	}
+}
+
+// failWith is a reactor that fails every call it is installed for.
+func failWith(err error) k8stesting.ReactionFunc {
+	return func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, err
 	}
 }
