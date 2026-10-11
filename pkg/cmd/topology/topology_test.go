@@ -141,7 +141,12 @@ func run(t *testing.T, args []string, objects ...runtime.Object) (string, error)
 	c.SilenceUsage = true
 	c.SilenceErrors = true
 
-	return out.String(), c.Execute()
+	// The command is executed before the buffer is read: the two are written
+	// in one return statement at the reader's peril, because Go evaluates the
+	// arguments left to right and would hand back an empty string.
+	err := c.Execute()
+
+	return out.String(), err
 }
 
 // decode reads the JSON report the command printed.

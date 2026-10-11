@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -47,6 +48,24 @@ func newKueueFake(t *testing.T, objects ...runtime.Object) *dynamicfake.FakeDyna
 	return dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), kinds, objects...)
 }
 
+// kueueServer returns a clientset whose discovery announces the Kueue
+// resources at the given versions, which is how a cluster says which versions
+// of the CRD it serves.
+func kueueServer(versions ...string) *fake.Clientset {
+	cs := fake.NewSimpleClientset()
+	for _, version := range versions {
+		cs.Resources = append(cs.Resources, &metav1.APIResourceList{
+			GroupVersion: kueueGroup + "/" + version,
+			APIResources: []metav1.APIResource{
+				{Name: "topologies", Kind: "Topology", Namespaced: false},
+				{Name: "resourceflavors", Kind: "ResourceFlavor", Namespaced: false},
+			},
+		})
+	}
+
+	return cs
+}
+
 // kueueObject builds one Kueue object at the given version.
 func kueueObject(version, kind, name string, spec map[string]any) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
@@ -57,22 +76,6 @@ func kueueObject(version, kind, name string, spec map[string]any) *unstructured.
 	}}
 }
 
-// notFoundOn makes the fake answer NotFound for one resource, which is what a
-// cluster serving a different version of the CRD does.
-func notFoundOn(dyn *dynamicfake.FakeDynamicClient, resource string, versions ...string) {
-	served := make(map[string]bool, len(versions))
-	for _, v := range versions {
-		served[v] = true
-	}
-
-	dyn.PrependReactor("list", resource, func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if served[action.GetResource().Version] {
-			return false, nil, nil
-		}
-		return true, nil, apierrors.NewNotFound(schema.GroupResource{Group: kueueGroup, Resource: resource}, "")
-	})
-}
-
 // TestLiveTopologiesReadsTheStorageVersion covers the common cluster: Kueue
 // at v0.18 or newer, where v1beta2 is the storage version.
 func TestLiveTopologiesReadsTheStorageVersion(t *testing.T) {
@@ -80,7 +83,7 @@ func TestLiveTopologiesReadsTheStorageVersion(t *testing.T) {
 		"levels": []any{map[string]any{"nodeLabel": "kubernetes.io/hostname"}},
 	}))
 
-	got, err := NewLive(fake.NewSimpleClientset(), dyn).Topologies(context.Background())
+	got, err := NewLive(kueueServer("v1beta2", "v1beta1"), dyn).Topologies(context.Background())
 	if err != nil {
 		t.Fatalf("Topologies() error = %v, want nil", err)
 	}
@@ -97,9 +100,8 @@ func TestLiveTopologiesFallsBackToTheOlderServedVersion(t *testing.T) {
 	dyn := newKueueFake(t, kueueObject("v1beta1", "Topology", "legacy", map[string]any{
 		"levels": []any{map[string]any{"nodeLabel": "kubernetes.io/hostname"}},
 	}))
-	notFoundOn(dyn, "topologies", "v1beta1")
 
-	got, err := NewLive(fake.NewSimpleClientset(), dyn).Topologies(context.Background())
+	got, err := NewLive(kueueServer("v1beta1"), dyn).Topologies(context.Background())
 	if err != nil {
 		t.Fatalf("Topologies() error = %v, want nil", err)
 	}
@@ -112,10 +114,7 @@ func TestLiveTopologiesFallsBackToTheOlderServedVersion(t *testing.T) {
 // serves neither version, which is an answer the command reports rather than
 // a failure that ends the run.
 func TestLiveTopologiesNotFoundMeansKueueIsNotInstalled(t *testing.T) {
-	dyn := newKueueFake(t)
-	notFoundOn(dyn, "topologies")
-
-	got, err := NewLive(fake.NewSimpleClientset(), dyn).Topologies(context.Background())
+	got, err := NewLive(kueueServer(), newKueueFake(t)).Topologies(context.Background())
 	if !errors.Is(err, ErrKueueNotInstalled) {
 		t.Fatalf("Topologies() error = %v, want it to match ErrKueueNotInstalled", err)
 	}
@@ -129,6 +128,22 @@ func TestLiveTopologiesNotFoundMeansKueueIsNotInstalled(t *testing.T) {
 	}
 }
 
+// TestLiveTopologiesVersionWithoutTheResourceIsSkipped: a cluster can serve
+// the group at a version that does not carry this resource, which is what a
+// Kueue old enough to predate topology aware scheduling looks like.
+func TestLiveTopologiesVersionWithoutTheResourceIsSkipped(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.Resources = []*metav1.APIResourceList{{
+		GroupVersion: kueueGroup + "/v1beta1",
+		APIResources: []metav1.APIResource{{Name: "clusterqueues", Kind: "ClusterQueue"}},
+	}}
+
+	_, err := NewLive(cs, newKueueFake(t)).Topologies(context.Background())
+	if !errors.Is(err, ErrKueueNotInstalled) {
+		t.Fatalf("Topologies() error = %v, want it to match ErrKueueNotInstalled", err)
+	}
+}
+
 // TestLiveTopologiesForbiddenIsPartial: the run saw the rest of the cluster,
 // so the answer is incomplete rather than impossible, and exit 3 says so.
 func TestLiveTopologiesForbiddenIsPartial(t *testing.T) {
@@ -138,7 +153,7 @@ func TestLiveTopologiesForbiddenIsPartial(t *testing.T) {
 			schema.GroupResource{Group: kueueGroup, Resource: "topologies"}, "", errors.New("denied"))
 	})
 
-	_, err := NewLive(fake.NewSimpleClientset(), dyn).Topologies(context.Background())
+	_, err := NewLive(kueueServer("v1beta2"), dyn).Topologies(context.Background())
 
 	var pe *PartialError
 	if !errors.As(err, &pe) {
@@ -152,7 +167,40 @@ func TestLiveTopologiesForbiddenIsPartial(t *testing.T) {
 	}
 }
 
-// TestLiveResourceFlavorsReadsBothServedVersions runs the same two cases
+// TestLiveTopologiesDeniedDiscoveryIsPartial: a cluster that will not say
+// which APIs it serves has not been read, but the rest of the run has.
+func TestLiveTopologiesDeniedDiscoveryIsPartial(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	cs.PrependReactor("get", "resource", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: kueueGroup, Resource: "topologies"}, "", errors.New("denied"))
+	})
+
+	_, err := NewLive(cs, newKueueFake(t)).Topologies(context.Background())
+
+	var pe *PartialError
+	if !errors.As(err, &pe) {
+		t.Fatalf("Topologies() error = %v (%T), want a PartialError", err, err)
+	}
+}
+
+// TestLiveTopologiesListNotFoundFallsThrough: the CRD can be deleted between
+// the discovery read and the list, and a cluster that answers NotFound to the
+// list is a cluster without the resource, not a broken run.
+func TestLiveTopologiesListNotFoundFallsThrough(t *testing.T) {
+	dyn := newKueueFake(t)
+	dyn.PrependReactor("list", "topologies", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: kueueGroup, Resource: "topologies"}, "")
+	})
+
+	_, err := NewLive(kueueServer("v1beta2", "v1beta1"), dyn).Topologies(context.Background())
+	if !errors.Is(err, ErrKueueNotInstalled) {
+		t.Fatalf("Topologies() error = %v, want it to match ErrKueueNotInstalled", err)
+	}
+}
+
+// TestLiveResourceFlavorsReadsBothServedVersions runs the same version choice
 // against the flavors, which is the other half of the TAS read.
 func TestLiveResourceFlavorsReadsBothServedVersions(t *testing.T) {
 	for _, version := range []string{"v1beta2", "v1beta1"} {
@@ -160,9 +208,8 @@ func TestLiveResourceFlavorsReadsBothServedVersions(t *testing.T) {
 			dyn := newKueueFake(t, kueueObject(version, "ResourceFlavor", "tas-gpu", map[string]any{
 				"topologyName": "default",
 			}))
-			notFoundOn(dyn, "resourceflavors", version)
 
-			got, err := NewLive(fake.NewSimpleClientset(), dyn).ResourceFlavors(context.Background())
+			got, err := NewLive(kueueServer(version), dyn).ResourceFlavors(context.Background())
 			if err != nil {
 				t.Fatalf("ResourceFlavors() error = %v, want nil", err)
 			}
@@ -181,7 +228,7 @@ func TestLiveResourceFlavorsForbiddenIsPartial(t *testing.T) {
 			schema.GroupResource{Group: kueueGroup, Resource: "resourceflavors"}, "", errors.New("denied"))
 	})
 
-	_, err := NewLive(fake.NewSimpleClientset(), dyn).ResourceFlavors(context.Background())
+	_, err := NewLive(kueueServer("v1beta2"), dyn).ResourceFlavors(context.Background())
 
 	var pe *PartialError
 	if !errors.As(err, &pe) {
