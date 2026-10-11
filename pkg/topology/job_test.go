@@ -40,8 +40,8 @@ func gpus(n int64) corev1.ResourceList {
 }
 
 // job builds a batch/v1 Job with the given parallelism and per-container GPU
-// requests.
-func job(parallelism *int32, containers, initContainers []int64) *batchv1.Job {
+// requests. A nil completions leaves the field unset.
+func job(parallelism, completions *int32, containers, initContainers []int64) *batchv1.Job {
 	spec := corev1.PodSpec{}
 	for _, n := range containers {
 		spec.Containers = append(spec.Containers, corev1.Container{
@@ -58,8 +58,26 @@ func job(parallelism *int32, containers, initContainers []int64) *batchv1.Job {
 
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: "trainer", Namespace: "research"},
-		Spec:       batchv1.JobSpec{Parallelism: parallelism, Template: corev1.PodTemplateSpec{Spec: spec}},
+		Spec: batchv1.JobSpec{
+			Parallelism: parallelism,
+			Completions: completions,
+			Template:    corev1.PodTemplateSpec{Spec: spec},
+		},
 	}
+}
+
+// sidecar appends a native sidecar: an init container whose restart policy is
+// Always, which runs alongside the ordinary containers rather than before
+// them, and whose GPUs are therefore held at the same time as theirs.
+func sidecar(j *batchv1.Job, n int64) *batchv1.Job {
+	always := corev1.ContainerRestartPolicyAlways
+	j.Spec.Template.Spec.InitContainers = append(j.Spec.Template.Spec.InitContainers, corev1.Container{
+		Name:          "sidecar",
+		RestartPolicy: &always,
+		Resources:     corev1.ResourceRequirements{Requests: gpus(n), Limits: gpus(n)},
+	})
+
+	return j
 }
 
 func int32Ptr(n int32) *int32 { return &n }
@@ -69,7 +87,7 @@ func int32Ptr(n int32) *int32 { return &n }
 func TestJobRequestSumsTheContainers(t *testing.T) {
 	t.Parallel()
 
-	got, err := topology.JobRequestFrom(job(int32Ptr(3), []int64{2, 1}, nil))
+	got, err := topology.JobRequestFrom(job(int32Ptr(3), nil, []int64{2, 1}, nil))
 	if err != nil {
 		t.Fatalf("reading the job: %v", err)
 	}
@@ -91,7 +109,7 @@ func TestJobRequestSumsTheContainers(t *testing.T) {
 func TestJobRequestTakesTheLargestInitContainerWhenItWins(t *testing.T) {
 	t.Parallel()
 
-	got, err := topology.JobRequestFrom(job(nil, []int64{1}, []int64{4, 2}))
+	got, err := topology.JobRequestFrom(job(nil, nil, []int64{1}, []int64{4, 2}))
 	if err != nil {
 		t.Fatalf("reading the job: %v", err)
 	}
@@ -106,7 +124,7 @@ func TestJobRequestTakesTheLargestInitContainerWhenItWins(t *testing.T) {
 func TestJobRequestKeepsTheContainerSumWhenItWins(t *testing.T) {
 	t.Parallel()
 
-	got, err := topology.JobRequestFrom(job(nil, []int64{3, 3}, []int64{4}))
+	got, err := topology.JobRequestFrom(job(nil, nil, []int64{3, 3}, []int64{4}))
 	if err != nil {
 		t.Fatalf("reading the job: %v", err)
 	}
@@ -121,7 +139,7 @@ func TestJobRequestKeepsTheContainerSumWhenItWins(t *testing.T) {
 func TestJobRequestDefaultsParallelismToOne(t *testing.T) {
 	t.Parallel()
 
-	got, err := topology.JobRequestFrom(job(nil, []int64{1}, nil))
+	got, err := topology.JobRequestFrom(job(nil, nil, []int64{1}, nil))
 	if err != nil {
 		t.Fatalf("reading the job: %v", err)
 	}
@@ -137,7 +155,7 @@ func TestJobRequestDefaultsParallelismToOne(t *testing.T) {
 func TestJobRequestRejectsAJobWithoutGPUs(t *testing.T) {
 	t.Parallel()
 
-	_, err := topology.JobRequestFrom(job(int32Ptr(2), []int64{0}, nil))
+	_, err := topology.JobRequestFrom(job(int32Ptr(2), nil, []int64{0}, nil))
 	if err == nil {
 		t.Fatal("a job asking for no GPUs was accepted")
 	}
@@ -157,7 +175,7 @@ func TestJobRequestRejectsAJobWithoutGPUs(t *testing.T) {
 func TestJobRequestRejectsParallelismZero(t *testing.T) {
 	t.Parallel()
 
-	_, err := topology.JobRequestFrom(job(int32Ptr(0), []int64{1}, nil))
+	_, err := topology.JobRequestFrom(job(int32Ptr(0), nil, []int64{1}, nil))
 
 	var usage *output.UsageError
 	if !errors.As(err, &usage) {
@@ -197,5 +215,141 @@ func TestParseForTargetRejectsAnythingElse(t *testing.T) {
 				t.Fatalf("--for %q gave %v, want an output.UsageError", value, err)
 			}
 		})
+	}
+}
+
+// TestJobRequestCountsANativeSidecar: an init container whose restart policy
+// is Always is a native sidecar, which runs alongside the ordinary containers
+// instead of before them. The scheduler adds its resources to theirs, so a
+// 4-GPU trainer with a 1-GPU sidecar needs a node with five free, and an
+// implementation that takes the larger of the two would place it on a node
+// with four and watch it sit Pending.
+func TestJobRequestCountsANativeSidecar(t *testing.T) {
+	t.Parallel()
+
+	got, err := topology.JobRequestFrom(sidecar(job(nil, nil, []int64{4}, nil), 1))
+	if err != nil {
+		t.Fatalf("reading the job: %v", err)
+	}
+
+	if got.GPUsPerPod != 5 {
+		t.Errorf("GPUs per pod is %d, want 5: a native sidecar holds its GPUs at the same time as the containers", got.GPUsPerPod)
+	}
+}
+
+// TestJobRequestCountsASidecarUnderAPlainInitContainer is the rule's other
+// half, from the upstream formula: a plain init container runs after the
+// sidecars have started, so what it needs is its own request plus theirs.
+// Here that is 2 + 1 = 3, which is less than the 4 + 1 the containers and the
+// sidecar need together, so the containers still decide.
+func TestJobRequestCountsASidecarUnderAPlainInitContainer(t *testing.T) {
+	t.Parallel()
+
+	got, err := topology.JobRequestFrom(sidecar(job(nil, nil, []int64{4}, []int64{2}), 1))
+	if err != nil {
+		t.Fatalf("reading the job: %v", err)
+	}
+
+	if got.GPUsPerPod != 5 {
+		t.Errorf("GPUs per pod is %d, want 5", got.GPUsPerPod)
+	}
+}
+
+// TestJobRequestReadsTheLimitWhenThereIsNoRequest: a Job's pod template is
+// stored as written and the defaulting that copies limits into requests
+// happens when the pod is created, so a template with limits and no requests
+// is ordinary and asks for exactly those GPUs.
+func TestJobRequestReadsTheLimitWhenThereIsNoRequest(t *testing.T) {
+	t.Parallel()
+
+	j := job(nil, nil, []int64{4}, nil)
+	j.Spec.Template.Spec.Containers[0].Resources.Requests = nil
+
+	got, err := topology.JobRequestFrom(j)
+	if err != nil {
+		t.Fatalf("reading the job: %v", err)
+	}
+
+	if got.GPUsPerPod != 4 {
+		t.Errorf("GPUs per pod is %d, want 4: the limit is what the pod will ask for", got.GPUsPerPod)
+	}
+}
+
+// TestJobRequestTakesCompletionsWhenItIsSmaller pins the pod count Kueue
+// computes: parallelism, capped by completions when that is set, because a
+// job that only has two pods left to complete never runs eight at once.
+func TestJobRequestTakesCompletionsWhenItIsSmaller(t *testing.T) {
+	t.Parallel()
+
+	got, err := topology.JobRequestFrom(job(int32Ptr(8), int32Ptr(2), []int64{1}, nil))
+	if err != nil {
+		t.Fatalf("reading the job: %v", err)
+	}
+
+	if got.Pods != 2 {
+		t.Errorf("pods is %d, want 2: completions caps parallelism", got.Pods)
+	}
+}
+
+// TestJobRequestKeepsParallelismWhenCompletionsIsLarger is the other
+// direction: twenty pods to complete, eight at a time, needs room for eight.
+func TestJobRequestKeepsParallelismWhenCompletionsIsLarger(t *testing.T) {
+	t.Parallel()
+
+	got, err := topology.JobRequestFrom(job(int32Ptr(8), int32Ptr(20), []int64{1}, nil))
+	if err != nil {
+		t.Fatalf("reading the job: %v", err)
+	}
+
+	if got.Pods != 8 {
+		t.Errorf("pods is %d, want 8", got.Pods)
+	}
+}
+
+// TestJobWithoutGPUsNamesItselfAndTheResource pins the message, not just the
+// type: it is what the user reads when the command exits 2, and a message
+// that does not name the job leaves them guessing which of their jobs it
+// means.
+func TestJobWithoutGPUsNamesItselfAndTheResource(t *testing.T) {
+	t.Parallel()
+
+	_, err := topology.JobRequestFrom(job(int32Ptr(2), nil, []int64{0}, nil))
+	if err == nil {
+		t.Fatal("a job asking for no GPUs was accepted")
+	}
+
+	want := `job research/trainer requests no nvidia.com/gpu: there is no GPU topology answer to give about it`
+	if err.Error() != want {
+		t.Errorf("the error is\n  %q\nwant\n  %q", err.Error(), want)
+	}
+}
+
+// TestJobWithNoPodsNamesItself pins the other exit-2 message.
+func TestJobWithNoPodsNamesItself(t *testing.T) {
+	t.Parallel()
+
+	_, err := topology.JobRequestFrom(job(int32Ptr(0), nil, []int64{1}, nil))
+	if err == nil {
+		t.Fatal("a job running no pods was accepted")
+	}
+
+	want := `job research/trainer runs 0 pods: there is no placement to answer about`
+	if err.Error() != want {
+		t.Errorf("the error is\n  %q\nwant\n  %q", err.Error(), want)
+	}
+}
+
+// TestParseForTargetNamesWhatItWanted pins the --for message.
+func TestParseForTargetNamesWhatItWanted(t *testing.T) {
+	t.Parallel()
+
+	_, err := topology.ParseForTarget("pod/trainer")
+	if err == nil {
+		t.Fatal("--for pod/trainer was accepted")
+	}
+
+	want := `cannot read --for "pod/trainer": want job/<name>, for instance --for job/trainer`
+	if err.Error() != want {
+		t.Errorf("the error is\n  %q\nwant\n  %q", err.Error(), want)
 	}
 }

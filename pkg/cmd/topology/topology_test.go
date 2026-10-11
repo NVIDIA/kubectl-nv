@@ -25,8 +25,10 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -36,11 +38,15 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	cmdtopology "github.com/NVIDIA/kubectl-nv/pkg/cmd/topology"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
+
+// kueueGroup is the API group of Kueue's own resources.
+const kueueGroup = "kueue.x-k8s.io"
 
 // fakeFactory hands the command fake clients instead of real ones.
 type fakeFactory struct {
@@ -110,6 +116,19 @@ func gpuJob(name string, parallelism int32, count int64) *batchv1.Job {
 func run(t *testing.T, args []string, objects ...runtime.Object) (string, error) {
 	t.Helper()
 
+	return runWith(t, args, nil, objects...)
+}
+
+// runWith is the same with a hook that can install reactors or discovery on
+// the fakes before the command runs.
+func runWith(
+	t *testing.T,
+	args []string,
+	setup func(*fake.Clientset, *dynamicfake.FakeDynamicClient),
+	objects ...runtime.Object,
+) (string, error) {
+	t.Helper()
+
 	out := &bytes.Buffer{}
 	streams := genericiooptions.IOStreams{In: &bytes.Buffer{}, Out: out, ErrOut: &bytes.Buffer{}}
 
@@ -117,21 +136,22 @@ func run(t *testing.T, args []string, objects ...runtime.Object) (string, error)
 	configFlags := genericclioptions.NewConfigFlags(true)
 	configFlags.Namespace = &namespace
 
+	kinds := map[schema.GroupVersionResource]string{}
+	for _, version := range []string{"v1beta2", "v1beta1", "v1alpha1"} {
+		kinds[schema.GroupVersionResource{Group: kueueGroup, Version: version, Resource: "topologies"}] = "TopologyList"
+		kinds[schema.GroupVersionResource{Group: kueueGroup, Version: version, Resource: "resourceflavors"}] = "ResourceFlavorList"
+	}
+
+	clientset := fake.NewSimpleClientset(objects...)
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), kinds)
+	if setup != nil {
+		setup(clientset, dyn)
+	}
+
 	o := &cmd.Options{
 		ConfigFlags: configFlags,
 		Streams:     streams,
-		Factory: &fakeFactory{
-			clientset: fake.NewSimpleClientset(objects...),
-			dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-				runtime.NewScheme(),
-				map[schema.GroupVersionResource]string{
-					{Group: "kueue.x-k8s.io", Version: "v1beta2", Resource: "topologies"}:      "TopologyList",
-					{Group: "kueue.x-k8s.io", Version: "v1beta2", Resource: "resourceflavors"}: "ResourceFlavorList",
-					{Group: "kueue.x-k8s.io", Version: "v1beta1", Resource: "topologies"}:      "TopologyList",
-					{Group: "kueue.x-k8s.io", Version: "v1beta1", Resource: "resourceflavors"}: "ResourceFlavorList",
-				},
-			),
-		},
+		Factory:     &fakeFactory{clientset: clientset, dynamic: dyn},
 	}
 
 	c := cmdtopology.NewCommand(o)
@@ -263,8 +283,10 @@ func TestTopologyExitsTwoForAMissingJob(t *testing.T) {
 	if !errors.As(err, &usage) {
 		t.Fatalf("error is %T (%v), want an output.UsageError so the command exits 2", err, err)
 	}
-	if !strings.Contains(err.Error(), "absent") {
-		t.Errorf("the error is %q, want it to name the job", err)
+
+	want := `no job "absent" in namespace "research"`
+	if err.Error() != want {
+		t.Errorf("the error is\n  %q\nwant\n  %q", err.Error(), want)
 	}
 }
 
@@ -299,9 +321,54 @@ func TestTopologyPrintsATable(t *testing.T) {
 		t.Fatalf("topology: %v", err)
 	}
 
-	for _, want := range []string{"LEVEL", "GROUP", "NODES", "FREE", "clique", "clique-a"} {
-		if !strings.Contains(raw, want) {
-			t.Errorf("the table does not carry %q:\n%s", want, raw)
+	lines := strings.Split(raw, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("the table has no rows:\n%s", raw)
+	}
+
+	header := strings.Fields(lines[0])
+	want := []string{"LEVEL", "GROUP", "NODES", "ALLOCATABLE", "REQUESTED", "FREE", "LARGEST-FREE"}
+	if len(header) != len(want) {
+		t.Fatalf("the header is %v, want %v", header, want)
+	}
+	for i := range want {
+		if header[i] != want[i] {
+			t.Errorf("column %d is %q, want %q", i, header[i], want[i])
+		}
+	}
+
+	for _, name := range []string{"clique", "clique-a", "node-a", "cluster"} {
+		if !strings.Contains(raw, name) {
+			t.Errorf("the table does not carry %q:\n%s", name, raw)
+		}
+	}
+}
+
+// TestTopologyMarksTheSmallestLevelInTheTable: the answer to --for is one
+// level out of several, and a reader scanning a long table should not have to
+// remember the level order to find it.
+func TestTopologyMarksTheSmallestLevelInTheTable(t *testing.T) {
+	raw, err := run(t, []string{"--for", "job/trainer"},
+		gpuNode("node-a", "clique-a", 4),
+		gpuNode("node-b", "clique-a", 4),
+		gpuJob("trainer", 2, 4),
+	)
+	if err != nil {
+		t.Fatalf("topology --for job/trainer: %v", err)
+	}
+
+	if !strings.Contains(raw, "yes (smallest)") {
+		t.Errorf("no row is marked as the smallest level that fits:\n%s", raw)
+	}
+
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "clique" {
+			continue
+		}
+		if !strings.HasSuffix(line, "yes (smallest)") {
+			t.Errorf("the clique row is %q, want it marked as the smallest level: two pods of four fit in one clique\n%s",
+				line, raw)
 		}
 	}
 }
@@ -314,5 +381,196 @@ func TestTopologyRejectsAnUnknownOutputFormat(t *testing.T) {
 	var usage *output.UsageError
 	if !errors.As(err, &usage) {
 		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+}
+
+// kueueDiscovery announces the Kueue resources at v1beta2, which is what a
+// cluster with Kueue installed looks like to a discovery read.
+func kueueDiscovery(cs *fake.Clientset) {
+	cs.Resources = append(cs.Resources, &metav1.APIResourceList{
+		GroupVersion: kueueGroup + "/v1beta2",
+		APIResources: []metav1.APIResource{
+			{Name: "topologies"},
+			{Name: "resourceflavors"},
+		},
+	})
+}
+
+// TestTopologyReportsADeniedKueueReadAsPartial is the RBAC case: the cluster
+// says it serves the Kueue topology API and then refuses the read. The rest
+// of the report is still the answer to most of the question, so it is printed
+// and the run exits 3 rather than 4.
+func TestTopologyReportsADeniedKueueReadAsPartial(t *testing.T) {
+	raw, err := runWith(t, []string{"-o", "json"},
+		func(cs *fake.Clientset, dyn *dynamicfake.FakeDynamicClient) {
+			kueueDiscovery(cs)
+			dyn.PrependReactor("list", "topologies", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Group: kueueGroup, Resource: "topologies"}, "", errors.New("denied"))
+			})
+		},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if err == nil {
+		t.Fatal("a denied Kueue read exited 0")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Fatalf("exit code is %d, want %d (%v)", got, output.ExitPartial, err)
+	}
+
+	report := decode(t, raw)
+
+	levels, _ := report["levels"].([]any)
+	if len(levels) == 0 {
+		t.Errorf("the report carries no levels: the node labels were readable\n%s", raw)
+	}
+
+	// Kueue is installed: discovery said so before the read was refused.
+	// Reporting installed:false would send the user to install something
+	// they already have.
+	kueue, _ := report["kueue"].(map[string]any)
+	if kueue["installed"] != true {
+		t.Errorf("kueue.installed is %v, want true: discovery answered before the read was denied\n%s",
+			kueue["installed"], raw)
+	}
+	if reason, _ := kueue["reason"].(string); reason == "" {
+		t.Errorf("kueue gives no reason why its levels are missing\n%s", raw)
+	}
+
+	status, _ := report["status"].(map[string]any)
+	if status["partial"] != true {
+		t.Errorf("status.partial is %v, want true\n%s", status["partial"], raw)
+	}
+
+	unreachable, _ := status["unreachable"].([]any)
+	if len(unreachable) != 1 {
+		t.Fatalf("status.unreachable holds %d entries, want exactly 1\n%s", len(unreachable), raw)
+	}
+
+	entry, _ := unreachable[0].(map[string]any)
+	if entry["resource"] != "topologies" {
+		t.Errorf("the unreachable entry names %v, want topologies\n%s", entry["resource"], raw)
+	}
+	if reason, _ := entry["reason"].(string); !strings.Contains(reason, "forbidden") {
+		t.Errorf("the unreachable reason is %q, want it to say the read was forbidden\n%s", reason, raw)
+	}
+}
+
+// TestTopologyReportsAMalformedTopology: one broken Topology object must not
+// cost the user the whole report, and the reason says which one it was.
+func TestTopologyReportsAMalformedTopology(t *testing.T) {
+	broken := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kueueGroup + "/v1beta2",
+		"kind":       "Topology",
+		"metadata":   map[string]any{"name": "broken"},
+		"spec":       map[string]any{"levels": "not-a-list"},
+	}}
+	flavor := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": kueueGroup + "/v1beta2",
+		"kind":       "ResourceFlavor",
+		"metadata":   map[string]any{"name": "tas"},
+		"spec":       map[string]any{"topologyName": "broken"},
+	}}
+
+	raw, err := runWith(t, []string{"-o", "json"},
+		func(cs *fake.Clientset, dyn *dynamicfake.FakeDynamicClient) {
+			kueueDiscovery(cs)
+			for _, obj := range []*unstructured.Unstructured{broken, flavor} {
+				if createErr := dyn.Tracker().Add(obj); createErr != nil {
+					t.Fatalf("seeding %s: %v", obj.GetName(), createErr)
+				}
+			}
+		},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if err != nil {
+		t.Fatalf("topology: %v", err)
+	}
+
+	kueue, _ := decode(t, raw)["kueue"].(map[string]any)
+	if kueue["installed"] != true {
+		t.Errorf("kueue.installed is %v, want true\n%s", kueue["installed"], raw)
+	}
+
+	reason, _ := kueue["reason"].(string)
+	if !strings.Contains(reason, "broken") {
+		t.Errorf("kueue.reason is %q, want it to name the Topology it could not read\n%s", reason, raw)
+	}
+}
+
+// TestTopologyKeepsTheReportWhenTheJobReadIsDenied: the fit is the part that
+// could not be answered, and the levels are the part that could.
+func TestTopologyKeepsTheReportWhenTheJobReadIsDenied(t *testing.T) {
+	raw, err := runWith(t, []string{"-o", "json", "--for", "job/trainer"},
+		func(cs *fake.Clientset, _ *dynamicfake.FakeDynamicClient) {
+			cs.PrependReactor("get", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Group: "batch", Resource: "jobs"}, "trainer", errors.New("denied"))
+			})
+		},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Fatalf("exit code is %d, want %d (%v)", got, output.ExitPartial, err)
+	}
+
+	report := decode(t, raw)
+	if _, found := report["fit"]; found {
+		t.Errorf("the report carries a fit for a job it could not read\n%s", raw)
+	}
+	if levels, _ := report["levels"].([]any); len(levels) == 0 {
+		t.Errorf("the report carries no levels\n%s", raw)
+	}
+
+	status, _ := report["status"].(map[string]any)
+	unreachable, _ := status["unreachable"].([]any)
+	if len(unreachable) != 1 {
+		t.Fatalf("status.unreachable holds %d entries, want 1\n%s", len(unreachable), raw)
+	}
+	if entry, _ := unreachable[0].(map[string]any); entry["resource"] != "jobs" {
+		t.Errorf("the unreachable entry names %v, want jobs\n%s", entry["resource"], raw)
+	}
+}
+
+// TestTopologyExitsFourWhenTheClusterCannotBeRead: a transport failure means
+// nothing was read, and nothing should be printed as though it were an
+// answer.
+func TestTopologyExitsFourWhenTheClusterCannotBeRead(t *testing.T) {
+	raw, err := runWith(t, []string{"-o", "json"},
+		func(cs *fake.Clientset, _ *dynamicfake.FakeDynamicClient) {
+			cs.PrependReactor("list", "nodes", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("connection refused")
+			})
+		},
+	)
+	if err == nil {
+		t.Fatal("an unreachable cluster exited 0")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitError {
+		t.Errorf("exit code is %d, want %d (%v)", got, output.ExitError, err)
+	}
+	if raw != "" {
+		t.Errorf("a report was printed for a cluster that was never read:\n%s", raw)
+	}
+}
+
+// TestTopologyAnswersWithTheNodeLevelForASinglePod covers the implicit levels
+// end to end: a one-pod job is placed on one node, and the report says so
+// rather than naming the clique that contains it.
+func TestTopologyAnswersWithTheNodeLevelForASinglePod(t *testing.T) {
+	raw, err := run(t, []string{"-o", "json", "--for", "job/trainer"},
+		gpuNode("node-a", "clique-a", 4),
+		gpuJob("trainer", 1, 2),
+	)
+	if err != nil {
+		t.Fatalf("topology --for job/trainer: %v", err)
+	}
+
+	fit, _ := decode(t, raw)["fit"].(map[string]any)
+	if fit == nil {
+		t.Fatalf("the report carries no answer about the job\n%s", raw)
+	}
+	if fit["smallest"] != "node" {
+		t.Errorf("the smallest level that fits is %v, want the node\n%s", fit["smallest"], raw)
 	}
 }

@@ -18,6 +18,7 @@ package topology_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -65,6 +66,30 @@ func TestReportPrintsThroughEveryFormat(t *testing.T) {
 	}
 }
 
+// headerOf returns the table header as fields, so that a column can be
+// matched exactly. Matching on a substring would let LARGEST-FREE stand in
+// for FREE, and a report that lost the FREE column would still pass.
+func headerOf(t *testing.T, printed string) []string {
+	t.Helper()
+
+	lines := strings.Split(printed, "\n")
+	if len(lines) == 0 {
+		t.Fatal("nothing was printed")
+	}
+
+	return strings.Fields(lines[0])
+}
+
+func hasField(fields []string, want string) bool {
+	for _, f := range fields {
+		if f == want {
+			return true
+		}
+	}
+
+	return false
+}
+
 // TestReportTableCarriesTheGroupArithmetic pins the columns a reader sees
 // without -o.
 func TestReportTableCarriesTheGroupArithmetic(t *testing.T) {
@@ -75,16 +100,16 @@ func TestReportTableCarriesTheGroupArithmetic(t *testing.T) {
 	}})
 
 	got := printed(t, "table", report)
+	header := headerOf(t, got)
 
-	for _, want := range []string{"LEVEL", "GROUP", "NODES", "ALLOCATABLE", "REQUESTED", "FREE", "LARGEST-FREE"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("the header has no %q column:\n%s", want, got)
-		}
+	want := []string{"LEVEL", "GROUP", "NODES", "ALLOCATABLE", "REQUESTED", "FREE", "LARGEST-FREE"}
+	if !equalStrings(header, want) {
+		t.Errorf("the header is\n  %v\nwant\n  %v", header, want)
 	}
 	if !strings.Contains(got, "clique-a") {
 		t.Errorf("the table does not name the group:\n%s", got)
 	}
-	if strings.Contains(got, "FITS") {
+	if hasField(header, "FITS") {
 		t.Errorf("the table has a FITS column with no job asked about:\n%s", got)
 	}
 }
@@ -105,8 +130,25 @@ func TestReportTableSaysSoWhenTheRequestedGPUsAreUnknown(t *testing.T) {
 	}
 }
 
+// rowsOf returns the table rows whose first cell is level.
+func rowsOf(t *testing.T, printed, level string) [][]string {
+	t.Helper()
+
+	var out [][]string
+	for _, line := range strings.Split(printed, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == level {
+			out = append(out, fields)
+		}
+	}
+
+	return out
+}
+
 // TestReportTableAnswersTheJobPerGroup: with --for, every row says whether
-// that group takes the job, which is the whole point of asking.
+// that group takes the job, and the rows of the narrowest level that takes it
+// say which one that is. A reader scanning a long table otherwise has to
+// remember the level order to find the answer they asked for.
 func TestReportTableAnswersTheJobPerGroup(t *testing.T) {
 	t.Parallel()
 
@@ -121,17 +163,63 @@ func TestReportTableAnswersTheJobPerGroup(t *testing.T) {
 
 	got := printed(t, "table", report)
 
-	if !strings.Contains(got, "FITS") {
+	if !hasField(headerOf(t, got), "FITS") {
 		t.Fatalf("the table has no FITS column:\n%s", got)
 	}
 
-	for _, line := range strings.Split(got, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || fields[0] != "clique" {
-			continue
+	// Three pods of four fit under the fabric tier and in no clique.
+	for _, row := range rowsOf(t, got, "clique") {
+		if last := row[len(row)-1]; last != "no" {
+			t.Errorf("a clique row says %q, want no:\n%s", last, got)
 		}
-		if fields[len(fields)-1] != "no" {
-			t.Errorf("a clique row says %q, want no: three pods of four do not fit in a clique\n%s", fields[len(fields)-1], got)
+	}
+
+	tier := rowsOf(t, got, "tier-0")
+	if len(tier) == 0 {
+		t.Fatalf("the table has no tier-0 row:\n%s", got)
+	}
+	for _, row := range tier {
+		if last := strings.Join(row[len(row)-2:], " "); last != "yes (smallest)" {
+			t.Errorf("the tier-0 row ends %q, want %q:\n%s", last, "yes (smallest)", got)
+		}
+	}
+
+	// The cluster takes it too, but it is not the answer.
+	for _, row := range rowsOf(t, got, "cluster") {
+		if last := row[len(row)-1]; last != "yes" {
+			t.Errorf("the cluster row says %q, want a plain yes:\n%s", last, got)
+		}
+	}
+}
+
+// TestLevelFitMarshalsWithoutNullGroups covers the never-null guarantee on
+// the one type a caller is most likely to build by hand: a level where
+// nothing fits.
+func TestLevelFitMarshalsWithoutNullGroups(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(topology.LevelFit{Level: "clique"})
+	if err != nil {
+		t.Fatalf("marshalling a level fit: %v", err)
+	}
+
+	if !strings.Contains(string(raw), `"groups":[]`) {
+		t.Errorf("the level fit marshalled as %s, want an empty groups array", raw)
+	}
+}
+
+// TestJobFitMarshalsWithoutNullSlices covers the same for the whole answer.
+func TestJobFitMarshalsWithoutNullSlices(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(topology.JobFit{Name: "trainer"})
+	if err != nil {
+		t.Fatalf("marshalling a job fit: %v", err)
+	}
+
+	for _, want := range []string{`"levels":[]`, `"excluded":[]`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("the job fit marshalled as %s, want it to carry %s", raw, want)
 		}
 	}
 }
@@ -160,6 +248,7 @@ func TestReportDeepCopyDoesNotShareItsSlices(t *testing.T) {
 	t.Parallel()
 
 	nodes := twoCliques()
+	nodes[0].Unschedulable = true
 	original := topology.Build(topology.Input{Nodes: nodes})
 	original.Fit = original.FitJob(topology.JobRequest{Name: "trainer", Pods: 1, GPUsPerPod: 1}, nodes)
 	original.PartialNodes = []topology.PartialNode{{Name: "node-a", Present: []string{"a"}, Missing: []string{"b"}}}
@@ -174,6 +263,7 @@ func TestReportDeepCopyDoesNotShareItsSlices(t *testing.T) {
 	copied.PartialNodes[0].Present[0] = "mutated"
 	copied.PartialNodes[0].Missing[0] = "mutated"
 	copied.Fit.Levels[0].Level = "mutated"
+	copied.Fit.Excluded[0] = "mutated"
 	copied.Fit.Name = "mutated"
 
 	if original.Levels[0].Groups[0].Nodes[0] == "mutated" {
@@ -187,5 +277,8 @@ func TestReportDeepCopyDoesNotShareItsSlices(t *testing.T) {
 	}
 	if original.Fit.Levels[0].Level == "mutated" || original.Fit.Name == "mutated" {
 		t.Error("the fit is shared with the copy")
+	}
+	if original.Fit.Excluded[0] == "mutated" {
+		t.Error("the excluded node names are shared with the copy")
 	}
 }

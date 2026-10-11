@@ -57,13 +57,16 @@ func kueueFlavor(version, name, topologyName string) unstructured.Unstructured {
 	}}
 }
 
-// TestParseTopologyReadsEveryServedVersion covers v1beta1 and v1beta2, the
-// two versions Kueue serves: v1beta1 is still served through v0.19 and
-// v1beta2 is the storage version from v0.18 on.
+// TestParseTopologyReadsEveryServedVersion covers the three versions of the
+// Topology object that are in the field: v1alpha1 up to Kueue v0.13, v1beta1
+// from v0.14 (unserved again at v0.20), and v1beta2 from v0.15.
+//
+// All three carry the same spec.levels[].nodeLabel, verified against the
+// CRDs at v0.13.0, v0.19.0 and v0.20.1, so one reader serves them all.
 func TestParseTopologyReadsEveryServedVersion(t *testing.T) {
 	t.Parallel()
 
-	for _, version := range []string{"v1beta1", "v1beta2"} {
+	for _, version := range []string{"v1alpha1", "v1beta1", "v1beta2"} {
 		t.Run(version, func(t *testing.T) {
 			t.Parallel()
 
