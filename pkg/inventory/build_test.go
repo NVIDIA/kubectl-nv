@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -539,5 +540,44 @@ func TestBuildListIsPrintable(t *testing.T) {
 
 	if itemNamed(t, list, "n1").GetObjectKind().GroupVersionKind().Empty() {
 		t.Error("an item carries no GroupVersionKind: -o name refuses it")
+	}
+}
+
+// TestBuildReportsEachLostResourceOnce pins that a resource denied on two
+// different reads is named once. The user reads this string; "could not read
+// resourceslices: forbidden; could not read resourceslices: forbidden" reads
+// as two separate problems and invites a second look for a second cause.
+func TestBuildReportsEachLostResourceOnce(t *testing.T) {
+	t.Parallel()
+
+	denied := func(resource string) error {
+		return &source.PartialError{Resource: resource, Err: errors.New("forbidden")}
+	}
+
+	src := &countingSource{
+		gpu:         []corev1.Node{*testNode("n1", nil, map[string]string{"nvidia.com/gpu": "1"}, nil)},
+		classifyErr: denied("resourceslices"),
+		sliceErr:    denied("resourceslices"),
+		podsErr:     denied("pods"),
+	}
+
+	_, err := Build(context.Background(), src, BuildOptions{})
+	if err == nil {
+		t.Fatal("Build returned no error for two denied resources")
+	}
+
+	if n := strings.Count(err.Error(), "resourceslices"); n != 1 {
+		t.Errorf("resourceslices is named %d times in %q, want once", n, err)
+	}
+
+	if n := strings.Count(err.Error(), "pods"); n != 1 {
+		t.Errorf("pods is named %d times in %q, want once", n, err)
+	}
+
+	// Both causes still have to reach errors.As, or a caller testing for a
+	// specific denial stops finding it.
+	var partial *source.PartialError
+	if !errors.As(err, &partial) {
+		t.Errorf("Build error = %v, want a source.PartialError", err)
 	}
 }
