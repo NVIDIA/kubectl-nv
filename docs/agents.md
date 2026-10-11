@@ -147,9 +147,13 @@ command added without a fixture fails the test rather than being skipped.
 ### The one exec
 
 `adm must-gather` runs `nvidia-bug-report.sh` inside a driver pod and copies
-the result out. That is the only cluster-side action anywhere in the tool, it
-is confined to `must-gather` and `debug`, and it reads: nothing is left behind
-in the pod.
+the result out. That is the only cluster-side action anywhere in the tool, and
+it is confined to `must-gather` and `debug`.
+
+It reads, but it is not without trace: the script writes
+`/tmp/nvidia-bug-report.log.gz` inside the pod and nothing removes it
+afterwards, so a gather leaves that file behind on each driver pod it
+collected from.
 
 It is turned off with `--no-exec`, which collects everything else and records
 in the bundle what was skipped. A cluster where `pods/exec` is not allowed
@@ -189,24 +193,62 @@ structured content, so a caller does not parse it twice. A command that fails
 comes back as a tool error carrying what it said, not as a protocol error the
 model would never see.
 
-Some flags are not offered and cannot be set: `--output`, because the server
-needs JSON to build structured content; `--no-exec`, because of the next
-paragraph; and any flag a command has marked for the server to leave out.
-`schema --write-dir` is marked that way: it writes files on the machine
-`kubectl-nv` runs on, which the read-only guarantee says nothing about because
-no Kubernetes object changes.
+### Which flags a tool offers
+
+The input schema is an allowlist, not a filter. A tool offers exactly:
+
+- the leaf command's own non-persistent flags, and
+- `--namespace` (`-n`), the one inherited flag that asks about the request
+  rather than about the connection.
+
+Nothing else. In particular none of `--kubeconfig`, `--context`, `--cluster`,
+`--user`, `--server`, `--token`, `--as`, `--as-group`, `--as-uid`,
+`--as-user-extra`, `--certificate-authority`, `--client-certificate`,
+`--client-key`, `--insecure-skip-tls-verify`, `--tls-server-name`,
+`--proxy-url`, `--cache-dir`, `--request-timeout`, `--disable-compression` or
+`--debug` is reachable from a tool call.
+
+The reason is that the read-only guarantee says nothing about *which* cluster
+is being read. A model that could set `--server` or `--token` could point
+`kubectl-nv` at a cluster, a proxy or an identity nobody granted it, and every
+call would still be a read. Those settings come from the flags given to
+`kubectl nv mcp` itself, are parsed once, and are handed to every call whole.
+
+Three more are left out for their own reasons:
+
+- `--output`, because the server forces `-o json`: structured content is the
+  JSON the command printed.
+- `--no-exec`, covered below.
+- any flag a command marks as writing on this machine. `schema --write-dir` is
+  left out entirely; a directory flag such as `must-gather --artifacts-dir` is
+  pinned by the server to a fresh directory, mode 0700, under the OS temp
+  directory, a different one per call, and the path is reported in the result.
+
+A property the schema does not offer is refused rather than ignored, and a
+positional argument that would be read as a flag is refused by name. A refusal
+names only the flag, never its value: echoing a rejected `--token` back would
+copy the secret into the model's context.
 
 ### Exec over MCP
 
-`must-gather` and `debug` are served with `--no-exec` forced on, and are not
-served at all while that flag does not exist. Nothing a model decides should
-end up executing inside a workload, however the request was phrased.
+A command that can run something inside a pod carries the annotation
+`kubectl-nv.nvidia.com/exec: "true"`. The server reads that annotation, never
+a list of names: a command renamed, or a new one that execs, stays gated
+without the server being edited.
+
+A gated command is served with `--no-exec` forced on, and is not served at all
+while that flag does not exist. Nothing a model decides should end up
+executing inside a workload, however the request was phrased.
 
 Three things enforce it rather than one: the flag is left out of the input
 schema, a property the schema does not offer is refused, and the forced flag
 is appended last so that it wins over anything earlier on the command line. A
 command that can exec and has no `--no-exec` flag is refused outright rather
 than run.
+
+A gated command also writes files on this machine, so its tool is announced
+with `readOnlyHint: false`. The hint is about the whole environment, not only
+the cluster.
 
 ### Choosing the library
 
@@ -223,8 +265,8 @@ and is what `dims/kubectl-mcp` uses.
 
 The official SDK was chosen anyway, for three reasons. It is the
 implementation the specification is written against, so a protocol revision
-lands in it first rather than being tracked afterwards. It has been past 1.0
-since 2026-07 against `mcp-go`'s 2026-09, which is a longer run of API
+lands in it first rather than being tracked afterwards. It reached v1.0.0 on
+2025-09-30, against `mcp-go`'s 2026-09-02, which is a longer run of API
 stability to point at. And it ships an in-memory transport, which lets a tool
 call be tested over the real protocol without a process boundary; that is what
 the exec gate tests use.
@@ -234,12 +276,34 @@ the exec gate tests use.
 The leaves below are what the tree carries today. Later tracks extend this
 section as they land.
 
-| Command | Prints | Kind |
+| Command | Prints on stdout | Writes |
 |---|---|---|
-| `adm must-gather` | A support bundle on disk | `BundleManifest` |
-| `schema` | The JSON Schema of a kind | n/a |
-| `mcp` | Nothing; serves the protocol | n/a |
-| `version` | The version string | n/a |
+| `adm must-gather` | Nothing; progress goes to stderr | A directory of collected files |
+| `schema` | The JSON Schema of a kind | Nothing, unless `--write-dir` |
+| `mcp` | Nothing; serves the protocol | Nothing |
+| `version` | The version string | Nothing |
 
 `schema`, `mcp` and `version` read nothing from a cluster and need no
 kubeconfig.
+
+`must-gather` does not print an object: it writes a directory of collected
+files and reports progress on stderr. The `BundleManifest` kind above is
+reserved for the bundle index a later track adds; nothing emits it yet.
+
+### Exit codes over MCP
+
+Every tool result carries the code the same command would have left the
+process with, under `kubectl-nv.nvidia.com/exit-code` in `_meta`, and states it
+in the text.
+
+| Exit code | `isError` | What the result carries |
+|---|---|---|
+| 0 | false | The report, as text and as structured content |
+| 1 | false | The report; findings at or above `--fail-on` |
+| 3 | false | The report; part of the cluster was out of reach |
+| 2 | true | The usage error; there is no report |
+| 4 | true | The failure; nothing was checked |
+
+Exit 1 and 3 are results, not errors. A command that found something has
+answered the question, and a caller that treated that as a failed call would
+throw away the findings it asked for.
