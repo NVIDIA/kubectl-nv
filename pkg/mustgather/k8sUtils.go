@@ -76,7 +76,7 @@ func getOpenShiftMachines(config *rest.Config) ([]byte, error) {
 // carrying a sidecar has nvidia-bug-report.sh in only one of its containers,
 // and the one the API server picks without being told is the first in spec
 // order, which is not always that one.
-func executeRemoteCommand(restCfg *rest.Config, pod *v1.Pod, container, command string) (string, string, error) {
+func executeRemoteCommand(ctx context.Context, restCfg *rest.Config, pod *v1.Pod, container, command string) (string, string, error) {
 	coreClient, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return "", "", err
@@ -102,7 +102,7 @@ func executeRemoteCommand(restCfg *rest.Config, pod *v1.Pod, container, command 
 	if err != nil {
 		return "", "", err
 	}
-	err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: buf,
 		Stderr: errBuf,
 	})

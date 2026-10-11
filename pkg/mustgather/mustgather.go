@@ -58,6 +58,11 @@ type Options struct {
 	// device usage, and the manifest records both as skipped by flag.
 	NoExec bool
 
+	// ExecTimeout bounds one exec or one copy out of a driver pod. Zero means
+	// DefaultExecTimeout. A pod that accepted the connection and never answers
+	// costs one file rather than the whole bundle.
+	ExecTimeout time.Duration
+
 	// ToolVersion is the kubectl-nv version the manifest records the bundle as
 	// having been collected by.
 	ToolVersion string
@@ -77,8 +82,8 @@ type Options struct {
 }
 
 // PodCommandRunner runs command in one container of pod and returns its
-// standard output.
-type PodCommandRunner func(pod *v1.Pod, container, command string) (string, error)
+// standard output. It stops when ctx is done.
+type PodCommandRunner func(ctx context.Context, pod *v1.Pod, container, command string) (string, error)
 
 // Clients hands the gatherer the clients it works through. The command layer
 // has a factory that satisfies this; a test supplies fakes. It is declared
@@ -95,8 +100,10 @@ type Clients interface {
 type RunFunc func(opts *Options) error
 
 // PodFileFetcher runs the bug-report command inside pod and copies the resulting
-// file out of the pod to destPath on the local filesystem.
-type PodFileFetcher func(pod *v1.Pod, destPath string) error
+// file out of the pod to destPath on the local filesystem. It stops when ctx is
+// done, which is how a pod that never answers costs one artifact rather than
+// the gather.
+type PodFileFetcher func(ctx context.Context, pod *v1.Pod, destPath string) error
 
 // podLogStreamer opens a log stream for the given pod. The caller owns the
 // returned stream and is responsible for closing it.
@@ -133,11 +140,11 @@ type Gatherer struct {
 
 // fetchBugReport copies the bug report generated inside pod to destPath, using
 // the injected fetcher when one is set.
-func (g *Gatherer) fetchBugReport(pod *v1.Pod, destPath string) error {
+func (g *Gatherer) fetchBugReport(ctx context.Context, pod *v1.Pod, destPath string) error {
 	if g.fetchPodFile != nil {
-		return g.fetchPodFile(pod, destPath)
+		return g.fetchPodFile(ctx, pod, destPath)
 	}
-	return g.execAndCopyBugReport(pod, destPath)
+	return g.execAndCopyBugReport(ctx, pod, destPath)
 }
 
 // podLogs opens a log stream for the given pod, using the injected streamer when
@@ -152,7 +159,7 @@ func (g *Gatherer) podLogs(ctx context.Context, namespace, podName string, opts 
 // execAndCopyBugReport is the live-cluster PodFileFetcher: it runs
 // nvidia-bug-report.sh inside the pod and copies /tmp/nvidia-bug-report.log.gz
 // out to destPath.
-func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
+func (g *Gatherer) execAndCopyBugReport(ctx context.Context, pod *v1.Pod, destPath string) error {
 	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
 	var outpipe *os.File
 	if err != nil {
@@ -166,13 +173,21 @@ func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
 		Out:    outpipe,
 		ErrOut: os.Stderr,
 	}
+	container := execContainer(pod)
+
 	o := NewCopyOptions(iostream)
 	o.Clientset = g.clientset
 	o.ClientConfig = g.config
+	// The copy is a second exec, running tar. It has to land in the container
+	// the bug report was written in: a driver pod carrying a sidecar would
+	// otherwise have the report written in one container and looked for in
+	// another, and the copy fails with "file not found" on a report that is
+	// there.
+	o.Container = container
 
 	// Execute remote command to run the bug report script.
 	outLog, errLog, err := executeRemoteCommand(
-		g.config, pod, execContainer(pod), "cd /tmp && nvidia-bug-report.sh")
+		ctx, g.config, pod, container, "cd /tmp && nvidia-bug-report.sh")
 	if err != nil {
 		if _, lerr := g.errLogFile.WriteString(errLog); lerr != nil {
 			err = fmt.Errorf("%v+ error writing error output to stderr log file: %v", err, lerr)
@@ -440,13 +455,20 @@ func (g *Gatherer) gatherOperatorNamespace() (string, error) {
 	return operatorNamespace, nil
 }
 
-// logError writes an error message to g.errLogFile with the provided format and returns the wrapped error.
+// logError records err in the stderr log under the caller's description and
+// returns it wrapped in that description.
+//
+// format carries the caller's own verb for the error, as in "error getting
+// nodes: %v". Appending a second verb to it, which this used to do, left every
+// error ending in a formatting fault and broke errors.Is: nothing downstream
+// could tell a NotFound from a Forbidden through one of these.
 func (g *Gatherer) logError(format string, err error) error {
-	_, lerr := fmt.Fprintf(g.errLogFile, format, err)
-	if lerr != nil {
+	if _, lerr := fmt.Fprintf(g.errLogFile, format+"\n", err); lerr != nil {
 		return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 	}
-	return fmt.Errorf(format+": %w", err)
+	// The description without its verb becomes the wrapper, so the cause is
+	// carried by %w exactly once and stays reachable.
+	return fmt.Errorf("%s: %w", strings.TrimSuffix(strings.TrimSpace(fmt.Sprintf(format, "")), ":"), err)
 }
 
 // gatherGPUNodes collects nodes that have NVIDIA PCI labels and writes the result as YAML to a file.
@@ -487,16 +509,15 @@ func (g *Gatherer) gatherGPUNodes() error {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "No nodes found with NVIDIA PCI label\n"); lerr != nil {
 			_ = fmt.Errorf("error writing to stderr log file: %v", lerr)
 		}
-		// Narrowing to one node that is not a GPU node leaves this collector
-		// with nothing to collect, which is a fact about that node. The rest of
-		// the bundle is still what the user asked for, so the gather carries on
-		// and the manifest records why these four files are not in it.
+		// Nothing to survey is a fact about the cluster, not a failure of the
+		// gather. A cluster whose feature discovery has not labelled a node yet
+		// is exactly the cluster someone runs a must-gather on, and its
+		// ClusterPolicy and operator logs are what say why. Reporting this as
+		// an error used to take them with it.
 		if g.opts.Node != "" {
 			return skip("%s carries no NVIDIA PCI label", g.opts.Node)
 		}
-		// A whole cluster where nothing carries the label is a cluster this
-		// tool has nothing to report on, and saying so is the answer.
-		return fmt.Errorf("no nodes found with NVIDIA PCI label")
+		return skip("no GPU nodes")
 	}
 
 	// Create the file to store the GPU node information.
@@ -671,15 +692,17 @@ func Run(opts *Options, f Clients, progress Progress) error {
 	}
 	defer g.Close()
 
-	collectErr := g.collect()
+	// The manifest is written whichever way the gather ended, including a
+	// panic on the way out. A bundle that stops halfway is exactly the one
+	// whose reader most needs to know which collectors ran, and an index
+	// written only on the success path is one a later early return can lose.
+	defer func() {
+		if err := g.writeManifest(); err != nil {
+			g.note("could not write %s: %v", ManifestFileName, err)
+		}
+	}()
 
-	// The manifest is written whichever way the gather ended. A bundle that
-	// stops halfway is exactly the one whose reader most needs to know which
-	// collectors ran, and writing the index only on success would leave them
-	// guessing.
-	if err := g.writeManifest(); err != nil {
-		g.note("could not write %s: %v", ManifestFileName, err)
-	}
+	collectErr := g.collect()
 
 	if collectErr != nil {
 		return g.failed(collectErr)
@@ -693,6 +716,7 @@ func Run(opts *Options, f Clients, progress Progress) error {
 // on disk for the caller to decide what it is worth from the exit code.
 func (g *Gatherer) collect() error {
 	s := &gatherState{}
+	var failed []string
 
 	for _, c := range Collectors() {
 		g.begin(c.Name)
@@ -708,8 +732,13 @@ func (g *Gatherer) collect() error {
 		case errors.As(err, &skipped):
 			g.end(statusSkipped + skipped.reason)
 		default:
+			// One collector that failed must not cost the user every artifact
+			// behind it. The failure is recorded against its own collector and
+			// the gather carries on; the exit code below says the bundle is
+			// incomplete and the manifest says which part.
 			g.end(statusError + err.Error())
-			return err
+			g.note("%s: %v", c.Name, err)
+			failed = append(failed, c.Name)
 		}
 	}
 
@@ -717,8 +746,13 @@ func (g *Gatherer) collect() error {
 	// driver evidence because RBAC refused the exec is incomplete, and a script
 	// that files it as complete files an unanswerable support ticket.
 	if len(s.execDenied) > 0 {
+		failed = append(failed, s.execDenied...)
 		return fmt.Errorf("not allowed to exec into the driver pods; these collectors were skipped: %s",
 			strings.Join(s.execDenied, ", "))
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("these collectors failed: %s", strings.Join(failed, ", "))
 	}
 
 	return nil
@@ -820,6 +854,20 @@ func (g *Gatherer) createArtifact(path string) (*os.File, error) {
 // opened here, so it records itself through this.
 func (g *Gatherer) recordArtifact(path string) {
 	g.collected = true
+	g.indexArtifact(path)
+}
+
+// recordMarker notes a file that records what the cluster does not have. It
+// belongs in the manifest like any other artifact, but it is not something
+// collected: a bundle holding nothing but "not installed" markers says the
+// gather reached the cluster and found nothing, and calling that a partial
+// success would tell a script the bundle is worth reading.
+func (g *Gatherer) recordMarker(path string) {
+	g.indexArtifact(path)
+}
+
+// indexArtifact adds one file to the current collector's list.
+func (g *Gatherer) indexArtifact(path string) {
 	name := filepath.Base(path)
 	if g.current != nil {
 		g.current.Artifacts = append(g.current.Artifacts, name)
@@ -839,5 +887,14 @@ func (g *Gatherer) writeArtifact(path string, data []byte) error {
 		return err
 	}
 	g.recordArtifact(path)
+	return nil
+}
+
+// writeMarker writes a file recording what the cluster does not have.
+func (g *Gatherer) writeMarker(path string, data []byte) error {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	g.recordMarker(path)
 	return nil
 }

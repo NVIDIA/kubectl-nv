@@ -17,6 +17,7 @@
 package mustgather
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +26,6 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // driverLabels are the four selectors a driver pod can carry. Each one is a
@@ -134,6 +134,7 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 	var errs []error
 	denied := false
 	collected := 0
+	reachable := 0
 
 	for _, driver := range s.driverPods {
 		pod := driver.pod
@@ -144,6 +145,8 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 			}
 			continue
 		}
+
+		reachable++
 
 		// The report is named after the node the pod runs on, as the script does.
 		// A node already collected from, because it runs a second driver pod
@@ -158,11 +161,15 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 		// it, so the failures are collected and reported together at the end
 		// naming every pod, not only the first.
 		destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
-		if err := g.fetchBugReport(&pod, destPath); err != nil {
-			if apierrors.IsForbidden(err) {
+		ctx, cancel, timeout := g.execContext()
+		err := g.fetchBugReport(ctx, &pod, destPath)
+		cancel()
+		if err != nil {
+			if forbiddenExec(err) {
 				denied = true
 			}
-			err = fmt.Errorf("collecting bug report from pod %s (label %s): %w", pod.Name, driver.label, err)
+			err = execFailure(ctx, timeout,
+				fmt.Sprintf("collecting bug report (label %s)", driver.label), &pod, err)
 			if _, lerr := fmt.Fprintf(g.errLogFile, "%v\n", err); lerr != nil {
 				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 			}
@@ -178,10 +185,14 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 	case denied:
 		s.execDenied = append(s.execDenied, "bug-report")
 		return skip("forbidden: %v", errors.Join(errs...))
-	case collected == 0 && len(errs) == 0:
+	case reachable == 0:
 		// Every driver pod was passed over, because none of them is running on
 		// a node yet. The bundle holds no report and the reason belongs in the
-		// manifest rather than only in the error log.
+		// manifest rather than only in the error log: "this cluster runs no
+		// driver" and "its driver pods could not be asked" are different
+		// clusters.
+		return skip("no driver pod could be reached")
+	case collected == 0 && len(errs) == 0:
 		return skip("no driver pod could be reached")
 	}
 	return errors.Join(errs...)
@@ -263,6 +274,8 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 	var withoutSMI []string
 	collected := 0
 	denied := false
+	reachable := 0
+	taken := make(map[string]bool)
 
 	for _, driver := range s.driverPods {
 		pod := driver.pod
@@ -272,18 +285,37 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 			}
 			continue
 		}
+		reachable++
 
-		if _, err := g.execInPod(&pod, driver.container, nvidiaSMIProbe); err != nil {
-			if apierrors.IsForbidden(err) {
+		ctx, cancel, timeout := g.execContext()
+		_, probeErr := g.execInPod(ctx, &pod, driver.container, nvidiaSMIProbe)
+		cancel()
+		if probeErr != nil {
+			switch {
+			case forbiddenExec(probeErr):
 				denied = true
-				errs = append(errs, fmt.Errorf("device usage from pod %s: %w", pod.Name, err))
-				continue
+				errs = append(errs, execFailure(ctx, timeout, "device usage", &pod, probeErr))
+			case errors.Is(probeErr, context.DeadlineExceeded):
+				// A probe that ran out of time says nothing about whether the
+				// container has nvidia-smi. Recording it as "no nvidia-smi"
+				// would tell a reader the driver is not there.
+				errs = append(errs, execFailure(ctx, timeout, "nvidia-smi probe", &pod, probeErr))
+			default:
+				withoutSMI = append(withoutSMI, pod.Name)
 			}
-			withoutSMI = append(withoutSMI, pod.Name)
 			continue
 		}
 
-		if err := g.writeDeviceUsage(&driver); err != nil {
+		// One file per node, as the script names them. A node running both a
+		// driver pod and a vGPU manager pod gets a second file under the pod
+		// name, rather than the second pass overwriting the first.
+		fileName := fmt.Sprintf("gpu_device_usage_%s.log", pod.Spec.NodeName)
+		if taken[fileName] {
+			fileName = fmt.Sprintf("gpu_device_usage_%s_%s.log", pod.Spec.NodeName, pod.Name)
+		}
+		taken[fileName] = true
+
+		if err := g.writeDeviceUsage(&driver, fileName); err != nil {
 			errs = append(errs, err)
 			continue
 		}
@@ -294,8 +326,10 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 	case denied:
 		s.execDenied = append(s.execDenied, "device-usage")
 		return skip("forbidden: %v", errors.Join(errs...))
-	case collected == 0 && len(withoutSMI) > 0:
+	case collected == 0 && len(withoutSMI) > 0 && len(errs) == 0:
 		return skip("no nvidia-smi in %s", strings.Join(withoutSMI, ", "))
+	case reachable == 0:
+		return skip("no driver pod could be reached")
 	case collected == 0 && len(errs) == 0:
 		return skip("no driver pod could be reached")
 	}
@@ -306,9 +340,8 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 // what they said to that node's file. A command that fails is recorded in the
 // file rather than ending the section: the output of the ones that did run is
 // still what the report is read for.
-func (g *Gatherer) writeDeviceUsage(driver *driverTarget) error {
+func (g *Gatherer) writeDeviceUsage(driver *driverTarget, fileName string) error {
 	node := driver.pod.Spec.NodeName
-	fileName := fmt.Sprintf("gpu_device_usage_%s.log", node)
 
 	file, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, fileName))
 	if err != nil {
@@ -320,9 +353,12 @@ func (g *Gatherer) writeDeviceUsage(driver *driverTarget) error {
 		if _, werr := fmt.Fprintf(file, "# %s output from %s\n", step.heading, node); werr != nil {
 			return fmt.Errorf("writing %s: %w", fileName, werr)
 		}
-		out, cerr := g.execInPod(&driver.pod, driver.container, step.command)
+		ctx, cancel, timeout := g.execContext()
+		out, cerr := g.execInPod(ctx, &driver.pod, driver.container, step.command)
+		cancel()
 		if cerr != nil {
-			out = fmt.Sprintf("Failed to run %s on %s: %v\n", step.heading, node, cerr)
+			out = fmt.Sprintf("Failed to run %s on %s: %v\n",
+				step.heading, node, execFailure(ctx, timeout, step.heading, &driver.pod, cerr))
 		}
 		if _, werr := fmt.Fprintf(file, "%s\n", strings.TrimRight(out, "\n")); werr != nil {
 			return fmt.Errorf("writing %s: %w", fileName, werr)
@@ -334,11 +370,11 @@ func (g *Gatherer) writeDeviceUsage(driver *driverTarget) error {
 
 // execInPod runs a command in one container of a pod, using the injected
 // runner when a test set one.
-func (g *Gatherer) execInPod(pod *v1.Pod, container, command string) (string, error) {
+func (g *Gatherer) execInPod(ctx context.Context, pod *v1.Pod, container, command string) (string, error) {
 	if g.runInPod != nil {
-		return g.runInPod(pod, container, command)
+		return g.runInPod(ctx, pod, container, command)
 	}
-	out, _, err := executeRemoteCommand(g.config, pod, container, command)
+	out, _, err := executeRemoteCommand(ctx, g.config, pod, container, command)
 	return out, err
 }
 

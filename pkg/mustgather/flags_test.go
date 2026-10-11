@@ -27,10 +27,8 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
@@ -342,18 +340,40 @@ func TestNodeWithoutAGPULabelIsSkippedNotFatal(t *testing.T) {
 	}
 }
 
-// TestNoGPUNodesAtAllIsStillAFailure is the other side of it: without --node,
-// a cluster where nothing carries an NVIDIA PCI label is a cluster this tool
-// has nothing to report on, and saying so is the answer.
-func TestNoGPUNodesAtAllIsStillAFailure(t *testing.T) {
+// TestNoGPUNodesAtAllIsRecordedNotFatal is the other side of it. A cluster
+// where nothing carries an NVIDIA PCI label used to end the gather, which took
+// the ClusterPolicy and the operator logs with it. Those are exactly what say
+// why the cluster has no GPU node, so the survey being empty is recorded and
+// the rest is still collected.
+func TestNoGPUNodesAtAllIsRecordedNotFatal(t *testing.T) {
 	plain := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cpu-node-1"}}
-
-	_, _, err := runGather(t, &Options{}, plain)
-	if err == nil {
-		t.Fatal("Run returned nil over a cluster with no GPU nodes, want the failure reported")
+	operator := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "gpu-operator-0",
+			Namespace: "gpu-operator",
+			Labels:    map[string]string{"app": "gpu-operator"},
+		},
+		Spec:   v1.PodSpec{NodeName: "cpu-node-1", Containers: []v1.Container{{Name: "gpu-operator"}}},
+		Status: v1.PodStatus{Phase: v1.PodRunning},
 	}
-	if !strings.Contains(err.Error(), "NVIDIA PCI label") {
-		t.Errorf("error = %v, want it to say no node carries an NVIDIA PCI label", err)
+
+	dir, names, err := runGather(t, &Options{}, plain, operator)
+	if err != nil {
+		t.Fatalf("Run returned %v, want a cluster with no GPU node to still produce a bundle", err)
+	}
+
+	for _, name := range []string{"nodes.yaml", "gpu_operand_pods.yaml"} {
+		if !contains(names, name) {
+			t.Errorf("the bundle holds no %s: %v", name, names)
+		}
+	}
+	if contains(names, "gpu_nodes.yaml") {
+		t.Error("the bundle holds gpu_nodes.yaml for a cluster with no GPU node")
+	}
+
+	m := readManifest(t, dir)
+	if got := m.statusOf(t, "gpu-nodes"); got != "skipped:no GPU nodes" {
+		t.Errorf("gpu-nodes status = %q, want %q", got, "skipped:no GPU nodes")
 	}
 }
 

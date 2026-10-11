@@ -181,7 +181,10 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 			fmt.Fprintf(o.ErrOut, "warning: skipping symlink: %q -> %q\n", destFileName, header.Linkname) // nolint: errcheck
 			continue
 		}
-		outFile, err := os.Create(destFileName.String())
+		// The bundle holds cluster data and its default home is /tmp, where
+		// every account on the machine can look. os.Create would leave this
+		// file 0644 while every other artifact is 0600.
+		outFile, err := os.OpenFile(destFileName.String(), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			return err
 		}

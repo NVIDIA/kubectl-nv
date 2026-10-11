@@ -17,6 +17,7 @@
 package cmd_test
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -306,6 +307,13 @@ func TestEveryExecCapableLeafIsAnnotated(t *testing.T) {
 // newTestCommand builds the real command tree over the recorder's clients.
 func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 	t.Helper()
+	return newTestCommandWithExecs(t, rec, &execLog{t: t})
+}
+
+// newTestCommandWithExecs builds the tree over the recorder's clients and
+// records every command the must-gather would have run inside a pod.
+func newTestCommandWithExecs(t *testing.T, rec *recorder, execs *execLog) *cobra.Command {
+	t.Helper()
 
 	clientset := fake.NewSimpleClientset(clusterObjects()...)
 	// The dynamic fake panics on a List of a resource whose list kind it was
@@ -343,15 +351,105 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 			// is the one call kubectl-nv is allowed to make: it reads a file
 			// out of a driver pod and changes nothing. It is behind --no-exec
 			// for the users who will not have it.
-			o.FetchPodFile = func(pod *v1.Pod, destPath string) error {
+			o.FetchPodFile = func(_ context.Context, pod *v1.Pod, destPath string) error {
+				execs.record("nvidia-bug-report.sh")
 				return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 			}
-			o.RunInPod = func(pod *v1.Pod, _, _ string) (string, error) {
+			o.RunInPod = func(_ context.Context, pod *v1.Pod, _, command string) (string, error) {
+				execs.record(command)
 				return pod.Name, nil
 			}
 			return mustgather.Run(o, f, output.NewLogger(genericiooptions.NewTestIOStreamsDiscard(), output.LoggerOptions{}))
 		},
 	})
+}
+
+// execLog records what the must-gather asked to run inside a pod, and refuses
+// anything that is not one of the two commands it is allowed to run.
+//
+// pods/exec is the single write-shaped call this tool makes, so what it carries
+// is part of the read-only guarantee: a collector that grew a command of its
+// own would still pass a check that only counted the execs.
+type execLog struct {
+	t *testing.T
+
+	mu       sync.Mutex
+	commands []string
+}
+
+// allowedExecCommands are the only things kubectl-nv runs inside a pod: the
+// bug report, and the device usage probes and readings. Each is a read.
+var allowedExecCommands = []string{
+	"nvidia-bug-report.sh",
+	"command -v nvidia-smi",
+	"nvidia-smi",
+	"nsenter --target 1 --mount --pid -- sh -c 'lsof /run/nvidia/driver/dev/nvidia*",
+	"nsenter --target 1 --mount --pid -- sh -c 'fuser -v /run/nvidia/driver/dev/nvidia*",
+	"nsenter --target 1 --mount --pid -- sh -c 'ls -la /run/nvidia/driver/dev/nvidia*",
+	"nsenter --target 1 --mount --pid -- sh -c '\n\t\t\tpids=",
+	"nsenter --target 1 --mount --pid -- sh -c 'pids=",
+}
+
+func (l *execLog) record(command string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.commands = append(l.commands, command)
+
+	for _, allowed := range allowedExecCommands {
+		if strings.HasPrefix(command, allowed) {
+			return
+		}
+	}
+	// Errorf, not Fatalf: this can run on another goroutine.
+	l.t.Errorf("kubectl-nv ran %q inside a pod, which is not one of the commands it may run:\n  %s",
+		command, strings.Join(allowedExecCommands, "\n  "))
+}
+
+func (l *execLog) count() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.commands)
+}
+
+// TestMustGatherExecsOnlyWhatItMay covers the one call this tool makes that is
+// not a GET. The guard above proves the gather issues no writes; this proves
+// that the exec it is allowed to make carries only the commands it is supposed
+// to, and that --no-exec means no exec at all rather than fewer of them.
+func TestMustGatherExecsOnlyWhatItMay(t *testing.T) {
+	for _, noExec := range []bool{false, true} {
+		name := "the exec commands are the ones it may run"
+		if noExec {
+			name = "--no-exec runs nothing at all"
+		}
+		t.Run(name, func(t *testing.T) {
+			isolateKubeconfig(t)
+
+			execs := &execLog{t: t}
+			cmd := newTestCommandWithExecs(t, newRecorder(t, "adm must-gather"), execs)
+
+			args := []string{"adm", "must-gather", "--artifacts-dir", t.TempDir(),
+				"--kubeconfig", writeKubeconfig(t)}
+			if noExec {
+				args = append(args, "--no-exec")
+			}
+			cmd.SetArgs(args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("adm must-gather: %v", err)
+			}
+
+			switch got := execs.count(); {
+			case noExec && got != 0:
+				t.Errorf("--no-exec ran %d commands inside pods, want none: %v", got, execs.commands)
+			case !noExec && got == 0:
+				t.Error("the gather ran no command inside any pod, so this proved nothing about what it runs")
+			}
+		})
+	}
 }
 
 // clusterObjects is the smallest cluster that drives must-gather all the way

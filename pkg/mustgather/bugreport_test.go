@@ -18,6 +18,7 @@ package mustgather
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -84,7 +85,7 @@ func artifactNames(t *testing.T, dir string) []string {
 // report can be traced back to the pod it came from. Pods named in failFor fail
 // instead, as a pod whose driver container is wedged would.
 func recordingFetcher(failFor map[string]bool) PodFileFetcher {
-	return func(pod *v1.Pod, destPath string) error {
+	return func(_ context.Context, pod *v1.Pod, destPath string) error {
 		if failFor[pod.Name] {
 			return errors.New("command terminated with exit code 1")
 		}
@@ -368,7 +369,7 @@ func TestCollectBugReportsSkipsUncollectablePods(t *testing.T) {
 		opts:       &Options{ArtifactDir: artifactDir},
 		logFile:    logFile,
 		errLogFile: errLogFile,
-		fetchPodFile: func(pod *v1.Pod, destPath string) error {
+		fetchPodFile: func(_ context.Context, pod *v1.Pod, destPath string) error {
 			fetched = append(fetched, pod.Name)
 			return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 		},
@@ -471,7 +472,7 @@ func TestGatherBugReportNamesFilesPerNode(t *testing.T) {
 		errLogFile: errLogFile,
 		// The fetcher stands in for exec + copyFromPod: it records which pod the
 		// report came from by writing that pod's name into the destination file.
-		fetchPodFile: func(pod *v1.Pod, destPath string) error {
+		fetchPodFile: func(_ context.Context, pod *v1.Pod, destPath string) error {
 			return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 		},
 	}

@@ -52,9 +52,15 @@ const forbiddenExecBody = `{"kind":"Status","apiVersion":"v1","status":"Failure"
 // text. A gather against a cluster that denies pods/exec therefore exited 0
 // and reported the driver evidence as merely absent.
 func TestForbiddenExecThroughTheRealExecPath(t *testing.T) {
-	var path string
+	// A real listening socket, not a stub transport. The exec path dials
+	// instead of going through the REST client's round tripper, and client-go
+	// does not carry Config.Dial into the SPDY upgrade (RoundTripperFor passes
+	// UpgradeTransport: nil), so nothing short of a real dial exercises it.
+	// That is the whole point: the shape of this error is a property of the
+	// dial, and injecting one through a seam is what hid the bug.
+	paths := make(chan string, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path = r.URL.Path
+		paths <- r.URL.Path
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte(forbiddenExecBody))
@@ -67,6 +73,12 @@ func TestForbiddenExecThroughTheRealExecPath(t *testing.T) {
 		pod, "nvidia-driver-ctr", "true")
 	if err == nil {
 		t.Fatal("executeRemoteCommand returned nil against a server that answers 403")
+	}
+	var path string
+	select {
+	case path = <-paths:
+	default:
+		t.Fatal("the server was never asked for anything")
 	}
 	if !strings.Contains(path, "/pods/nvidia-driver-daemonset-abcde/exec") {
 		t.Errorf("the request went to %q, want the exec subresource of the pod", path)

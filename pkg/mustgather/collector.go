@@ -114,9 +114,14 @@ type gatherState struct {
 	prepared bool
 }
 
-// Collectors is the registry, in the order a gather runs it. The cluster-scoped
-// resources come first, so that a cluster whose operator namespace cannot even
-// be found still produces a bundle holding its nodes and its custom resources.
+// Collectors is the registry, in the order a gather runs it.
+//
+// The order is the gpu-operator script's (lines 92 to 170 at f6d32bad44ee) and
+// the base's: the cluster's own resources, then the node survey, then the
+// namespace-scoped work. It is load bearing. The ClusterPolicy is the first
+// file support asks for, and a cluster whose feature discovery has not
+// labelled a node yet is exactly the cluster someone runs a must-gather on, so
+// the node survey must not run in front of it.
 func Collectors() []Collector {
 	return []Collector{
 		{
@@ -130,12 +135,6 @@ func Collectors() []Collector {
 			Step:      "Gathering node information",
 			Artifacts: []string{"nodes.yaml", "machines.yaml"},
 			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherNodeInfo() },
-		},
-		{
-			Name:      "gpu-nodes",
-			Step:      "Gathering GPU node information",
-			Artifacts: []string{"gpu_nodes.yaml", "gpu_nodes.labels", "gpu_nodes.status", "gpu_nodes.descr"},
-			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherGPUNodes() },
 		},
 		{
 			Name:      "cluster-policy",
@@ -178,6 +177,12 @@ func Collectors() []Collector {
 			Step:      "Gathering the DRA resource slices",
 			Artifacts: []string{"resourceslices.yaml"},
 			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherResourceSlices() },
+		},
+		{
+			Name:      "gpu-nodes",
+			Step:      "Gathering GPU node information",
+			Artifacts: []string{"gpu_nodes.yaml", "gpu_nodes.labels", "gpu_nodes.status", "gpu_nodes.descr"},
+			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherGPUNodes() },
 		},
 		{
 			Name:      "operator-pod",
@@ -500,7 +505,7 @@ func (g *Gatherer) gatherOrMark(gvr schema.GroupVersionResource, fileName, marke
 // writeMissingMarker records that a resource is not in the bundle, and why.
 func (g *Gatherer) writeMissingMarker(fileName, reason string) error {
 	path := filepath.Join(g.opts.ArtifactDir, fileName)
-	if err := g.writeArtifact(path, []byte(reason+"\n")); err != nil {
+	if err := g.writeMarker(path, []byte(reason+"\n")); err != nil {
 		return g.logError(fmt.Sprintf("error writing %s: %%v", fileName), err)
 	}
 	if _, err := fmt.Fprintf(g.errLogFile, "%s: %s\n", fileName, reason); err != nil {
@@ -610,9 +615,21 @@ func (g *Gatherer) gatherPodDescriptions(s *gatherState) error {
 			_, werr := io.WriteString(w, text)
 			return werr
 		})
-		if err != nil {
-			errs = append(errs, err)
+		if err == nil {
+			continue
 		}
+		// A pod deleted between the listing and its description is one line of
+		// the bundle missing, not a reason to call the collector failed. The
+		// bundle still holds that pod's YAML and its logs.
+		if apierrors.IsNotFound(err) {
+			g.discardArtifact(filepath.Join(g.opts.ArtifactDir, pod.Name+".descr"))
+			if _, lerr := fmt.Fprintf(g.errLogFile,
+				"Pod %s went away before it could be described: %v\n", pod.Name, err); lerr != nil {
+				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
+			}
+			continue
+		}
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }
@@ -662,7 +679,8 @@ func (g *Gatherer) gatherDaemonSets(s *gatherState) error {
 	var errs []error
 	for i := range daemonSets.Items {
 		set := daemonSets.Items[i]
-		derr := g.writeArtifactFile("gpu_operand_ds_"+set.Name+".descr", func(w io.Writer) error {
+		fileName := "gpu_operand_ds_" + set.Name + ".descr"
+		derr := g.writeArtifactFile(fileName, func(w io.Writer) error {
 			text, terr := g.describeDaemonSet(set.Namespace, set.Name)
 			if terr != nil {
 				return terr
@@ -670,7 +688,15 @@ func (g *Gatherer) gatherDaemonSets(s *gatherState) error {
 			_, werr := io.WriteString(w, text)
 			return werr
 		})
-		if derr != nil {
+		switch {
+		case derr == nil:
+		case apierrors.IsNotFound(derr):
+			g.discardArtifact(filepath.Join(g.opts.ArtifactDir, fileName))
+			if _, lerr := fmt.Fprintf(g.errLogFile,
+				"DaemonSet %s went away before it could be described: %v\n", set.Name, derr); lerr != nil {
+				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
+			}
+		default:
 			errs = append(errs, derr)
 		}
 	}

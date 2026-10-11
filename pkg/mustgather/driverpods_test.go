@@ -164,7 +164,7 @@ func TestBothDriverCollectionFailuresAreNamed(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "artifacts")
 	g, err := NewGatherer(&Options{
 		ArtifactDir: dir,
-		FetchPodFile: func(pod *v1.Pod, _ string) error {
+		FetchPodFile: func(_ context.Context, pod *v1.Pod, _ string) error {
 			return fmt.Errorf("%s: %w", pod.Name, errUnreachable)
 		},
 	}, stubFactory{clientset: fake.NewSimpleClientset(pods...), config: offlineConfig()}, discardProgress{})

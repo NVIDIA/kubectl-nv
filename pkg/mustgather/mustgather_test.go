@@ -1,6 +1,7 @@
 package mustgather
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ func TestNewGatherer(t *testing.T) {
 		called := false
 		opts := &Options{
 			ArtifactDir:  t.TempDir(),
-			FetchPodFile: func(*v1.Pod, string) error { called = true; return nil },
+			FetchPodFile: func(context.Context, *v1.Pod, string) error { called = true; return nil },
 		}
 
 		g, err := NewGatherer(opts, working, discardProgress{})
@@ -66,7 +67,7 @@ func TestNewGatherer(t *testing.T) {
 		}
 		defer g.Close()
 
-		if err := g.fetchBugReport(&v1.Pod{}, filepath.Join(opts.ArtifactDir, "report")); err != nil {
+		if err := g.fetchBugReport(context.Background(), &v1.Pod{}, filepath.Join(opts.ArtifactDir, "report")); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if !called {
