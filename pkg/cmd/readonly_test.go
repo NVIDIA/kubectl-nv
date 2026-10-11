@@ -86,6 +86,15 @@ var leafFixtures = map[string]leafFixture{
 		// what "make schema" does and the most this leaf ever touches.
 		args: func(t *testing.T) []string { return []string{"--write-dir", t.TempDir()} },
 	},
+	"list": {
+		args: func(*testing.T) []string { return nil },
+	},
+	"info": {
+		// The fixture cluster's one node carries a hint label and no GPU
+		// capacity, so info reaches the whole read path and reports it as a
+		// hinted node rather than refusing.
+		args: func(*testing.T) []string { return []string{"gpu-node-1"} },
+	},
 }
 
 // readOptional lists the leaves that have no business talking to a cluster.
