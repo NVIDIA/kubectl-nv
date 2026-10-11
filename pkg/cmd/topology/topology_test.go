@@ -72,6 +72,9 @@ func gpuNode(name, clique string, allocatable int64) *corev1.Node {
 		Status: corev1.NodeStatus{
 			Capacity:    corev1.ResourceList{"nvidia.com/gpu": quantity},
 			Allocatable: corev1.ResourceList{"nvidia.com/gpu": quantity},
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			},
 		},
 	}
 }
@@ -204,11 +207,21 @@ func TestTopologyGroupsTheClusterByClique(t *testing.T) {
 	}
 
 	first, _ := levels[0].(map[string]any)
-	if first["name"] != "clique" {
-		t.Fatalf("the first level is %v, want the clique: %s", first["name"], raw)
+	if first["name"] != "node" {
+		t.Fatalf("the first level is %v, want the node: %s", first["name"], raw)
 	}
 
-	groups, _ := first["groups"].([]any)
+	var clique map[string]any
+	for _, level := range levels {
+		if l, _ := level.(map[string]any); l["name"] == "clique" {
+			clique = l
+		}
+	}
+	if clique == nil {
+		t.Fatalf("the report has no clique level: %s", raw)
+	}
+
+	groups, _ := clique["groups"].([]any)
 	if len(groups) != 1 {
 		t.Fatalf("the clique level has %d groups, want 1: %s", len(groups), raw)
 	}

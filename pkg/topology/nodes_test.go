@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 	"github.com/NVIDIA/kubectl-nv/pkg/source"
 	"github.com/NVIDIA/kubectl-nv/pkg/topology"
 )
@@ -54,7 +55,56 @@ func apiNode(name string, allocatable int64, labels map[string]string) corev1.No
 		Status: corev1.NodeStatus{
 			Capacity:    corev1.ResourceList{"nvidia.com/gpu": quantity},
 			Allocatable: corev1.ResourceList{"nvidia.com/gpu": quantity},
+			Conditions: []corev1.NodeCondition{
+				{Type: corev1.NodeReady, Status: corev1.ConditionTrue},
+			},
 		},
+	}
+}
+
+// TestBuildNodesCarriesWhetherAPodCouldLandThere: the fit leaves out cordoned
+// and not-Ready nodes, so a builder that does not read those two fields hands
+// it a cluster where every node looks unusable and every job fits nowhere.
+func TestBuildNodesCarriesWhetherAPodCouldLandThere(t *testing.T) {
+	t.Parallel()
+
+	ready := apiNode("ready", 8, nil)
+
+	cordoned := apiNode("cordoned", 8, nil)
+	cordoned.Spec.Unschedulable = true
+
+	notReady := apiNode("not-ready", 8, nil)
+	notReady.Status.Conditions = []corev1.NodeCondition{
+		{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+	}
+
+	silent := apiNode("silent", 8, nil)
+	silent.Status.Conditions = nil
+
+	got, err := topology.BuildNodes(context.Background(), &stubNodes{
+		nodes: []corev1.Node{ready, cordoned, notReady, silent},
+	})
+	if err != nil {
+		t.Fatalf("BuildNodes: %v", err)
+	}
+
+	byName := map[string]inventory.GPUNode{}
+	for _, n := range got {
+		byName[n.Name] = n
+	}
+
+	if !byName["ready"].Ready || byName["ready"].Unschedulable {
+		t.Errorf("the ready node came back ready=%v unschedulable=%v, want true and false",
+			byName["ready"].Ready, byName["ready"].Unschedulable)
+	}
+	if !byName["cordoned"].Unschedulable {
+		t.Error("the cordoned node did not come back cordoned")
+	}
+	if byName["not-ready"].Ready {
+		t.Error("the node whose Ready condition is False came back ready")
+	}
+	if byName["silent"].Ready {
+		t.Error("a node with no conditions at all came back ready: nothing said it was")
 	}
 }
 
