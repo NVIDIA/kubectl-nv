@@ -587,3 +587,29 @@ func TestTopologyAnswersWithTheNodeLevelForASinglePod(t *testing.T) {
 		t.Errorf("the smallest level that fits is %v, want the node\n%s", fit["smallest"], raw)
 	}
 }
+
+// TestTopologyExitsFourWhenTheKueueReadFails: a Kueue read that fails for any
+// reason other than a denial or an absent CRD means the cluster could not be
+// talked to. Printing the report anyway and exiting 3 would say "here is your
+// topology, some of it is missing", when what happened is that the run hit a
+// transport failure part way through and has no idea what else it missed.
+func TestTopologyExitsFourWhenTheKueueReadFails(t *testing.T) {
+	raw, err := runWith(t, []string{"-o", "json"},
+		func(cs *fake.Clientset, dyn *dynamicfake.FakeDynamicClient) {
+			kueueDiscovery(cs)
+			dyn.PrependReactor("list", "topologies", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("connection refused")
+			})
+		},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if err == nil {
+		t.Fatal("a failed Kueue read exited 0")
+	}
+	if got := output.ExitCodeFor(err); got != output.ExitError {
+		t.Errorf("exit code is %d, want %d (%v)", got, output.ExitError, err)
+	}
+	if raw != "" {
+		t.Errorf("a report was printed for a run that failed part way through:\n%s", raw)
+	}
+}

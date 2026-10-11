@@ -258,6 +258,16 @@ func TestReportDeepCopyDoesNotShareItsSlices(t *testing.T) {
 		t.Fatal("DeepCopyObject did not return a *TopologyReport")
 	}
 
+	// Checked before anything is indexed: an empty fixture here would panic
+	// and take the whole test binary with it, and a panic hides every test
+	// that had not run yet.
+	if len(copied.Fit.Excluded) == 0 {
+		t.Fatal("the fixture excluded no node, so nothing below is exercised")
+	}
+	if len(copied.Levels) == 0 || len(copied.Levels[0].Groups) == 0 || len(copied.Fit.Levels) == 0 {
+		t.Fatal("the fixture has no levels or groups, so nothing below is exercised")
+	}
+
 	copied.Levels[0].Groups[0].Nodes[0] = "mutated"
 	copied.Levels[0].Groups[0].Value = "mutated"
 	copied.PartialNodes[0].Present[0] = "mutated"
