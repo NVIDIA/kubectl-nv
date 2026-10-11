@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
@@ -177,9 +178,26 @@ func TestRulesReturnsACopy(t *testing.T) {
 	}
 }
 
+// swapDefaultRegistry points the package level Register and Rules at a fresh
+// registry for the duration of one test and restores the real one afterwards.
+//
+// Without it the test leaves its rule in the process-wide registry, and a
+// second run of the same test in the same binary, which is what -count=2 does,
+// panics on the duplicate code. A test that only passes once is not a test.
+func swapDefaultRegistry(t *testing.T) {
+	t.Helper()
+
+	saved := defaultRegistry
+	defaultRegistry = NewRegistry()
+
+	t.Cleanup(func() { defaultRegistry = saved })
+}
+
 // The package level Register and Rules are the ones rule files use. They have
 // to reach the same registry.
 func TestPackageLevelRegistry(t *testing.T) {
+	swapDefaultRegistry(t)
+
 	Register(stubRule{code: "NV-TOPO-900"})
 
 	var found bool
@@ -195,9 +213,76 @@ func TestPackageLevelRegistry(t *testing.T) {
 	}
 }
 
-// Input is the whole read surface of a rule. If a field it names disappears,
-// every rule that reads it stops compiling, so the contract is pinned here.
-func TestInputCarriesEverythingARuleReads(t *testing.T) {
+// The swap has to actually isolate: after the cleanup the rule the test
+// registered must be gone, or the next test in the binary inherits it.
+func TestPackageLevelRegistryIsRestored(t *testing.T) {
+	before := len(Rules())
+
+	t.Run("registers into a swapped registry", func(t *testing.T) {
+		swapDefaultRegistry(t)
+		Register(stubRule{code: "NV-TOPO-901"})
+
+		if len(Rules()) != 1 {
+			t.Fatalf("swapped registry holds %d rules, want 1", len(Rules()))
+		}
+	})
+
+	if got := len(Rules()); got != before {
+		t.Errorf("the default registry holds %d rules after the subtest, want %d", got, before)
+	}
+
+	for _, rule := range Rules() {
+		if rule.Code() == "NV-TOPO-901" {
+			t.Error("a rule registered inside the subtest leaked into the default registry")
+		}
+	}
+}
+
+// A Registry used before NewRegistry ran has a nil map. Assigning into one
+// panics with a runtime error that says nothing about rules, so the zero value
+// has to work rather than fail obscurely.
+func TestZeroValueRegistryWorks(t *testing.T) {
+	t.Parallel()
+
+	var reg Registry
+
+	if got := len(reg.Rules()); got != 0 {
+		t.Errorf("a zero registry holds %d rules, want 0", got)
+	}
+
+	if msg := panicMessage(t, func() { reg.Register(stubRule{code: "NV-DP-001"}) }); msg != "" {
+		t.Fatalf("registering into a zero registry panicked: %s", msg)
+	}
+
+	rules := reg.Rules()
+	if len(rules) != 1 || rules[0].Code() != "NV-DP-001" {
+		t.Errorf("zero registry = %v, want one NV-DP-001", rules)
+	}
+}
+
+// A nil rule reaches Register when a rule file's constructor returns nil on a
+// path nobody tested. Calling Code on it panics with a nil pointer dereference
+// pointing at this package, which sends the reader here rather than to their
+// own file.
+func TestRegisterRejectsNilRule(t *testing.T) {
+	t.Parallel()
+
+	reg := NewRegistry()
+
+	got := panicMessage(t, func() { reg.Register(nil) })
+
+	const want = "health: Register was called with a nil rule"
+	if got != want {
+		t.Errorf("panic =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestInputIsACompileTimePinOnWhatARuleMayRead does not exercise behaviour:
+// it names every field of Input in a composite literal, so that removing or
+// renaming one stops this file compiling. Tracks E and G read these fields, and
+// a field that quietly disappears between the fork and the merge is a conflict
+// in three worktrees at once.
+func TestInputIsACompileTimePinOnWhatARuleMayRead(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
@@ -208,6 +293,8 @@ func TestInputCarriesEverythingARuleReads(t *testing.T) {
 		ClusterPolicies:   []unstructured.Unstructured{{Object: map[string]any{"kind": "ClusterPolicy"}}},
 		OperatorVersion:   "v25.3.0",
 		OperatorInstalled: true,
+		ComputeDomains:    []unstructured.Unstructured{{Object: map[string]any{"kind": "ComputeDomain"}}},
+		ResourceSlices:    []resourcev1.ResourceSlice{{Spec: resourcev1.ResourceSliceSpec{Driver: "gpu.nvidia.com"}}},
 		Events:            []corev1.Event{{Reason: "Started"}},
 		Now:               now,
 	}
@@ -234,5 +321,13 @@ func TestInputCarriesEverythingARuleReads(t *testing.T) {
 
 	if !in.Hinted[0].Hinted || !in.OperatorInstalled || in.Events[0].Reason != "Started" {
 		t.Errorf("Input = %+v", in)
+	}
+
+	if in.ComputeDomains[0].Object["kind"] != "ComputeDomain" {
+		t.Errorf("ComputeDomains = %+v", in.ComputeDomains)
+	}
+
+	if in.ResourceSlices[0].Spec.Driver != "gpu.nvidia.com" {
+		t.Errorf("ResourceSlices = %+v", in.ResourceSlices)
 	}
 }

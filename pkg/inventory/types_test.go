@@ -147,6 +147,19 @@ func TestGPUNodeZeroValueHasNoNulls(t *testing.T) {
 		}
 	}
 
+	// mig.resources is a map one level down, so it needs its own look.
+	var mig struct {
+		Resources json.RawMessage `json:"resources"`
+	}
+
+	if err := json.Unmarshal(got["mig"], &mig); err != nil {
+		t.Fatalf("unmarshalling mig: %v", err)
+	}
+
+	if string(mig.Resources) != "{}" {
+		t.Errorf("mig.resources = %s, want {}", mig.Resources)
+	}
+
 	if bytes.Contains(raw, []byte("null")) {
 		t.Errorf("zero GPUNode marshals a null somewhere:\n%s", raw)
 	}
@@ -242,6 +255,49 @@ func TestGPUNodeListZeroValue(t *testing.T) {
 
 	if bytes.Contains(raw, []byte("null")) {
 		t.Errorf("zero GPUNodeList marshals a null:\n%s", raw)
+	}
+}
+
+// A mixed-strategy node advertises one extended resource per MIG profile and
+// no nvidia.com/gpu at all, so the per-profile counts are the only numbers
+// that describe its capacity. They are keyed by the full resource name, the
+// same string pkg/source classifies membership on.
+func TestMIGResourcesCarryPerProfileCounts(t *testing.T) {
+	t.Parallel()
+
+	node := GPUNode{MIG: MIG{
+		Strategy: "mixed",
+		Resources: map[string]ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 7, Allocatable: 6},
+			"nvidia.com/mig-2g.20gb": {Capacity: 3, Allocatable: 3},
+		},
+	}}
+
+	raw, err := json.Marshal(node)
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+
+	var got struct {
+		MIG struct {
+			Resources map[string]ResourceCount `json:"resources"`
+		} `json:"mig"`
+	}
+
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+
+	if len(got.MIG.Resources) != 2 {
+		t.Fatalf("mig.resources has %d entries, want 2", len(got.MIG.Resources))
+	}
+
+	if c := got.MIG.Resources["nvidia.com/mig-1g.10gb"]; c.Capacity != 7 || c.Allocatable != 6 {
+		t.Errorf("mig-1g.10gb = %+v, want {Capacity:7 Allocatable:6}", c)
+	}
+
+	if !bytes.Contains(raw, []byte(`"nvidia.com/mig-2g.20gb":{"capacity":3,"allocatable":3}`)) {
+		t.Errorf("mig-2g.20gb is not on the wire as expected:\n%s", raw)
 	}
 }
 
