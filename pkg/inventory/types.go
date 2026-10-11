@@ -41,10 +41,10 @@
 //     The single documented exception is InitResult.ExitCode, where the
 //     alternative to an absent key is a null.
 //
-// GPUNode's own fields carry no omitempty either: the field set a reader sees
-// is the same on every node, so a jq expression written against one node works
-// against all of them. The nested types keep omitempty, because a rule reads
-// those through the Go fields rather than off the wire.
+// Nothing here carries omitempty, nested types included, with the one
+// exception named above: the field set a reader sees is the same on every
+// node, so a jq expression written against one node works against all of them
+// and a consumer never has to tell "absent" from "empty".
 //
 // Shaping cluster objects into this model is pkg/source's caller's job; this
 // package defines the model, its deep copy and its JSON, and nothing else.
