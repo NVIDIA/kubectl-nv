@@ -72,6 +72,9 @@ const (
 	KindTopologyReport = "TopologyReport"
 	// KindBundleManifest is the index of a must-gather bundle.
 	KindBundleManifest = "BundleManifest"
+	// KindDebugReport is one node's inventory next to the must-gather bundle
+	// collected for it.
+	KindDebugReport = "DebugReport"
 )
 
 // GroupVersion is the group and version of every kind in this contract.

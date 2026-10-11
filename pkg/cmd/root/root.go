@@ -29,6 +29,7 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/adm"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/debug"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/info"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/list"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
@@ -165,6 +166,7 @@ func NewCommand(version string, d Deps) *cobra.Command {
 
 	root.AddCommand(list.NewCommand(o))
 	root.AddCommand(info.NewCommand(o))
+	root.AddCommand(debug.NewCommand(o, runMustGather))
 
 	return root
 }
