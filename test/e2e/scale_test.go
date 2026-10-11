@@ -96,7 +96,7 @@ func TestScaleLane(t *testing.T) {
 	total, onFake := waitForLaneToSettle(t, cfg.SettleTimeout)
 	report.PodsTotal = total
 	report.PodsOnFakeNodes = onFake
-	t.Logf("scale: lane laneSettled with %d pods, %d of them on fake nodes", total, onFake)
+	t.Logf("scale: lane settled with %d pods, %d of them on fake nodes", total, onFake)
 
 	// -----------------------------------------------------------------
 	// list
@@ -222,7 +222,7 @@ func measure(t *testing.T, report *scaleReport, runs int, threshold time.Duratio
 }
 
 // waitForLaneToSettle blocks until the lane has stopped changing underneath
-// the measurement, and returns the pod counts it laneSettled at.
+// the measurement, and returns the pod counts it settled at.
 //
 // Two conditions, both needed. Every DaemonSet has to have placed a pod on
 // every node it wants one on, and the total pod count has to be the same twice
@@ -262,7 +262,7 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("the lane had not laneSettled after %s: %s", timeout, reason)
+			t.Fatalf("the lane had not settled after %s: %s", timeout, reason)
 		}
 		t.Logf("scale: waiting for the lane to settle: %s", reason)
 		time.Sleep(settlePoll)

@@ -539,10 +539,10 @@ func scalePendingDaemonSets(items []appsv1.DaemonSet) []string {
 	return pending
 }
 
-// laneSettled decides whether the lane has stopped moving, and when it has not,
-// says what is still moving. previous is the pod count from the poll before
-// this one, or -1 on the first poll: a lane is never called laneSettled on the
-// strength of a single observation, because one count on its own cannot be
+// laneSettled decides whether the lane has stopped moving, and when it has
+// not, says what is still moving. previous is the pod count from the poll
+// before this one, or -1 on the first poll: a lane is never called settled on
+// the strength of a single observation, because one count on its own cannot be
 // compared with anything.
 func laneSettled(pending []string, total, previous int) (bool, string) {
 	switch {

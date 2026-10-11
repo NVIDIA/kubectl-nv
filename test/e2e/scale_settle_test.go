@@ -29,8 +29,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// scaleDaemonSet builds one DaemonSet status: how many nodes it wants a pod on, how many
-// it has placed one on, and how many of those are Ready.
+// scaleDaemonSet builds one DaemonSet status: how many nodes it wants a pod
+// on, how many it has placed one on, and how many of those are Ready.
 func scaleDaemonSet(namespace, name string, desired, current, ready int32) appsv1.DaemonSet {
 	return appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
@@ -69,7 +69,7 @@ func TestPendingDaemonSets(t *testing.T) {
 		}
 	})
 
-	t.Run("placed but not ready still counts as laneSettled", func(t *testing.T) {
+	t.Run("placed but not ready still counts as settled", func(t *testing.T) {
 		t.Parallel()
 
 		// A fake node's pods are marked Ready by KWOK, not by a kubelet.
@@ -84,7 +84,7 @@ func TestPendingDaemonSets(t *testing.T) {
 		}
 	})
 
-	t.Run("a DaemonSet that wants no nodes is laneSettled", func(t *testing.T) {
+	t.Run("a DaemonSet that wants no nodes is settled", func(t *testing.T) {
 		t.Parallel()
 
 		got := scalePendingDaemonSets([]appsv1.DaemonSet{scaleDaemonSet("gpu-operator", "mig-manager", 0, 0, 0)})
@@ -111,10 +111,10 @@ func TestSettled(t *testing.T) {
 		},
 		{
 			// The very first poll. One observation cannot be compared with
-			// anything, and calling the lane laneSettled on it would mean
+			// anything, and calling the lane settled on it would mean
 			// measuring whatever happened to be true the instant the suite
 			// started.
-			"the first poll is never laneSettled",
+			"the first poll is never settled",
 			nil, 6042, -1, false,
 			"the pod count is 6042, with nothing yet to compare it against",
 		},
