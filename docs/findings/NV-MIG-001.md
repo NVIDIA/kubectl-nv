@@ -31,13 +31,31 @@ backwards is the easy mistake:
 
 | Strategy | What the node advertises | Fires when |
 |---|---|---|
-| `single` | every partition as `nvidia.com/gpu`, and no `nvidia.com/mig-*` at all | the node advertises a `nvidia.com/mig-*` resource, which its own strategy does not serve |
-| `mixed` | one `nvidia.com/mig-<profile>` per partition, and no `nvidia.com/gpu` | a partitioning config was applied and the node advertises no `nvidia.com/mig-*` at all, so there is nothing a MIG workload can ask for |
+| `single` | every partition as `nvidia.com/gpu`, and no `nvidia.com/mig-*` at all | the node advertises a `nvidia.com/mig-*` resource with capacity above zero, which its own strategy does not serve |
+| `mixed` | one `nvidia.com/mig-<profile>` per partition, and no `nvidia.com/gpu` | a partitioning config was applied and the node advertises no `nvidia.com/mig-*` with capacity above zero, so there is nothing a MIG workload can ask for |
 | `none` | whole GPUs | never |
 
 `none` on MIG-capable hardware is the Mokka main lane, gb300 with
 `nvidia.com/mig.capable=true` and strategy `none`, and it is healthy:
 nothing was asked for and nothing is wrong.
+
+### Only a profile with capacity above zero counts
+
+The kubelet does not drop a removed extended resource from a node's
+status, it keeps it at zero. A node partitioned last week and running
+whole GPUs today still carries its old `nvidia.com/mig-1g.10gb` entry
+for ever, and counting that leftover reports a working single-strategy
+node as advertising profiles its strategy does not serve. The same
+predicate decides NV-NODE-002's "this node's zero `nvidia.com/gpu`
+capacity is legitimate", so the two cannot disagree about what a
+mixed-strategy node is.
+
+### Hinted nodes are checked too
+
+A node the mig-manager is reconfiguring advertises its profiles at zero
+for a while, which is not GPU-node membership, so it is in the hinted
+inventory exactly while its configuration is the thing that is wrong.
+The Mokka control plane carries no MIG labels at all.
 
 ### When the rule stays quiet
 

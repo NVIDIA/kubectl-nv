@@ -1,7 +1,13 @@
 # NV-CD-001: a ComputeDomain covering the node is not serving it
 
-Severity: error for the daemon, warning for the missing clique.
-Component: `compute-domain-daemon`, or `node` for the missing clique.
+Severity: info. Component: `compute-domain-daemon`, or `node` for the
+missing clique.
+
+Informational until the Phase 2 false-positive baseline. The finding is
+real, and nothing yet says how often a healthy fleet produces one; a rule
+that fails a pipeline before anybody has measured that is a rule
+operators switch off rather than read. The severity is raised once the
+baseline says what a clean cluster looks like.
 
 ## Symptom
 
@@ -39,7 +45,8 @@ naming both, sorted and comma joined.
 
 ### Where these facts come from
 
-NVIDIA DRA driver `fb8b9674` (`main` at 2026-10-08):
+NVIDIA DRA driver `fb8b9674` (`main` at 2026-10-08; the current release
+is v0.5.0, 2026-08-19):
 
 - `api/nvidia.com/resource/v1beta1/computedomain.go` for the status
   shape: `ComputeDomainStatus.Nodes`, each a `ComputeDomainNode` with
@@ -50,7 +57,7 @@ NVIDIA DRA driver `fb8b9674` (`main` at 2026-10-08):
   one. `api/nvidia.com/resource` holds `v1beta1` and nothing else at
   v25.3.0, v25.8.0 and v25.12.0 alike.
 - `templates/compute-domain-daemon.tmpl.yaml` and
-  `cmd/compute-domain-daemon/common.go:44` for the daemon pod's one
+  `cmd/compute-domain-daemon/common.go:32` for the daemon pod's one
   label, `resource.nvidia.com/computeDomain`, whose value is the
   domain's UID.
 
@@ -73,7 +80,7 @@ The daemon finding:
 | Key | Meaning |
 |---|---|
 | `computeDomain` | the domain, as `<namespace>/<name>`, because ComputeDomains are namespaced |
-| `computeDomainStatus` | `status.status`, the domain's global verdict |
+| `computeDomainStatus` | `status.status`, the domain's global verdict, absent when the object carries none |
 | `nodeStatus` | this node's entry in `status.nodes`, `Ready` or `NotReady` |
 | `cliqueID` | the clique the domain recorded for the node, absent when it recorded none |
 | `pod` | the IMEX daemon pod on the node, absent when there is none |
@@ -87,9 +94,14 @@ The clique finding:
 
 ## Versions
 
-GPU Operator v25.3.0 and above, the first release that ships the NVIDIA
-DRA driver and so the first where a cluster can serve a ComputeDomain at
-all. An unknown operator version still runs the rule.
+Every GPU Operator version this plugin supports, and clusters with no GPU
+Operator at all.
+
+There is deliberately no operator floor. The NVIDIA DRA driver installs
+from a chart of its own, `dra-driver-nvidia-gpu`, against any operator
+version or none, so a cluster serving ComputeDomains says nothing about
+which operator it runs. The GPU Operator did not ship a DRA driver operand
+of its own until v26.7.0 (gpu-operator commit `7a9cf1966`, 2026-07-23).
 
 ## Documentation
 

@@ -51,9 +51,6 @@ The reason and the message shape are the upgrade controller's own:
 `gpu` for this label (k8s-operator-libs `pkg/upgrade/util.go:158`,
 `pkg/upgrade/node_upgrade_state_provider.go:129`, `pkg/upgrade/consts.go`).
 
-Must-gather does not collect events yet, so a bundle replay reports the
-stuck states at `info`.
-
 ### When the rule stays quiet
 
 - Any other state, the empty label included. `upgrade-done` is the
@@ -82,6 +79,13 @@ Every GPU Operator version this plugin supports.
 
 - <https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-driver-upgrades.html>
 - <https://github.com/NVIDIA/k8s-operator-libs/blob/main/pkg/upgrade/consts.go>
+
+## Flag
+
+`--upgrade-stuck-after` is the window, and it defaults to `30m0s`. It
+must be positive: a window of zero would report every node the instant it
+entered an upgrade step and a negative one every node always, so either
+is rejected as a usage error, exit 2, before the cluster is read.
 
 ## Next command
 

@@ -1,7 +1,16 @@
 # NV-NODE-005: an NVSentinel check is failing, or the node is cordoned
 
-Severity: error for the health check, info for the cordon. Component:
-`node`.
+Severity: info. Component: `node`.
+
+Informational until the Phase 2 false-positive baseline. The finding is
+real, and nothing yet says how often a healthy fleet produces one; a rule
+that fails a pipeline before anybody has measured that is a rule
+operators switch off rather than read. The severity is raised once the
+baseline says what a clean cluster looks like.
+
+It applies with particular force here: what NVSentinel's checks are
+called and how often they fire is a property of each deployment's
+configuration, and nothing in this repository has seen a real one.
 
 ## Symptom
 
@@ -50,7 +59,8 @@ and line 950 builds the reason from the same name plus `IsNotHealthy` or
 scheduler, which is worth saying in a report about why no work is
 landing, but it is usually somebody doing maintenance on purpose: an
 error there would make `kubectl nv health` fail a pipeline every time an
-operator drained a node. So a cordon on its own is `info`.
+operator drained a node. A cordon stays `info` whatever the baseline
+says about the health checks.
 
 ### When the rule stays quiet
 
