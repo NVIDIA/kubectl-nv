@@ -33,6 +33,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -307,7 +308,18 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 	t.Helper()
 
 	clientset := fake.NewSimpleClientset(clusterObjects()...)
-	dyn := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	// The dynamic fake panics on a List of a resource whose list kind it was
+	// not told about, so every custom resource the must-gather reads is
+	// registered even though this cluster holds none of them.
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
+		map[schema.GroupVersionResource]string{
+			{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
+			{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
+			{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
+			{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
+			{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
+			{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}:        "DeviceClassList",
+		})
 	rec.install(&clientset.Fake)
 	rec.install(&dyn.Fake)
 
@@ -323,10 +335,19 @@ func newTestCommand(t *testing.T, rec *recorder) *cobra.Command {
 		Streams: genericiooptions.NewTestIOStreamsDiscard(),
 		Factory: f,
 		MustGather: func(o *mustgather.Options) error {
-			// The live fetcher execs into a pod; stubbing it keeps the rest of the
-			// gather, including every List it makes, under the fakes.
+			// The two live exec paths, the bug report copy and the device usage,
+			// talk SPDY to a real API server. Stubbing both keeps the rest of
+			// the gather, including every List it makes, under the fakes.
+			//
+			// pods/exec is a POST, which this guard treats as a write, and it
+			// is the one call kubectl-nv is allowed to make: it reads a file
+			// out of a driver pod and changes nothing. It is behind --no-exec
+			// for the users who will not have it.
 			o.FetchPodFile = func(pod *v1.Pod, destPath string) error {
 				return os.WriteFile(destPath, []byte(pod.Name), 0o600)
+			}
+			o.RunInPod = func(pod *v1.Pod, _, _ string) (string, error) {
+				return pod.Name, nil
 			}
 			return mustgather.Run(o, f, output.NewLogger(genericiooptions.NewTestIOStreamsDiscard(), output.LoggerOptions{}))
 		},

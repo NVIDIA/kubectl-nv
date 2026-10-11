@@ -82,6 +82,18 @@ func containerNamesOf(pod v1.Pod) []string {
 	return names
 }
 
+// logState is the state the log collector runs over, built from the pod lists
+// a test set up, with the namespace already resolved so that a hand-built
+// Gatherer is not asked to look it up.
+func logState(operator *v1.Pod, operands []v1.Pod, namespace string) *gatherState {
+	return &gatherState{
+		operatorNamespace: namespace,
+		operatorPod:       operator,
+		operandPods:       operands,
+		prepared:          true,
+	}
+}
+
 func podWithContainers(namespace, name string, initContainers, containers []string) v1.Pod {
 	toContainers := func(names []string) []v1.Container {
 		out := make([]v1.Container, 0, len(names))
@@ -124,18 +136,18 @@ func TestGatherPodLogsPerContainerWithTimestamps(t *testing.T) {
 		streamPodLogs: apiServerLogStreamer([]v1.Pod{operatorPod, operandPod}, &requests),
 	}
 
-	podInfo := &PodInfo{
-		OperatorPods: &v1.PodList{Items: []v1.Pod{operatorPod}},
-		OperandPods:  &v1.PodList{Items: []v1.Pod{operandPod}},
-	}
-	if err := g.gatherPodLogs(podInfo, namespace); err != nil {
+	if err := g.gatherPodLogs(logState(&operatorPod, []v1.Pod{operandPod}, namespace)); err != nil {
 		t.Fatalf("gatherPodLogs: %v", err)
 	}
 
 	wantFiles := map[string]string{
-		// Operand pod: one file per container, named "<pod>_<container>.log".
+		// Operand pod: one file per container, named "<pod>_<container>.log",
+		// with the previous log beside it.
 		operandName + "_toolkit.log": fmt.Sprintf("[pod/%s/toolkit] "+logLine, operandName, "toolkit"),
 		operandName + "_validator.log": fmt.Sprintf("[pod/%s/validator] "+logLine, operandName,
+			"validator"),
+		operandName + "_toolkit.previous.log": fmt.Sprintf("[pod/%s/toolkit] "+logLine, operandName, "toolkit"),
+		operandName + "_validator.previous.log": fmt.Sprintf("[pod/%s/validator] "+logLine, operandName,
 			"validator"),
 		// Operator pod, current logs.
 		"gpu_operator_logs_driver-validation.log": fmt.Sprintf("[pod/%s/driver-validation] "+logLine,
@@ -175,6 +187,8 @@ func TestGatherPodLogsPerContainerWithTimestamps(t *testing.T) {
 		{namespace, operatorName, "gpu-operator-validator", true},
 		{namespace, operandName, "toolkit", false},
 		{namespace, operandName, "validator", false},
+		{namespace, operandName, "toolkit", true},
+		{namespace, operandName, "validator", true},
 	}
 	if len(requests) != len(wantRequests) {
 		t.Fatalf("made %d log requests (%v), want %d (%v)", len(requests), requests,
@@ -217,11 +231,7 @@ func TestGatherPodLogsPrefixesEveryLine(t *testing.T) {
 		},
 	}
 
-	podInfo := &PodInfo{
-		OperatorPods: &v1.PodList{Items: []v1.Pod{operatorPod}},
-		OperandPods:  &v1.PodList{Items: []v1.Pod{operandPod}},
-	}
-	if err := g.gatherPodLogs(podInfo, namespace); err != nil {
+	if err := g.gatherPodLogs(logState(&operatorPod, []v1.Pod{operandPod}, namespace)); err != nil {
 		t.Fatalf("gatherPodLogs: %v", err)
 	}
 
@@ -262,11 +272,7 @@ func TestGatherPodLogsKeepsPreviousLogsPlaceholder(t *testing.T) {
 		},
 	}
 
-	podInfo := &PodInfo{
-		OperatorPods: &v1.PodList{Items: []v1.Pod{operatorPod}},
-		OperandPods:  &v1.PodList{},
-	}
-	if err := g.gatherPodLogs(podInfo, namespace); err != nil {
+	if err := g.gatherPodLogs(logState(&operatorPod, nil, namespace)); err != nil {
 		t.Fatalf("gatherPodLogs: %v", err)
 	}
 

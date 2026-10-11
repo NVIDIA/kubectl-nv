@@ -316,8 +316,12 @@ func TestForbiddenExecExitsPartial(t *testing.T) {
 		schema.GroupResource{Resource: "pods"}, "driver-1",
 		errUnreachable)
 
+	// Both the bug report and the device usage reach the cluster through
+	// pods/exec, so RBAC refusing it refuses both. Denying only one of the two
+	// seams would leave the other one reporting a different reason.
 	opts := &Options{
 		FetchPodFile: func(*v1.Pod, string) error { return forbidden },
+		RunInPod:     func(*v1.Pod, string, string) (string, error) { return "", forbidden },
 	}
 	dir, names, err := runGather(t, opts, twoNodeCluster()...)
 	if err == nil {

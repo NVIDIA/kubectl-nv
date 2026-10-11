@@ -17,6 +17,7 @@
 package mustgather
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,7 +113,7 @@ func parityCluster() []runtime.Object {
 func TestGPUNodeTextArtifacts(t *testing.T) {
 	g, dir := newTestGatherer(t, parityCluster()...)
 
-	runCollector(t, g, "gpu-nodes")
+	mustRunCollector(t, g, "gpu-nodes")
 
 	labels := readArtifact(t, dir, "gpu_nodes.labels")
 	for _, want := range []string{"gpu-node-1", "feature.node.kubernetes.io/pci-10de.present"} {
@@ -143,9 +144,9 @@ func TestGPUNodeTextArtifacts(t *testing.T) {
 func TestOperandPodTextArtifacts(t *testing.T) {
 	g, dir := newTestGatherer(t, parityCluster()...)
 
-	runCollector(t, g, "operator-pod")
-	runCollector(t, g, "operand-pods")
-	runCollector(t, g, "pod-descriptions")
+	mustRunCollector(t, g, "operator-pod")
+	mustRunCollector(t, g, "operand-pods")
+	mustRunCollector(t, g, "pod-descriptions")
 
 	status := readArtifact(t, dir, "gpu_operand_pods.status")
 	for _, want := range []string{"NAME", "READY", "STATUS", "NODE", "nvidia-device-plugin-daemonset-aaaaa"} {
@@ -184,7 +185,7 @@ func TestOperandPodTextArtifacts(t *testing.T) {
 func TestDaemonSetTextArtifacts(t *testing.T) {
 	g, dir := newTestGatherer(t, parityCluster()...)
 
-	runCollector(t, g, "daemonsets")
+	mustRunCollector(t, g, "daemonsets")
 
 	status := readArtifact(t, dir, "gpu_operand_ds.status")
 	for _, want := range []string{"NAME", "DESIRED", "READY", "NODE SELECTOR", "nvidia-device-plugin-daemonset"} {
@@ -225,7 +226,7 @@ func TestClusterScopedCustomResources(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.collector, func(t *testing.T) {
 			g, dir := newCustomResourceGatherer(t, objects...)
-			runCollector(t, g, c.collector)
+			mustRunCollector(t, g, c.collector)
 
 			data := readArtifact(t, dir, c.file)
 			var head struct {
@@ -249,16 +250,33 @@ func TestClusterScopedCustomResources(t *testing.T) {
 
 // TestAbsentCustomResourcesAreNotAFailure keeps a cluster without KubeVirt, a
 // GPUCluster or DRA from failing the gather: the script logs and carries on,
-// and so must we.
+// and so must we. The collector is recorded as skipped with the reason, which
+// is how a reader of the bundle tells "the cluster has no KubeVirt" from
+// "nobody looked".
 func TestAbsentCustomResourcesAreNotAFailure(t *testing.T) {
-	for _, name := range []string{"gpu-cluster", "hyperconverged", "kubevirt", "device-classes"} {
+	cases := map[string]string{
+		"gpu-cluster":    "GPUCluster resource(s) not found in the cluster",
+		"hyperconverged": "HyperConverged resource(s) not found in the cluster",
+		"kubevirt":       "KubeVirt resource(s) not found in the cluster",
+		"device-classes": "DeviceClass resource(s) not found in the cluster",
+	}
+
+	for name, wantReason := range cases {
 		t.Run(name, func(t *testing.T) {
 			g, dir := newCustomResourceGatherer(t)
-			runCollector(t, g, name)
 
-			entries, err := os.ReadDir(dir)
-			if err != nil {
-				t.Fatal(err)
+			var skipped errSkipped
+			err := runCollector(t, g, name)
+			if !errors.As(err, &skipped) {
+				t.Fatalf("collector %s returned %v, want it recorded as skipped", name, err)
+			}
+			if skipped.reason != wantReason {
+				t.Errorf("skip reason = %q, want %q", skipped.reason, wantReason)
+			}
+
+			entries, rerr := os.ReadDir(dir)
+			if rerr != nil {
+				t.Fatal(rerr)
 			}
 			for _, e := range entries {
 				if strings.HasSuffix(e.Name(), ".yaml") {
@@ -276,7 +294,7 @@ func TestAbsentCustomResourcesAreNotAFailure(t *testing.T) {
 func TestMissingMarkerSaysWhy(t *testing.T) {
 	g, dir := newTestGatherer(t)
 
-	runCollector(t, g, "cluster-policy")
+	mustRunCollector(t, g, "cluster-policy")
 
 	marker := readArtifact(t, dir, "cluster_policy.missing")
 	if !strings.Contains(marker, "not installed") {
@@ -285,8 +303,10 @@ func TestMissingMarkerSaysWhy(t *testing.T) {
 }
 
 // runCollector runs one collector of the registry by name, through the same
-// state the gather builds, and fails the test when it is not there.
-func runCollector(t *testing.T, g *Gatherer, name string) {
+// state the gather builds, and returns what it reported. A collector that is
+// not in the registry fails the test: a name changed without this being
+// updated would otherwise leave the assertions below running over nothing.
+func runCollector(t *testing.T, g *Gatherer, name string) error {
 	t.Helper()
 
 	s := &gatherState{operatorNamespace: "gpu-operator"}
@@ -299,12 +319,18 @@ func runCollector(t *testing.T, g *Gatherer, name string) {
 		if err := g.prepareState(s); err != nil {
 			t.Fatalf("preparing the gather state: %v", err)
 		}
-		if err := c.Run(g, s); err != nil {
-			t.Fatalf("collector %q: %v", name, err)
-		}
-		return
+		return c.Run(g, s)
 	}
 	t.Fatalf("no collector named %q in the registry: %v", name, collectorNames())
+	return nil
+}
+
+// mustRunCollector runs a collector that is expected to produce its artifacts.
+func mustRunCollector(t *testing.T, g *Gatherer, name string) {
+	t.Helper()
+	if err := runCollector(t, g, name); err != nil {
+		t.Fatalf("collector %q: %v", name, err)
+	}
 }
 
 // collectorNames lists the registry for a failure message.

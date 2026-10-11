@@ -30,7 +30,7 @@ func TestIsOpenShiftClusterOnAnUnreachableCluster(t *testing.T) {
 func TestExecuteRemoteCommandUsesTheGivenConfig(t *testing.T) {
 	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "driver", Namespace: "gpu-operator"}}
 
-	_, _, err := executeRemoteCommand(&rest.Config{Host: "https://127.0.0.1:1"}, pod, "true")
+	_, _, err := executeRemoteCommand(&rest.Config{Host: "https://127.0.0.1:1"}, pod, "nvidia-driver-ctr", "true")
 	if err == nil {
 		t.Fatal("expected an error executing against an unreachable cluster")
 	}
