@@ -288,3 +288,19 @@ func (r *HealthReport) DeepCopyObject() runtime.Object {
 
 	return nil
 }
+
+// CatalogPath is where the catalog entry for a finding code lives in this
+// repository. It is the one definition of that path: the engine fills a
+// finding's Docs from it, and docs/findings resolves its embedded entries
+// through it, so the link in a report and the file behind `explain` cannot
+// drift apart.
+//
+// An empty code has no entry, and an empty Docs is better than a link to
+// docs/findings/.md.
+func CatalogPath(code string) string {
+	if code == "" {
+		return ""
+	}
+
+	return "docs/findings/" + code + ".md"
+}
