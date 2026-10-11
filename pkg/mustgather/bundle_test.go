@@ -19,6 +19,7 @@ package mustgather
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -289,5 +290,62 @@ func TestPodImagesCarryInitContainers(t *testing.T) {
 	}
 	if !strings.HasPrefix(got, "nvidia-operator-validator-aaaaa:\t") {
 		t.Errorf("the line does not start with the pod name and a tab:\n%q", got)
+	}
+}
+
+// TestAFailedWriteLeavesNoArtifact covers a collector that starts writing and
+// then fails. A half-written file is worse than a missing one: the manifest
+// indexes it with the digest it actually has, so the bundle is self-consistent
+// and a reader takes a truncated YAML for the cluster's whole state.
+func TestAFailedWriteLeavesNoArtifact(t *testing.T) {
+	g, dir := newTestGatherer(t)
+
+	halfway := errors.New("the disk went away")
+	err := g.writeArtifactFile("nodes.yaml", func(w io.Writer) error {
+		if _, werr := io.WriteString(w, "apiVersion: v1\nitems:\n"); werr != nil {
+			return werr
+		}
+		return halfway
+	})
+	if !errors.Is(err, halfway) {
+		t.Fatalf("writeArtifactFile returned %v, want the write failure", err)
+	}
+
+	for _, name := range artifactNames(t, dir) {
+		if strings.HasPrefix(name, "nodes.yaml") {
+			t.Errorf("the bundle holds %s after the write failed", name)
+		}
+	}
+}
+
+// TestASucceededWriteLeavesNoTemporaryFile is the other half: the artifact
+// lands under its own name and nothing of the write is left beside it.
+func TestASucceededWriteLeavesNoTemporaryFile(t *testing.T) {
+	g, dir := newTestGatherer(t)
+
+	if err := g.writeArtifactFile("nodes.yaml", func(w io.Writer) error {
+		_, werr := io.WriteString(w, "apiVersion: v1\n")
+		return werr
+	}); err != nil {
+		t.Fatalf("writeArtifactFile: %v", err)
+	}
+
+	names := artifactNames(t, dir)
+	if !contains(names, "nodes.yaml") {
+		t.Errorf("the bundle holds no nodes.yaml: %v", names)
+	}
+	for _, name := range names {
+		if strings.HasSuffix(name, artifactTempSuffix) {
+			t.Errorf("the bundle holds %s, which is a file of the writing rather than of the bundle", name)
+		}
+	}
+
+	// The mode is the bundle's, not the temporary file's.
+	info, serr := os.Stat(filepath.Join(dir, "nodes.yaml"))
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Errorf("nodes.yaml mode = %04o, want 0600", got)
 	}
 }
