@@ -19,6 +19,7 @@ package output
 import (
 	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -432,15 +433,37 @@ func TestSchemaGenerationIsDeterministic(t *testing.T) {
 	}
 }
 
-// The package level registry is what commands in other packages reach for, so
-// it has to be the same registry every time it is asked.
-func TestTheDefaultRegistryIsShared(t *testing.T) {
-	t.Parallel()
+// The package level functions are what a kind in another package registers
+// through, so a kind registered with RegisterSchema has to be the kind
+// SchemaFor and RegisteredKinds answer about. Three names on one registry
+// would otherwise be three registries.
+func TestThePackageLevelFunctionsShareOneRegistry(t *testing.T) {
+	const probe = "DefaultRegistryProbe"
 
-	if DefaultSchemaRegistry() != DefaultSchemaRegistry() {
-		t.Fatal("DefaultSchemaRegistry returned two different registries")
+	RegisterSchema(probe, &healthReport{})
+
+	kinds := RegisteredKinds()
+	if !slices.Contains(kinds, probe) {
+		t.Fatalf("RegisteredKinds is %v, want it to carry %q", kinds, probe)
 	}
-	if !reflect.DeepEqual(RegisteredKinds(), DefaultSchemaRegistry().Kinds()) {
-		t.Error("RegisteredKinds does not report the default registry's kinds")
+	if !reflect.DeepEqual(kinds, DefaultSchemaRegistry().Kinds()) {
+		t.Errorf("RegisteredKinds is %v, want the default registry's %v", kinds, DefaultSchemaRegistry().Kinds())
+	}
+
+	fromPackage, err := SchemaFor(probe)
+	if err != nil {
+		t.Fatalf("SchemaFor: %v", err)
+	}
+	fromRegistry, err := DefaultSchemaRegistry().Schema(probe)
+	if err != nil {
+		t.Fatalf("Schema: %v", err)
+	}
+	if string(fromPackage) != string(fromRegistry) {
+		t.Error("SchemaFor and the default registry answered differently")
+	}
+
+	RegisterCommandKind("default-registry-probe", probe)
+	if !slices.Contains(DefaultSchemaRegistry().Commands(), "default-registry-probe") {
+		t.Error("RegisterCommandKind did not write to the default registry")
 	}
 }
