@@ -292,3 +292,38 @@ func TestReportDeepCopyDoesNotShareItsSlices(t *testing.T) {
 		t.Error("the excluded node names are shared with the copy")
 	}
 }
+
+// TestEveryTableColumnNamesAFieldAUserCanAskFor: --fields matches a column by
+// its Field, so a column that leaves it empty cannot be asked for by name and
+// disappears the moment --fields is given. The path also has to be one
+// output.FieldPaths accepts, or a user who reads the column header and asks
+// for the obvious field is told it does not exist.
+func TestEveryTableColumnNamesAFieldAUserCanAskFor(t *testing.T) {
+	t.Parallel()
+
+	report := topology.Build(topology.Input{Nodes: twoCliques()})
+	report.Fit = report.FitJob(topology.JobRequest{Name: "trainer", Pods: 1, GPUsPerPod: 1}, twoCliques())
+
+	valid, err := output.FieldPaths(report)
+	if err != nil {
+		t.Fatalf("reading the field paths of a report: %v", err)
+	}
+
+	known := make(map[string]bool, len(valid))
+	for _, path := range valid {
+		known[path] = true
+	}
+
+	for _, wide := range []bool{false, true} {
+		for _, column := range report.TableColumns(wide) {
+			if column.Field == "" {
+				t.Errorf("column %q (wide=%v) names no field", column.Header, wide)
+				continue
+			}
+			if !known[column.Field] {
+				t.Errorf("column %q (wide=%v) names field %q, which is not one of %v",
+					column.Header, wide, column.Field, valid)
+			}
+		}
+	}
+}

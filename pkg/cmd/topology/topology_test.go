@@ -613,3 +613,132 @@ func TestTopologyExitsFourWhenTheKueueReadFails(t *testing.T) {
 		t.Errorf("a report was printed for a run that failed part way through:\n%s", raw)
 	}
 }
+
+// TestTopologyKeepsTheReportWhenThePodReadIsDenied is the RBAC case on the
+// pods: the nodes and their labels were readable, so the levels and the node
+// counts are the answer to most of the question. What is not known is what
+// already runs there, and the report says so rather than reporting the
+// cluster as idle.
+func TestTopologyKeepsTheReportWhenThePodReadIsDenied(t *testing.T) {
+	raw, err := runWith(t, []string{"-o", "json"},
+		func(cs *fake.Clientset, _ *dynamicfake.FakeDynamicClient) {
+			cs.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Resource: "pods"}, "", errors.New("denied"))
+			})
+		},
+		gpuNode("node-a", "clique-a", 4),
+		gpuNode("node-b", "clique-a", 4),
+	)
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Fatalf("exit code is %d, want %d (%v)", got, output.ExitPartial, err)
+	}
+
+	report := decode(t, raw)
+
+	levels, _ := report["levels"].([]any)
+	if len(levels) == 0 {
+		t.Fatalf("the report carries no levels: the nodes were readable\n%s", raw)
+	}
+
+	var clique map[string]any
+	for _, level := range levels {
+		if l, _ := level.(map[string]any); l["name"] == "clique" {
+			clique = l
+		}
+	}
+	if clique == nil {
+		t.Fatalf("the report has no clique level\n%s", raw)
+	}
+
+	groups, _ := clique["groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("the clique level has %d groups, want 1\n%s", len(groups), raw)
+	}
+
+	group, _ := groups[0].(map[string]any)
+	if group["requestedKnown"] != false {
+		t.Errorf("requestedKnown is %v, want false: the pods were never listed\n%s", group["requestedKnown"], raw)
+	}
+	if count, _ := group["nodeCount"].(float64); count != 2 {
+		t.Errorf("nodeCount is %v, want 2: both nodes were read\n%s", group["nodeCount"], raw)
+	}
+	if free, _ := group["free"].(float64); free != 0 {
+		t.Errorf("free is %v, want 0 while nothing is known about what runs there\n%s", group["free"], raw)
+	}
+
+	status, _ := report["status"].(map[string]any)
+	if status["partial"] != true {
+		t.Errorf("status.partial is %v, want true\n%s", status["partial"], raw)
+	}
+
+	unreachable, _ := status["unreachable"].([]any)
+	if len(unreachable) != 1 {
+		t.Fatalf("status.unreachable holds %d entries, want 1\n%s", len(unreachable), raw)
+	}
+	if entry, _ := unreachable[0].(map[string]any); entry["resource"] != "pods" {
+		t.Errorf("the unreachable entry names %v, want pods\n%s", entry["resource"], raw)
+	}
+}
+
+// TestTopologyTakesTheSharedOutputFlags: -o, --fields and --limit come from
+// one place, so that the MCP server and every command agree on what the
+// format flag is called.
+func TestTopologyTakesTheSharedOutputFlags(t *testing.T) {
+	raw, err := run(t, []string{"-o", "json", "--fields", "levels.name"},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if err != nil {
+		t.Fatalf("topology --fields levels.name: %v", err)
+	}
+
+	if !strings.Contains(raw, `"name"`) {
+		t.Errorf("the projection carries no level names:\n%s", raw)
+	}
+	if strings.Contains(raw, `"allocatable"`) {
+		t.Errorf("the projection carries a field nobody asked for:\n%s", raw)
+	}
+}
+
+// TestTopologyProjectsTheTableColumns: --fields on a table keeps the columns
+// the user named, which is the same vocabulary as -o json.
+func TestTopologyProjectsTheTableColumns(t *testing.T) {
+	raw, err := run(t, []string{"--fields", "levels.groups.free"},
+		gpuNode("node-a", "clique-a", 4),
+	)
+	if err != nil {
+		t.Fatalf("topology --fields levels.groups.free: %v", err)
+	}
+
+	header := strings.Fields(strings.Split(raw, "\n")[0])
+	if len(header) != 1 || header[0] != "FREE" {
+		t.Errorf("the header is %v, want just FREE:\n%s", header, raw)
+	}
+}
+
+// TestTopologyRefusesAnUnknownField keeps the field vocabulary closed, so a
+// typo is exit 2 rather than an empty projection.
+func TestTopologyRefusesAnUnknownField(t *testing.T) {
+	_, err := run(t, []string{"--fields", "levels.nonesuch"}, gpuNode("node-a", "clique-a", 4))
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+}
+
+// TestTopologyRefusesLimitOnAReportThatIsNotAList: the report is one object,
+// not a list of them, so there is nothing for --limit to cut. Answering a
+// bounded request with an unbounded one would leave the caller believing it
+// asked for less than it got.
+func TestTopologyRefusesLimitOnAReportThatIsNotAList(t *testing.T) {
+	_, err := run(t, []string{"--limit", "1"}, gpuNode("node-a", "clique-a", 4))
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+	if !strings.Contains(err.Error(), "TopologyReport") {
+		t.Errorf("the error is %q, want it to name the kind", err)
+	}
+}
