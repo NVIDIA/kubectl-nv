@@ -173,8 +173,12 @@ func TestListAgainstTheLane(t *testing.T) {
 			t.Fatalf("gpu list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
-		if !strings.Contains(res.stderr, "--include-hinted") {
-			t.Errorf("stderr does not offer --include-hinted:\n%s", res.stderr)
+		// The whole line, including the count. The lane has exactly one
+		// hinted node, the control plane, so a note saying anything else is
+		// either counting the wrong set or counting it after the wrong step.
+		want := "1 node(s) carry an NVIDIA label but advertise no GPUs; pass --include-hinted to list them"
+		if got := strings.TrimSpace(res.stderr); got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
 		}
 	})
 
@@ -238,21 +242,38 @@ func TestListAgainstTheLane(t *testing.T) {
 // TestListFromABundleMatchesTheLane is the round trip: a must-gather of the
 // lane, replayed offline, has to describe the same cluster as the live run.
 //
-// Three things a bundle cannot know are removed before the comparison:
+// Exactly five JSON fields are removed before the comparison. Every other
+// field of every node, including ones added to the model after this test was
+// written, has to be equal, which is why the comparison is over generic maps
+// rather than over a struct listing what to check.
 //
-//   - requested and requestedKnown, because must-gather records only the
-//     operator's namespace and so cannot sum the GPU demand of the cluster.
-//     The bundle says so through requestedKnown rather than by reporting a
-//     half total, and that is asserted rather than normalised away.
-//   - the operands' phase, ready and restarts, which are a moment in time: the
-//     gather and the live run are seconds apart and a restarting operand moves
-//     between them.
-//   - the node conditions and resource slices, which gpu list does not fill
-//     either way.
+// Removed at the node level:
+//
+//   - requested, and requestedKnown with it. must-gather records only the
+//     operator's namespace, so a bundle cannot sum the GPU demand of the
+//     cluster. The bundle says so through requestedKnown=false rather than by
+//     reporting the part it saw as the whole, and that is asserted below
+//     rather than normalised away.
+//
+// Removed from each operand:
+//
+//   - phase, ready and restarts. These three are a moment in time, not a
+//     property of the cluster: the gather and the live run are seconds apart,
+//     and an operand that restarts between them changes all three. The
+//     operand's name, namespace, component, images and init container results
+//     are all still compared.
+//
+// Nothing else is removed. Conditions and resourceSlices need no removal:
+// gpu list fills neither, so both are empty on both sides and are compared as
+// such.
 func TestListFromABundleMatchesTheLane(t *testing.T) {
 	b := gather(t)
 
 	live := rawList(t)
+	if live.code != 0 {
+		t.Fatalf("the live gpu list exited %d, want 0\nstderr:\n%s", live.code, live.stderr)
+	}
+
 	fromBundle := rawList(t, "--from-bundle", b.dir)
 
 	// A bundle holds one namespace, so the pod read is partial by
@@ -264,6 +285,14 @@ func TestListFromABundleMatchesTheLane(t *testing.T) {
 
 	liveNodes := decodeNodes(t, live.stdout)
 	bundleNodes := decodeNodes(t, fromBundle.stdout)
+
+	// Both sides have to hold the lane's two workers before any comparison
+	// means anything: two empty lists are equal, and would pass every
+	// assertion below while proving that neither run saw a cluster.
+	if len(liveNodes) != 2 {
+		t.Fatalf("the live run found %d GPU nodes (%v), want the lane's 2 workers",
+			len(liveNodes), listedNames(liveNodes))
+	}
 
 	if !reflect.DeepEqual(listedNames(liveNodes), listedNames(bundleNodes)) {
 		t.Fatalf("the bundle holds %v, the cluster holds %v",

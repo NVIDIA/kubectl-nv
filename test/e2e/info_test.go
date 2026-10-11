@@ -97,6 +97,9 @@ func TestInfoAgainstTheLane(t *testing.T) {
 	node := infoJSON(t, worker)
 
 	t.Run("it describes the node that was asked for", func(t *testing.T) {
+		// An exact compare, not a prefix or a substring: on this lane
+		// kubectl-nv-mokka-worker is a prefix of kubectl-nv-mokka-worker2, so
+		// a loose check passes against the wrong node.
 		if node.Metadata.Name != worker {
 			t.Errorf("name = %q, want %q", node.Metadata.Name, worker)
 		}
@@ -180,9 +183,24 @@ func TestInfoAgainstTheLane(t *testing.T) {
 			t.Fatalf("gpu info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
-		for _, want := range []string{worker, laneProduct, "device-plugin", "Conditions", "Operands"} {
-			if !strings.Contains(res.stdout, want) {
-				t.Errorf("the description does not mention %q:\n%s", want, res.stdout)
+		// Per key, by exact value. A substring check over the whole
+		// description passes when the field under test holds something else
+		// entirely, and here the node name of one worker is a prefix of the
+		// other's.
+		for _, tt := range []struct{ key, want string }{
+			{key: "Name", want: worker},
+			{key: "Product", want: laneProduct},
+			{key: "Mode", want: "device-plugin"},
+			{key: "Hinted", want: "false"},
+		} {
+			if got := describedField(t, res.stdout, tt.key); got != tt.want {
+				t.Errorf("%s = %q, want %q", tt.key, got, tt.want)
+			}
+		}
+
+		for _, heading := range []string{"Conditions:", "Operands:"} {
+			if !strings.Contains(res.stdout, heading) {
+				t.Errorf("the description has no %s section:\n%s", heading, res.stdout)
 			}
 		}
 	})
@@ -217,7 +235,12 @@ func TestInfoOnTheControlPlane(t *testing.T) {
 	}
 
 	if controlPlane == "" {
-		t.Skip("the lane has no control plane node to ask about")
+		// Not a skip. The Mokka lane always has a control plane, and it is
+		// labelled by node-feature-discovery because the simulated-GPU
+		// DaemonSet tolerates every taint. A run that cannot find one is a
+		// lane that is not the lane this suite is written against, and
+		// skipping would report that as a pass.
+		t.Fatalf("the lane has no control plane node; it holds %v", clusterNodeNames(t))
 	}
 
 	node := infoJSON(t, controlPlane)
@@ -239,4 +262,56 @@ func componentsOf(node infoNodeJSON) []string {
 	}
 
 	return out
+}
+
+// describedField returns the value of one "Key: value" line of a description,
+// so that an assertion is about that field rather than about the word
+// appearing anywhere in forty of them.
+func describedField(t *testing.T, text, key string) string {
+	t.Helper()
+
+	prefix := key + ":"
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, prefix) {
+			continue
+		}
+
+		return strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
+	}
+
+	t.Fatalf("the description has no %q line in:\n%s", key, text)
+
+	return ""
+}
+
+// TestInfoHintedFieldIsExact pins the hinted flag by value in the table view
+// too. "true" appears in a dozen places in a description.
+func TestInfoHintedFieldIsExact(t *testing.T) {
+	var controlPlane string
+
+	for _, node := range clusterNodes(t) {
+		if _, found := node.Labels[controlPlaneRoleLabel]; found {
+			controlPlane = node.Name
+
+			break
+		}
+	}
+
+	if controlPlane == "" {
+		t.Fatalf("the lane has no control plane node; it holds %v", clusterNodeNames(t))
+	}
+
+	res := run(t, "info", controlPlane)
+	if res.code != 0 {
+		t.Fatalf("gpu info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+	}
+
+	if got := describedField(t, res.stdout, "Hinted"); got != "true" {
+		t.Errorf("Hinted = %q, want true", got)
+	}
+
+	if got := describedField(t, res.stdout, "Mode"); got != "none" {
+		t.Errorf("Mode = %q, want none", got)
+	}
 }
