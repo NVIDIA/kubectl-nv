@@ -55,6 +55,7 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
+	"github.com/NVIDIA/kubectl-nv/pkg/source"
 )
 
 // operatorNamespace is where the fixture runs the operator and its operands.
@@ -980,6 +981,17 @@ func TestDebugExitsPartialWhenTheExecIsDenied(t *testing.T) {
 		t.Errorf("exit code = %d, want %d (error: %v)", got, output.ExitPartial, err)
 	}
 
+	// The gather's own error, not a report that something is missing. Being
+	// refused the exec is the one thing here the user can take to their
+	// cluster administrator, so it has to survive to the message they read.
+	var gatherErr *mustgather.Error
+	if !errors.As(err, &gatherErr) {
+		t.Fatalf("error is %T (%v), want it to unwrap to a *mustgather.Error", err, err)
+	}
+	if want := "not allowed to exec into the driver pods"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to say %q", err.Error(), want)
+	}
+
 	// The report is still printed: the bundle is worth sending, and what is
 	// missing from it is exactly what the report has to say.
 	got := decodeReport(t, r)
@@ -1398,6 +1410,21 @@ func TestDebugExitsPartialWhenPartOfTheInventoryIsDenied(t *testing.T) {
 	}
 	if got := output.ExitCodeFor(err); got != output.ExitPartial {
 		t.Errorf("exit code = %d, want %d (error: %v)", got, output.ExitPartial, err)
+	}
+
+	// The read's own error comes back, not a summary of it. A caller that
+	// branches on what was refused, rather than on the exit code alone, has to
+	// be able to reach the cause; and the message a user reads has to name the
+	// resource rather than say only that something is missing.
+	var partial *source.PartialError
+	if !errors.As(err, &partial) {
+		t.Fatalf("error is %T (%v), want it to unwrap to a *source.PartialError", err, err)
+	}
+	if partial.Resource != "resourceslices" {
+		t.Errorf("the partial error is about %q, want resourceslices", partial.Resource)
+	}
+	if !strings.Contains(err.Error(), "resourceslices") {
+		t.Errorf("error = %q, want it to name what could not be read", err.Error())
 	}
 
 	// The report is still printed: the node was read and the bundle collected,
