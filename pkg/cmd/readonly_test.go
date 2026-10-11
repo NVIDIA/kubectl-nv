@@ -72,12 +72,17 @@ var leafFixtures = map[string]leafFixture{
 	"version": {
 		args: func(*testing.T) []string { return nil },
 	},
+	"schema": {
+		// --write-dir runs the whole generator rather than one kind, which is
+		// what "make schema" does and the most this leaf ever touches.
+		args: func(t *testing.T) []string { return []string{"--write-dir", t.TempDir()} },
+	},
 }
 
 // readOptional lists the leaves that have no business talking to a cluster.
 // Every other leaf has to issue at least one read, or the run proved nothing
 // about what it would have written.
-var readOptional = map[string]bool{"version": true}
+var readOptional = map[string]bool{"version": true, "schema": true}
 
 // TestEveryCommandIsReadOnly executes every leaf of the command tree against
 // clients that fail the test on any write. The fakes cover the typed and
