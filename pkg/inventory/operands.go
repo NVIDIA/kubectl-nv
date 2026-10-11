@@ -29,7 +29,44 @@ const (
 	// componentLabel is the newer name for the same thing. The operator has
 	// used both over its lifetime, so a reader takes whichever is there.
 	componentLabel = "app.kubernetes.io/component"
+	// nameLabel is the last label to try. node-feature-discovery's worker, a
+	// pod a GPU inventory does run into, carries neither of the two above.
+	nameLabel = "app.kubernetes.io/name"
+
+	// LabelComputeDomain is the only label the DRA driver's IMEX daemon pod
+	// carries: the upstream template labels it with the compute domain UUID
+	// and with nothing else, no "app" key of any kind
+	// (templates/compute-domain-daemon.tmpl.yaml, and the key itself at
+	// cmd/compute-domain-daemon/common.go:32, nvidia-dra-driver-gpu
+	// fb8b96747). Only the key is matched; the value is a UUID.
+	LabelComputeDomain = "resource.nvidia.com/computeDomain"
+
+	// draKubeletPluginComponent is the component value the DRA driver's own
+	// charts give the kubelet plugin.
+	draKubeletPluginComponent = "kubelet-plugin"
 )
+
+// draComponentLabelKeys are the per-chart label keys the DRA driver's kubelet
+// plugin is selected by. Both are "<chart name>-component", and the chart was
+// renamed, so the same pod has shipped under two keys:
+//
+//   - nvidia-dra-driver-gpu-component, the standalone chart at v25.3.x
+//     (deployments/helm/nvidia-dra-driver-gpu/templates/_helpers.tpl, which
+//     builds the key from Chart.Name).
+//   - dra-driver-nvidia-gpu-component, after the repository rename
+//     (commit 7a5e8439c, first released in v0.4.1).
+//
+// The GPU Operator's own copy of the DaemonSet is not here: it gives the pod a
+// plain "app" label, which the ordinary path already reads.
+//
+// These are matched as exact keys with the exact value above. A prefix match
+// would claim the pods of any chart whose name ends the same way, and a
+// value-only match would claim the driver's controller pod as a kubelet
+// plugin.
+var draComponentLabelKeys = []string{
+	"nvidia-dra-driver-gpu-component",
+	"dra-driver-nvidia-gpu-component",
+}
 
 // operatorNamespace finds where the GPU Operator is installed, from the
 // namespace of its own pod. The label is the one pkg/mustgather already keys
@@ -51,19 +88,24 @@ func operatorNamespace(pods []corev1.Pod) string {
 	return ""
 }
 
-// operandsByNode groups the operator's pods by the node they are scheduled on.
-// A namespace is required: without one every pod in the cluster would be an
-// operand, and a user's own pod carrying an "app" label is not one.
+// operandsByNode groups the operands by the node they are scheduled on.
+//
+// Two things make a pod an operand. One is the GPU Operator's namespace, which
+// is where everything the operator installs lives. The other is a DRA driver
+// label, wherever the pod is: the standalone charts install the driver into a
+// namespace of their own, so a namespace filter alone reports a DRA node with
+// no kubelet plugin on it, which is the one fact that explains why the node
+// advertises nothing.
+//
+// Neither test is a guess about a user's own pods. An unlabelled pod outside
+// the operator's namespace is nobody's operand, and the DRA keys are matched
+// exactly.
 func operandsByNode(pods []corev1.Pod, namespace string) map[string][]OperandPod {
-	if namespace == "" {
-		return nil
-	}
-
 	var out map[string][]OperandPod
 
 	for i := range pods {
 		pod := &pods[i]
-		if pod.Namespace != namespace || pod.Spec.NodeName == "" {
+		if pod.Spec.NodeName == "" || !isOperand(pod, namespace) {
 			continue
 		}
 
@@ -107,16 +149,98 @@ func operandFromPod(pod *corev1.Pod) OperandPod {
 	return out
 }
 
-// componentOf names which operand a pod is, verbatim. The constants in this
-// package are the values the GPU Operator and the NVIDIA DRA driver are known
-// to use; a pod labelled with something nothing here names still arrives under
-// its own label value rather than as an empty string.
+// isOperand reports whether a pod belongs in a node's operand list.
+func isOperand(pod *corev1.Pod, namespace string) bool {
+	if draComponent(pod) != "" {
+		return true
+	}
+
+	return namespace != "" && pod.Namespace == namespace
+}
+
+// draComponent classifies a DRA driver pod by label, or returns "" for a pod
+// that is not one. See draComponentLabelKeys for why there are three
+// spellings.
+func draComponent(pod *corev1.Pod) string {
+	if _, found := pod.Labels[LabelComputeDomain]; found {
+		return ComponentIMEXDaemon
+	}
+
+	if pod.Labels[appLabel] == ComponentDRADriver {
+		return ComponentDRADriver
+	}
+
+	for _, key := range draComponentLabelKeys {
+		if pod.Labels[key] == draKubeletPluginComponent {
+			return ComponentDRADriver
+		}
+	}
+
+	return ""
+}
+
+// componentOf names which operand a pod is. The result is never empty: a pod
+// reported with no component is one a reader cannot act on and cannot even
+// look up, so there is a fallback for every case.
+//
+// The order is:
+//
+//  1. the "app" label, verbatim, which is what the GPU Operator writes and
+//     what a health rule matches on.
+//  2. a DRA driver label, which is how the standalone charts identify the
+//     kubelet plugin and the only way the IMEX daemon can be identified at
+//     all, neither of them carrying an "app" key.
+//  3. app.kubernetes.io/component, the newer spelling of 1, kept because the
+//     operand model's own contract names it.
+//  4. app.kubernetes.io/name, which node-feature-discovery's worker carries
+//     instead of any of the above.
+//  5. the name of the controller that owns the pod, for a pod with no useful
+//     label at all. It is the DaemonSet or ReplicaSet name, which is still
+//     something a reader can type into kubectl.
+//  6. the pod's own name, for a pod with no label and no controller, which is
+//     what a standalone pod in the operator's namespace looks like. It names
+//     one pod rather than a kind of pod, and that is the point: the
+//     alternative is an operand a reader cannot look up at all.
+//
+// The constants in this package are the values the GPU Operator and the DRA
+// driver are known to use; a pod labelled with something nothing here names
+// still arrives under its own label value rather than under a guess.
 func componentOf(pod *corev1.Pod) string {
 	if app := pod.Labels[appLabel]; app != "" {
 		return app
 	}
 
-	return pod.Labels[componentLabel]
+	if dra := draComponent(pod); dra != "" {
+		return dra
+	}
+
+	if component := pod.Labels[componentLabel]; component != "" {
+		return component
+	}
+
+	if name := pod.Labels[nameLabel]; name != "" {
+		return name
+	}
+
+	if owner := controllerName(pod); owner != "" {
+		return owner
+	}
+
+	return pod.Name
+}
+
+// controllerName is the name of the controller that owns the pod. Only the
+// controlling reference counts: a pod can carry several owner references and
+// only one of them is what created it.
+func controllerName(pod *corev1.Pod) string {
+	for i := range pod.OwnerReferences {
+		owner := &pod.OwnerReferences[i]
+		if owner.Controller != nil && *owner.Controller {
+			return owner.Name
+		}
+	}
+
+	return ""
 }
 
 // images lists the container images a pod runs, init containers first and in
