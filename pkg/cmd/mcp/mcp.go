@@ -35,15 +35,18 @@ func NewCommand(o *cmd.Options, newRoot NewRootFunc) *cobra.Command {
 		Long: "Serve kubectl-nv as a Model Context Protocol server on stdin and stdout, with\n" +
 			"one tool per read-only command. The tools are derived from the command tree, so\n" +
 			"a command added to kubectl-nv becomes a tool without the server changing.\n\n" +
-			"Nothing served here writes to the cluster, and the one command that can run\n" +
-			"something inside a pod is served with --no-exec forced on.",
+			"Which cluster the tools talk to, and as whom, is decided by the flags given to\n" +
+			"this command. None of it is reachable from a tool call: a tool offers the\n" +
+			"command's own flags and --namespace, and nothing else.\n\n" +
+			"Nothing served here writes to the cluster, and a command that can run something\n" +
+			"inside a pod is served with --no-exec forced on.",
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			if listTools {
 				return printTools(c, newRoot)
 			}
 
-			return Serve(c.Context(), newRoot, c.Root().Version)
+			return Serve(c.Context(), newRoot, c.Root().Version, connectionFrom(o))
 		},
 	}
 
@@ -53,15 +56,37 @@ func NewCommand(o *cmd.Options, newRoot NewRootFunc) *cobra.Command {
 	return c
 }
 
+// connectionFrom is the connection every tool call of this server runs
+// against: the configuration flags this command was given, already parsed, and
+// the factory built from them.
+//
+// Reading it once here rather than per call is the point. A call that resolved
+// its own connection would answer from whatever the environment said at that
+// moment, which is not what the person who started the server chose.
+func connectionFrom(o *cmd.Options) CallDeps {
+	if o == nil {
+		return CallDeps{}
+	}
+
+	return CallDeps{
+		ConfigFlags:    o.ConfigFlags,
+		Factory:        o.Factory,
+		KubeconfigPath: o.KubeconfigDisplay(),
+	}
+}
+
 // printTools writes one tool name and description per line. It is how a reader,
 // or a test, sees what the server offers without speaking the protocol.
 func printTools(c *cobra.Command, newRoot NewRootFunc) error {
-	for _, tool := range Tools(newRoot(discardStreams())) {
-		gated := ""
+	for _, tool := range Tools(newRoot(CallDeps{Streams: discardStreams()})) {
+		notes := ""
 		if tool.ForceNoExec {
-			gated = " (--no-exec forced)"
+			notes += " (--no-exec forced)"
 		}
-		if _, err := fmt.Fprintf(c.OutOrStdout(), "%s\t%s%s\n", tool.Name, tool.Description, gated); err != nil {
+		if tool.WritesHost {
+			notes += " (writes files on this machine)"
+		}
+		if _, err := fmt.Fprintf(c.OutOrStdout(), "%s\t%s%s\n", tool.Name, tool.Description, notes); err != nil {
 			return fmt.Errorf("writing the tool list: %w", err)
 		}
 	}

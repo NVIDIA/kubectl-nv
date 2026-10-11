@@ -99,6 +99,21 @@ func text(t *testing.T, result *sdk.CallToolResult) string {
 	return strings.Join(parts, "\n")
 }
 
+// refusal is the exact message a refused call carries, without the exit code
+// line every result ends with. Asserting it whole matters: a substring check
+// for "--no-exec" would also match cobra's own "unknown flag: --no-exec",
+// which is what a tool that was run anyway would say.
+func refusal(t *testing.T, result *sdk.CallToolResult) string {
+	t.Helper()
+
+	message, _, found := strings.Cut(text(t, result), "\n\nexit code ")
+	if !found {
+		t.Fatalf("the result carries no exit code line: %q", text(t, result))
+	}
+
+	return message
+}
+
 // structured returns the structured content of a result as an object.
 func structured(t *testing.T, result *sdk.CallToolResult) map[string]any {
 	t.Helper()
@@ -281,8 +296,8 @@ func TestMustGatherCannotTurnExecOn(t *testing.T) {
 			t.Fatalf("setting no-exec was accepted: %s", text(t, result))
 		}
 		want := `adm_must-gather does not take "no-exec"`
-		if text(t, result) != want {
-			t.Errorf("refusal is %q, want exactly %q", text(t, result), want)
+		if refusal(t, result) != want {
+			t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 		}
 	})
 
@@ -291,10 +306,12 @@ func TestMustGatherCannotTurnExecOn(t *testing.T) {
 		if !result.IsError {
 			t.Fatalf("a flag passed as a positional argument was accepted: %s", text(t, result))
 		}
-		want := `adm_must-gather: "--no-exec=false" is a flag, ` +
+		// The value is not echoed back: a rejected --token or --password must
+		// not be copied into the model's context or into the session log.
+		want := `adm_must-gather: "--no-exec" is a flag, ` +
 			`and a flag cannot be passed as a positional argument`
-		if text(t, result) != want {
-			t.Errorf("refusal is %q, want exactly %q", text(t, result), want)
+		if refusal(t, result) != want {
+			t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 		}
 	})
 }
@@ -310,9 +327,13 @@ func TestConnectionFlagsCannotBeSmuggledThroughArgs(t *testing.T) {
 		if !result.IsError {
 			t.Fatalf("%s was accepted as a positional argument: %s", smuggled, text(t, result))
 		}
-		want := fmt.Sprintf("explain: %q is a flag, and a flag cannot be passed as a positional argument", smuggled)
-		if text(t, result) != want {
-			t.Errorf("refusal is %q, want exactly %q", text(t, result), want)
+		if strings.Contains(text(t, result), "hunter2") || strings.Contains(text(t, result), "evil.invalid") {
+			t.Errorf("the refusal echoed the rejected value back: %q", text(t, result))
+		}
+		name, _, _ := strings.Cut(smuggled, "=")
+		want := fmt.Sprintf("explain: %q is a flag, and a flag cannot be passed as a positional argument", name)
+		if refusal(t, result) != want {
+			t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 		}
 	}
 }
@@ -348,8 +369,8 @@ func TestAnExecCapableCommandWithoutTheFlagIsRefused(t *testing.T) {
 	}
 	want := "adm_must-gather can run a command inside a pod and has no --no-exec flag, " +
 		"so it is not served over MCP"
-	if text(t, result) != want {
-		t.Errorf("refusal is %q,\nwant exactly %q", text(t, result), want)
+	if refusal(t, result) != want {
+		t.Errorf("refusal is %q,\nwant exactly %q", refusal(t, result), want)
 	}
 }
 
@@ -397,8 +418,8 @@ func TestAskingForTheArtifactsDirectoryIsRefused(t *testing.T) {
 		t.Fatalf("a model chose where the bundle goes: %s", text(t, result))
 	}
 	want := `adm_must-gather does not take "artifacts-dir"`
-	if text(t, result) != want {
-		t.Errorf("refusal is %q, want exactly %q", text(t, result), want)
+	if refusal(t, result) != want {
+		t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 	}
 }
 
@@ -573,7 +594,7 @@ func TestAnUnknownPropertyIsRefused(t *testing.T) {
 		t.Fatalf("an unknown property was accepted: %s", text(t, result))
 	}
 	want := `list does not take "no-such-flag"`
-	if text(t, result) != want {
-		t.Errorf("refusal is %q, want exactly %q", text(t, result), want)
+	if refusal(t, result) != want {
+		t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 	}
 }

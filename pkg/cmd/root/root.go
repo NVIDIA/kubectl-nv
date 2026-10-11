@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -38,12 +39,22 @@ import (
 // variable the urfave/cli tree honoured keeps working.
 const debugEnvVar = "DEBUG"
 
+// traverseRunHooksOnce guards the one write to cobra's package level switch.
+var traverseRunHooksOnce sync.Once
+
 // Deps are the seams of the command tree. The zero value talks to a real
 // cluster and runs a real must-gather; tests replace the parts they need to.
 type Deps struct {
 	Streams    genericiooptions.IOStreams
 	Factory    cmd.Factory
 	MustGather mustgather.RunFunc
+
+	// ConfigFlags, when non-nil, are the kubectl configuration flags this tree
+	// reads its connection from instead of making its own. The MCP server
+	// passes the ones its own command line was parsed into, so that every tool
+	// call talks to the cluster the server was started against rather than to
+	// whatever the environment says when the call arrives.
+	ConfigFlags *genericclioptions.ConfigFlags
 
 	// Options, when non-nil, is the state the root fills in and every
 	// subcommand reads. A caller that needs to see what parsing produced passes
@@ -54,7 +65,10 @@ type Deps struct {
 // NewCommand builds the kubectl-nv command tree. version is what the binary
 // reports; the release stamps it through ldflags.
 func NewCommand(version string, d Deps) *cobra.Command {
-	configFlags := genericclioptions.NewConfigFlags(true)
+	configFlags := d.ConfigFlags
+	if configFlags == nil {
+		configFlags = genericclioptions.NewConfigFlags(true)
+	}
 	o := d.Options
 	if o == nil {
 		o = &cmd.Options{}
@@ -72,7 +86,11 @@ func NewCommand(version string, d Deps) *cobra.Command {
 	// Cobra runs only the closest PersistentPreRunE in a chain by default, so a
 	// subcommand with one of its own would silently skip the debug resolution
 	// below.
-	cobra.EnableTraverseRunHooks = true
+	//
+	// Set once rather than per tree: the MCP server builds one tree per tool
+	// call and serves calls concurrently, so a plain assignment here is two
+	// goroutines writing the same package variable.
+	traverseRunHooksOnce.Do(func() { cobra.EnableTraverseRunHooks = true })
 
 	root := &cobra.Command{
 		Use:           "kubectl-nv",
@@ -125,18 +143,56 @@ func NewCommand(version string, d Deps) *cobra.Command {
 	}
 
 	root.AddCommand(newVersionCommand(version))
-	root.AddCommand(adm.NewCommand(o, runMustGather))
+
+	admCommand := adm.NewCommand(o, runMustGather)
+	markForMCP(admCommand, "must-gather", "artifacts-dir")
+	root.AddCommand(admCommand)
+
 	root.AddCommand(schema.NewCommand(o))
 	// The server runs one fresh tree per tool call: cobra keeps the flags a run
-	// set, so a reused tree would carry one call's --limit into the next.
-	root.AddCommand(mcp.NewCommand(o, func(s genericiooptions.IOStreams) *cobra.Command {
-		call := d
-		call.Streams = s
-		call.Options = nil
-		return NewCommand(version, call)
+	// set, so a reused tree would carry one call's --limit into the next. The
+	// connection does not come from the call, so it is handed in whole.
+	root.AddCommand(mcp.NewCommand(o, func(call mcp.CallDeps) *cobra.Command {
+		return NewCommand(version, Deps{
+			Streams:     call.Streams,
+			ConfigFlags: call.ConfigFlags,
+			Factory:     call.Factory,
+			MustGather:  d.MustGather,
+		})
 	}))
 
 	return root
+}
+
+// markForMCP tells the MCP server two things about a subcommand: that it can
+// run something inside a pod, so that it is served with --no-exec forced on and
+// refused while it has no such flag, and which of its flags names a directory
+// it writes into, so that the server pins that directory rather than letting a
+// model choose it.
+//
+// Both annotations belong on the command, in the package that defines it. They
+// are set from here because pkg/cmd/adm is another track's file this round;
+// they move next to the command when must-gather grows its --no-exec flag.
+func markForMCP(parent *cobra.Command, name, hostDirFlag string) {
+	for _, child := range parent.Commands() {
+		if child.Name() != name {
+			continue
+		}
+		if child.Annotations == nil {
+			child.Annotations = map[string]string{}
+		}
+		child.Annotations[mcp.ExecAnnotation] = "true"
+		if err := child.Flags().SetAnnotation(hostDirFlag, mcp.HostDirAnnotation, []string{"true"}); err != nil {
+			panic(fmt.Sprintf("root: marking --%s of %q as a host directory: %v", hostDirFlag, name, err))
+		}
+
+		return
+	}
+
+	// A command that was renamed or removed must not leave the gate open in
+	// silence. Nothing here can recover from it, and it is a programming error
+	// rather than anything a user did.
+	panic(fmt.Sprintf("root: no %q subcommand of %q to mark for the MCP server", name, parent.Name()))
 }
 
 // newVersionCommand prints the same string as --version, for the users who
