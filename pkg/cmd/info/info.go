@@ -47,8 +47,7 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 			"their images and the validator's results, and the ResourceSlices published for " +
 			"it.\n\nA node that carries an NVIDIA label and advertises no GPUs is shown, marked " +
 			"as hinted: that it should have GPUs and does not is the answer.",
-		Args:         cobra.ExactArgs(1),
-		SilenceUsage: true,
+		Args: cmd.UsageArgs(cobra.ExactArgs(1)),
 		RunE: func(c *cobra.Command, args []string) error {
 			return run(c, o, opts, args[0])
 		},

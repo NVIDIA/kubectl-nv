@@ -53,8 +53,7 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 			"advertises nvidia.com/gpu or a MIG profile, or a gpu.nvidia.com ResourceSlice names " +
 			"it. A node that carries an NVIDIA label and advertises nothing is reported with " +
 			"--include-hinted, because the label alone is not a GPU.",
-		Args:         cobra.NoArgs,
-		SilenceUsage: true,
+		Args: cmd.UsageArgs(cobra.NoArgs),
 		RunE: func(c *cobra.Command, _ []string) error {
 			return run(c, o, opts)
 		},

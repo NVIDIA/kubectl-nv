@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
@@ -100,6 +101,24 @@ func AddConfigFlags(flags *pflag.FlagSet, configFlags *genericclioptions.ConfigF
 		}
 		flags.AddFlag(f)
 	})
+}
+
+// UsageArgs wraps a positional argument validator so that a failure carries
+// its own exit code.
+//
+// Without it the code depends on who runs the command: cmd/kubectl-nv turns an
+// unsilenced error into a usage one, but a command executed any other way, by
+// a test or by a future embedder, gets a bare error and so exit 4. Exit 4
+// means the run could not happen, which tells a script that the cluster is
+// unreachable when the truth is that the user typed too many words.
+func UsageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(c *cobra.Command, args []string) error {
+		if err := validate(c, args); err != nil {
+			return output.WrapUsageError(err, "%s", c.CommandPath())
+		}
+
+		return nil
+	}
 }
 
 // NewFactory returns the Factory that talks to the cluster the configuration
