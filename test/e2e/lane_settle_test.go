@@ -112,10 +112,22 @@ func unsettledWorkloads(t *testing.T) []string {
 	for i := range sets.Items {
 		ds := &sets.Items[i]
 		desired := ds.Status.DesiredNumberScheduled
-		switch {
-		case desired == 0:
-			holding = append(holding, fmt.Sprintf("%s: no pod is scheduled yet", ds.Name))
-		case ds.Status.NumberReady != desired || ds.Status.UpdatedNumberScheduled != desired:
+
+		// A DaemonSet with nothing to schedule is settled, not starting. The
+		// operator creates nvidia-device-plugin-mps-control-daemon on every
+		// lane and gives it a node selector that matches nothing unless MPS
+		// sharing is configured, so its desired count is 0 for ever; reading
+		// that as "no pod yet" held this wait to its full five minutes on a
+		// lane that was ready in seconds.
+		//
+		// Whether the operands that matter were placed at all is not this
+		// wait's question. hack/mokka/up.sh asks it by name, against the
+		// worker count, before it hands the lane over.
+		if desired == 0 {
+			continue
+		}
+
+		if ds.Status.NumberReady != desired || ds.Status.UpdatedNumberScheduled != desired {
 			holding = append(holding, fmt.Sprintf("%s: desired=%d ready=%d updated=%d",
 				ds.Name, desired, ds.Status.NumberReady, ds.Status.UpdatedNumberScheduled))
 		}
