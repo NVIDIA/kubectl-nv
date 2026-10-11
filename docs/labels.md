@@ -23,9 +23,9 @@ repositories named, at these commits:
 
 Before the table: no label on this page decides whether a node is a GPU node.
 That is decided by what the scheduler can place, which is `nvidia.com/gpu`
-capacity, any `nvidia.com/mig-<profile>` capacity, or a `gpu.nvidia.com`
-ResourceSlice naming the node. `pkg/source/source.go` carries the rule and the
-reasoning.
+capacity, `nvidia.com/gpu.shared` capacity, any `nvidia.com/mig-<profile>`
+capacity, or a `gpu.nvidia.com` ResourceSlice naming the node.
+`pkg/source/source.go` carries the rule and the reasoning for each of the four.
 
 `nvidia.com/gpu.present` and `feature.node.kubernetes.io/pci-10de.present` are
 hints. Both say something NVIDIA-shaped was seen on the node, both are written
@@ -34,6 +34,40 @@ treating either as membership puts a control plane with no allocatable GPU into
 every GPU inventory. A node that carries a hint and advertises nothing is
 reported by `kubectl nv list --include-hinted` and by `kubectl nv info`, marked
 `hinted: true`.
+
+## The resources kubectl-nv reads
+
+Not everything kubectl-nv reports is a label. The GPU counts come from the
+node's extended resources, and which names count as a GPU is the same
+question as which nodes are GPU nodes.
+
+| Resource | Written by | Read into |
+|---|---|---|
+| `nvidia.com/gpu` | device plugin | `capacity`, `allocatable`, and the per-pod `requested` |
+| `nvidia.com/gpu.shared` | device plugin, under `renameByDefault` | summed into the same three |
+| `nvidia.com/mig-<profile>` | device plugin, mixed MIG strategy | `mig.resources[<name>]` |
+
+`nvidia.com/gpu.shared` is the one that surprises people. When time slicing or
+MPS is configured with `renameByDefault: true`, the plugin advertises every
+replica under that name and advertises `nvidia.com/gpu` not at all. The name
+is built by appending `DefaultSharedResourceNameSuffix`, `".shared"`, to the
+resource name (`api/config/v1/consts.go:26` and `api/config/v1/resources.go:89`
+in `k8s-device-plugin` at `bd98fbd6b`).
+
+That matters twice over. A node advertising only the shared name has placeable
+GPU capacity, so it is a GPU node; reading only `nvidia.com/gpu` would file it
+as hinted and drop it out of the inventory every health rule reads. And a
+workload on such a node can only ask for the shared name, so a requested count
+that ignored it would report every busy node as idle.
+
+The two whole-GPU names are summed, which is also what a node carrying both
+mid-rollout should report. They are matched as exact names, never by prefix:
+`nvidia.com/gpu` is a prefix of every other `nvidia.com/gpu*` resource there
+is, including ones nobody has invented yet.
+
+A MIG profile is not summed into the whole-GPU numbers. It is a different unit
+and is reported separately, so that a node advertising fourteen 1g.10gb slices
+does not read as a node with fourteen GPUs.
 
 ## The labels
 
@@ -62,6 +96,44 @@ reported by `kubectl nv list --include-hinted` and by `kubectl nv info`, marked
 
 Every label a node carries is also kept verbatim under `metadata.labels`, so a
 key this page does not name is still in `-o json` output.
+
+## Operand pod labels
+
+`kubectl nv info` names the GPU Operator pods on a node, and three of those
+names come off pod labels rather than node labels.
+
+| Pod label | Set by | Read as |
+|---|---|---|
+| `app` | GPU Operator, every operand | the component, verbatim |
+| `app=nvidia-dra-driver-kubelet-plugin` | GPU Operator, DRA DaemonSet | `ComponentDRADriver` |
+| `nvidia-dra-driver-gpu-component=kubelet-plugin` | standalone chart, v25.3.x | `ComponentDRADriver` |
+| `dra-driver-nvidia-gpu-component=kubelet-plugin` | the same chart after its rename | `ComponentDRADriver` |
+| `resource.nvidia.com/computeDomain` | the IMEX daemon itself | `ComponentIMEXDaemon` |
+| `app.kubernetes.io/component`, `app.kubernetes.io/name` | varies | the component, when there is no `app` |
+
+The DRA kubelet plugin is the awkward one. The GPU Operator gives its copy a
+plain `app` label (`manifests/state-dra-driver/0500_daemonset.yaml` at
+`9eddbaa42`, on both the DaemonSet and the pod template), but the standalone
+charts label by component instead and carry no `app` key at all: the key is
+built as `<chart name>-component`, and the chart was renamed, so the same pod
+has shipped under two different keys (`_helpers.tpl` in each chart; the rename
+is commit `7a5e8439c`, first released in `v0.4.1`).
+
+The IMEX daemon has no `app` label of any kind. Its pod template sets only
+`resource.nvidia.com/computeDomain`, whose value is a UUID
+(`templates/compute-domain-daemon.tmpl.yaml` at `fb8b96747`, and the key at
+`cmd/compute-domain-daemon/common.go:32`), so only the key is matched.
+
+All of these are matched as exact keys and exact values. A prefix match on the
+component keys would claim the pods of any chart whose name happens to end the
+same way, and matching the value alone would report the driver's controller
+pod as a kubelet plugin.
+
+Because the standalone charts install into their own namespace, these pods are
+looked for in every namespace rather than only in the operator's. A node whose
+kubelet plugin is not running advertises nothing under DRA however healthy
+every GPU Operator pod on it looks, so this is the one operand whose absence
+explains the node.
 
 ## GFD: the CUDA version labels were renamed
 
@@ -159,7 +231,7 @@ The full published set, including the labels kubectl-nv does not read
 | `nvidia.com/gpu.present` | `controllers/state_manager.go:41` names it; `controllers/nodelabeling_controller.go:303` is where it is set, and line 308 where it is set to `false` |
 | `nvidia.com/mig.config` | `controllers/state_manager.go:49` |
 | `nvidia.com/gpu.deploy.<key>` | `controllers/nodelabeling_controller.go:314`, `updateGPUStateLabels`; the individual keys are the constants from `controllers/state_manager.go:73` onwards |
-| `nvidia.com/gpu-driver-upgrade-state` | `vendor/github.com/NVIDIA/k8s-operator-libs/pkg/upgrade/consts.go:21`, which builds the key as `nvidia.com/%s-driver-upgrade-state` from the driver name, and `util.go:108`, which fills it with `gpu` |
+| `nvidia.com/gpu-driver-upgrade-state` | `vendor/github.com/NVIDIA/k8s-operator-libs/pkg/upgrade/consts.go:21`, which builds the key as `nvidia.com/%s-driver-upgrade-state` from the driver name, and `util.go:108`, which reads it back. The driver name itself is set by `cmd/gpu-operator/main.go:180`, `upgrade.SetDriverName("gpu")`, which is what makes the key `nvidia.com/gpu-driver-upgrade-state` and not something else |
 
 `nvidia.com/mig.config.state` is written from outside the operator: the
 mig-manager's reconfigure script sets it, at
@@ -176,9 +248,24 @@ both are written out there and `ComponentForDeployKey` is the only bridge.
 
 ## Topograph
 
-Topograph writes a variable-depth fabric label family and a two-level
-accelerator hierarchy, documented in `docs/reference/node-labels.md` at
-`44eb46d`:
+kubectl-nv reads Topograph's v1.0.0 keys and only those. They arrived in
+that release, dated 2026-08-18, as a breaking change: "Fabric topology now
+uses variable, closest-first tiers labeled `fabric.topograph.run/tier-N`,
+while accelerator topology uses `accelerator.topograph.run/domain` and
+optional `accelerator.topograph.run/sub-domain` [...] All other
+Topograph-owned Kubernetes labels and annotations now use the
+`topograph.run` domain; consumers must update topology keys"
+(`CHANGELOG.md` at `44eb46d`, the `[v1.0.0]` entry).
+
+Releases up to and including 0.5.0 wrote a different family,
+`network.topology.nvidia.com/{accelerator,leaf,spine,core}`: four fixed
+keys rather than a variable depth (`charts/topograph/values.yaml:63` at
+tag `v0.5.0`). kubectl-nv does not read those. A cluster still running
+Topograph 0.5.0 or older reports no topology columns at all under
+`-o wide`, which is not the same as a cluster with no fabric.
+
+The keys kubectl-nv does read, documented in
+`docs/reference/node-labels.md` at `44eb46d`:
 
 - `fabric.topograph.run/tier-N`, one per discovered tier, with tier 0 the
   switch closest to the node and no fixed maximum depth.
