@@ -7,16 +7,42 @@
 #   commit      4ce11e5ae533416415e223ab43da58435d0df48c
 #   path        tests/e2e/go/assets/device-plugin-mock-mig.yaml
 #
-# One deliberate difference, and only one: the three spaced typographic em
-# dashes in the upstream comments became ": ", because hack/lint-words.sh
-# rejects a typographic dash anywhere in this repository. Every other byte
-# below the marker is upstream's, comments included. The substitution is
-# uniform, which is what lets the re-check below be a byte comparison of the
-# WHOLE file rather than of its non-comment lines:
+# Two deliberate differences, and only two. Every other byte below the marker
+# is upstream's, comments included.
+#
+# 1. The three spaced typographic em dashes in the upstream comments became
+#    ": ", because hack/lint-words.sh rejects a typographic dash anywhere in
+#    this repository.
+#
+# 2. The device plugin image is named by digest rather than by the :v0.18.2
+#    tag upstream uses. This container runs privileged and bind-mounts over
+#    its own /proc/driver on every worker, so whoever can move that tag can
+#    change what runs privileged in this lane. A tag is not a pin.
+#
+#    The digest was resolved read-only on 2026-10-11, without pulling the
+#    image, and agreed on by two independent clients:
+#
+#      docker buildx imagetools inspect nvcr.io/nvidia/k8s-device-plugin:v0.18.2 \
+#        --format '{{println .Manifest.Digest}}'
+#      regctl manifest digest nvcr.io/nvidia/k8s-device-plugin:v0.18.2
+#
+#    Both answered sha256:b5788e29e7ae5272de8de863ebe386d6611e608421a6ecc5b4e7d5952aba637f.
+#    It is the multi-arch index, not one platform's manifest, which is what
+#    lets the same pin serve CI on amd64 and an Apple silicon laptop on arm64;
+#    `regctl manifest get` lists both children.
+#
+#    To refresh: pick the new tag, resolve it the same way, replace the digest
+#    below and in hack/mokka/mig/up_test.sh, and record the new tag and date
+#    here.
+#
+# Both substitutions are uniform, which is what lets the re-check below be a
+# byte comparison of the WHOLE file rather than of its non-comment lines:
 #
 #   git -C <k8s-test-infra> show \
 #     4ce11e5ae533416415e223ab43da58435d0df48c:tests/e2e/go/assets/device-plugin-mock-mig.yaml \
-#     | sed "s/ $(printf '\342\200\224') /: /g" > /tmp/upstream.yaml
+#     | sed -e "s/ $(printf '\342\200\224') /: /g" \
+#           -e 's|k8s-device-plugin:v0.18.2|k8s-device-plugin@sha256:b5788e29e7ae5272de8de863ebe386d6611e608421a6ecc5b4e7d5952aba637f|g' \
+#     > /tmp/upstream.yaml
 #   sed -n '/^# UPSTREAM-FILE-BEGINS$/,$p' hack/mokka/mig/device-plugin-mock-mig.yaml \
 #     | tail -n +2 > /tmp/local.yaml
 #   diff /tmp/upstream.yaml /tmp/local.yaml
@@ -72,7 +98,7 @@ spec:
         - operator: Exists
       containers:
         - name: nvidia-device-plugin
-          image: nvcr.io/nvidia/k8s-device-plugin:v0.18.2
+          image: nvcr.io/nvidia/k8s-device-plugin@sha256:b5788e29e7ae5272de8de863ebe386d6611e608421a6ecc5b4e7d5952aba637f
           # The plugin resolves MIG capabilities through
           # /proc/driver/nvidia-caps/mig-minors, hardcoded and absolute, and it
           # does so while building its device map: so a plugin that cannot read

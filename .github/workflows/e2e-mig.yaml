@@ -61,17 +61,27 @@ jobs:
   mig:
     name: a partitioned lane
     runs-on: ubuntu-latest
-    # The image build is around ten minutes of it, the GPU Operator install
-    # another seven or so, and the two helm timeouts plus the two ready
-    # timeouts below have to fit inside what is left:
+    # Every wait this job can sit in, added up, has to fit inside this with
+    # room to spare: a job killed by timeout-minutes reports a job timeout
+    # instead of whichever wait actually ran out.
     #
     #   image build                                about 12m
     #   runner setup, kind create, node image pull about  6m
-    #   2 x 12m helm                                     24m
-    #   2 x 420s ready                                   14m
-    #   suite, teardown and the diagnostics dump   about  5m
+    #   2 x MOKKA_HELM_TIMEOUT (12m)                     24m
+    #   1 x MOKKA_READY_TIMEOUT (420s)                    7m
+    #   the suite, at its own -timeout                   15m
+    #   teardown and the diagnostics dump          about  3m
     #                                                   -----
-    #                                                    61m   against 75m
+    #                                                    67m   against 75m
+    #
+    # MOKKA_READY_TIMEOUT is counted ONCE and not twice. up.sh computes a
+    # single deadline before the operand rollout and carries it through the
+    # per-worker assertions, so the two waits share it: a lane that spends the
+    # whole budget rolling out has none left for the assertions and fails
+    # there immediately. Counting it per wait inflated the earlier figure.
+    #
+    # Each line is a ceiling, not an estimate. The first live run of this lane
+    # reached ready in 349s all in, of which the GPU Operator install was 276s.
     timeout-minutes: 75
     steps:
       - name: Checkout code
@@ -164,10 +174,7 @@ jobs:
       - name: Run the e2e suite against the MIG lane
         env:
           MIG_UPSTREAM_DIR: ${{ github.workspace }}/k8s-test-infra
-          # The lane's own waits have to fit inside timeout-minutes with room
-          # to spare, or the job is killed mid-install and reports a timeout
-          # instead of whichever wait actually ran out. The arithmetic is above
-          # timeout-minutes.
+          # Both of these are ceilings in the arithmetic above timeout-minutes.
           MOKKA_HELM_TIMEOUT: 12m
           # Longer than the whole-GPU lane's 300s: this lane waits for a
           # privileged DaemonSet that first waits, itself, for the node agent

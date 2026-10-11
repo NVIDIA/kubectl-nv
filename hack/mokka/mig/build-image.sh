@@ -59,6 +59,16 @@ fi
 
 mokka::require_tools docker git tar
 
+# The staged tree is several hundred megabytes. The path that leaks it is not
+# the happy one: it is a failed docker build, which is also the path a
+# developer takes repeatedly while working out why it failed.
+on_exit() {
+    if [ -n "${MIG_STAGING_OWNED}" ]; then
+        rm -rf "${MIG_STAGING_OWNED}"
+    fi
+}
+trap on_exit EXIT
+
 mig::build_image "${FORCE}"
 mokka::phase
 

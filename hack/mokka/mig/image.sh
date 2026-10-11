@@ -27,18 +27,52 @@ mig::image_ref() {
     printf '%s:%s' "${MIG_NVML_MOCK_IMAGE}" "${MIG_NVML_MOCK_IMAGE_TAG}"
 }
 
+# mig::image_revision
+# The commit the tagged image in the local daemon says it was built from, or
+# nothing when the tag is absent or carries no such label. An image built by
+# anything other than this lane has no label, and neither has one built before
+# the label existed; both answer empty, which is treated as "cannot be vouched
+# for".
+mig::image_revision() {
+    docker image inspect \
+        --format "{{index .Config.Labels \"${MIG_IMAGE_REVISION_LABEL}\"}}" \
+        "$(mig::image_ref)" 2> /dev/null
+}
+
+# MIG_STAGING_OWNED is the temporary tree this file extracted and is therefore
+# this file's to remove. A caller-supplied MIG_STAGING_DIR, and a tree the
+# caller staged itself, are left alone. The callers install the EXIT trap that
+# reads it: a RETURN trap does not run when `set -e` takes the shell down
+# mid-function, which is exactly the path a failed docker build takes, and
+# several hundred megabytes were being left in TMPDIR each time.
+MIG_STAGING_OWNED=""
+
 # mig::build_image <force>
-# Leaves mig::image_ref in the local Docker daemon. With force false, an image
-# already carrying that tag is kept: the tag names one commit, so rebuilding it
-# produces the same thing at the cost of several minutes.
+# Leaves mig::image_ref in the local Docker daemon, built from, and labelled
+# with, MIG_UPSTREAM_SHA.
+#
+# With force false an image already carrying that tag is kept, but only if its
+# revision label agrees with the pin. The tag alone cannot decide this: it
+# holds eight characters of the commit, which is a label rather than an
+# identity, and an image built by hand or left over from a differently-pinned
+# tree wears it just as well. Rebuilding costs several minutes; running the
+# whole lane against the wrong image costs an afternoon of reading results that
+# describe another commit.
 mig::build_image() {
     local force="${1:-false}"
-    local ref
+    local ref revision
     ref="$(mig::image_ref)"
 
     if [ "${force}" != true ] && docker image inspect "${ref}" > /dev/null 2>&1; then
-        printf '[mig] %s is already in the local Docker daemon; not rebuilding (--force to rebuild)\n' "${ref}"
-        return 0
+        revision="$(mig::image_revision)"
+        if [ "${revision}" = "${MIG_UPSTREAM_SHA}" ]; then
+            printf '[mig] %s is already in the local Docker daemon, built from %s; not rebuilding (--force to rebuild)\n' \
+                "${ref}" "${MIG_UPSTREAM_SHA}"
+            return 0
+        fi
+        printf '[mig] %s is in the local Docker daemon but its %s label is %s, not %s; rebuilding\n' \
+            "${ref}" "${MIG_IMAGE_REVISION_LABEL}" \
+            "${revision:-<absent>}" "${MIG_UPSTREAM_SHA}"
     fi
 
     # A caller that has already resolved the tree (up.sh stages it for the
@@ -49,11 +83,7 @@ mig::build_image() {
         local staging="${MIG_STAGING_DIR:-}"
         if [ -z "${staging}" ]; then
             staging="$(mktemp -d "${TMPDIR:-/tmp}/kubectl-nv-mig-upstream.XXXXXX")"
-            # Only a temporary directory this function created is this
-            # function's to delete. A caller-supplied MIG_STAGING_DIR is left
-            # alone, and so is a tree the caller already staged.
-            # shellcheck disable=SC2064
-            trap "rm -rf '${staging}'" RETURN
+            MIG_STAGING_OWNED="${staging}"
         fi
         mig::stage_upstream "${staging}"
     fi
@@ -61,6 +91,7 @@ mig::build_image() {
     mokka::phase "build $(mig::image_ref)"
     docker build \
         --tag "${ref}" \
+        --label "${MIG_IMAGE_REVISION_LABEL}=${MIG_UPSTREAM_SHA}" \
         --file "${MIG_UPSTREAM_TREE}/deployments/nvml-mock/Dockerfile" \
         "${MIG_UPSTREAM_TREE}"
 

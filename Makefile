@@ -205,39 +205,19 @@ E2E_MIG_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(MIG_LANE)
 # must-gather test asserts the GPU Operator's own device plugin is on every
 # worker, and this lane deliberately replaces it.
 E2E_MIG_RUN := ^TestMIGLane$$
-E2E_MIG_FLAGS ?= -tags e2e,mig -count=1 -timeout 45m -run '$(E2E_MIG_RUN)'
+# 15m, not the whole job budget: the suite runs one parent test whose
+# subtests each exec the binary once against a lane that is already up. The
+# first live run took seconds. A timeout generous enough to swallow a wedged
+# exec turns a hang into a job timeout with no test output, which is the one
+# failure nobody can read.
+E2E_MIG_FLAGS ?= -tags e2e,mig -count=1 -timeout 15m -run '$(E2E_MIG_RUN)'
 
 e2e-mig: build
 	@set -u; \
 	export MOKKA_BIN_DIR="$(MOKKA_BIN_DIR)"; \
 	hack/mokka/mig/build-image.sh || exit $$?; \
-	hack/mokka/mig/up.sh $(MIG_LANE); up=$$?; \
-	if [ $$up -eq 4 ]; then \
-	    printf 'e2e-mig: %s already exists and was not created here; nothing touched\n' "$(MIG_CLUSTER)" >&2; \
-	    exit 4; \
-	fi; \
-	trap 'exit 130' INT; \
-	trap 'exit 143' TERM; \
-	trap 'hack/mokka/mig/down.sh $(MIG_LANE) || printf "e2e-mig: down.sh failed; cluster %s may still be up\n" "$(MIG_CLUSTER)" >&2' EXIT; \
-	rc=$$up; \
-	if [ $$rc -eq 0 ]; then \
-	    matched="$$(KUBECONFIG=$(MIG_KUBECONFIG) \
-	        KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
-	        $(GO_CMD) test -tags e2e,mig -list '$(E2E_MIG_RUN)' ./test/e2e/... 2>/dev/null \
-	        | grep -c '$(E2E_MIG_RUN)')"; \
-	    if [ "$$matched" -ne 1 ]; then \
-	        printf 'e2e-mig: -run %s matches %s test(s), want 1\n' "$(E2E_MIG_RUN)" "$$matched" >&2; \
-	        printf 'e2e-mig: a renamed or deleted TestMIGLane would otherwise run nothing and report success\n' >&2; \
-	        rc=2; \
-	    fi; \
-	fi; \
-	if [ $$rc -eq 0 ]; then \
-	    KUBECONFIG=$(MIG_KUBECONFIG) \
-	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
-	        $(GO_CMD) test $(E2E_MIG_FLAGS) ./test/e2e/...; \
-	    rc=$$?; \
-	fi; \
-	if [ $$rc -ne 0 ]; then \
+	lane_is_ours=0; rc=0; \
+	dump_diagnostics() { \
 	    mkdir -p $(E2E_MIG_DIAG_DIR); \
 	    kubectl --kubeconfig $(MIG_KUBECONFIG) --context $(MIG_CONTEXT) \
 	        get pods -A -o wide > $(E2E_MIG_DIAG_DIR)/pods.txt 2>&1 || true; \
@@ -251,5 +231,55 @@ e2e-mig: build
 	    kind export logs $(E2E_MIG_DIAG_DIR)/kind --name $(MIG_CLUSTER) \
 	        > $(E2E_MIG_DIAG_DIR)/kind-export.txt 2>&1 || true; \
 	    printf 'e2e-mig: diagnostics in %s\n' "$(E2E_MIG_DIAG_DIR)" >&2; \
+	}; \
+	finish() { \
+	    trap - EXIT INT TERM; \
+	    if [ "$$lane_is_ours" -eq 1 ]; then \
+	        if [ "$$1" -ne 0 ]; then dump_diagnostics; fi; \
+	        hack/mokka/mig/down.sh $(MIG_LANE); d=$$?; \
+	        if [ $$d -ne 0 ] && [ $$d -ne 2 ]; then \
+	            printf 'e2e-mig: down.sh failed; cluster %s may still be up\n' "$(MIG_CLUSTER)" >&2; \
+	        fi; \
+	    fi; \
+	    exit "$$1"; \
+	}; \
+	trap 'finish 130' INT; \
+	trap 'finish 143' TERM; \
+	trap 'finish $$rc' EXIT; \
+	lane_is_ours=1; \
+	hack/mokka/mig/up.sh $(MIG_LANE); up=$$?; \
+	if [ $$up -eq 4 ]; then \
+	    lane_is_ours=0; rc=4; \
+	    printf 'e2e-mig: %s already exists and was not created here; nothing touched\n' "$(MIG_CLUSTER)" >&2; \
+	    exit 4; \
+	fi; \
+	rc=$$up; \
+	if [ $$rc -eq 0 ]; then \
+	    list_out=$(E2E_MIG_DIAG_DIR)-list-stdout.txt; \
+	    list_err=$(E2E_MIG_DIAG_DIR)-list-stderr.txt; \
+	    mkdir -p "$$(dirname $$list_out)"; \
+	    KUBECONFIG=$(MIG_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test -tags e2e,mig -list '$(E2E_MIG_RUN)' ./test/e2e/... \
+	        > "$$list_out" 2> "$$list_err"; \
+	    listed="$$(grep -c '^Test' "$$list_out" || true)"; \
+	    exact="$$(grep -c '$(E2E_MIG_RUN)' "$$list_out" || true)"; \
+	    if [ "$$listed" -ne 1 ] || [ "$$exact" -ne 1 ]; then \
+	        printf 'e2e-mig: -run %s listed %s test(s), %s of them %s; want exactly one of each\n' \
+	            "$(E2E_MIG_RUN)" "$$listed" "$$exact" "$(E2E_MIG_RUN)" >&2; \
+	        printf 'e2e-mig: a renamed, deleted or duplicated TestMIGLane would otherwise run nothing and report success\n' >&2; \
+	        printf 'e2e-mig: go test listed:\n' >&2; \
+	        cat "$$list_out" >&2; \
+	        printf 'e2e-mig: go test said:\n' >&2; \
+	        cat "$$list_err" >&2; \
+	        rc=2; \
+	    fi; \
+	    rm -f "$$list_out" "$$list_err"; \
+	fi; \
+	if [ $$rc -eq 0 ]; then \
+	    KUBECONFIG=$(MIG_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test $(E2E_MIG_FLAGS) ./test/e2e/...; \
+	    rc=$$?; \
 	fi; \
 	exit $$rc

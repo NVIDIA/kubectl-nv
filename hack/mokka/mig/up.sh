@@ -98,6 +98,9 @@ on_exit() {
     if [ -n "${STAGING}" ]; then
         rm -rf "${STAGING}"
     fi
+    if [ -n "${MIG_STAGING_OWNED}" ]; then
+        rm -rf "${MIG_STAGING_OWNED}"
+    fi
     if [ "${rc}" -ne 0 ] && [ "${CLUSTER_CREATED}" = true ]; then
         printf 'partial install left in %s; run hack/mokka/mig/down.sh %s\n' \
             "${CLUSTER}" "${LANE}" >&2

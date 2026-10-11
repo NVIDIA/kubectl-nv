@@ -76,7 +76,19 @@ MIG_UPSTREAM_CLONE="${MIG_UPSTREAM_CLONE:-${HOME}/src/github/nvidia/k8s-test-inf
 # silently reused. mig-nvml-mock-values.yaml names the same two strings, and
 # up_test.sh fails if the two ever disagree.
 MIG_NVML_MOCK_IMAGE="nvml-mock"
-MIG_NVML_MOCK_IMAGE_TAG="mig-4ce11e5a"
+# Derived from the pin rather than written out beside it. Eight characters is
+# enough to read in `docker images` and not enough to be unique, so the tag is
+# a label, not an identity: a hand-built image, or one left from a tree pinned
+# to a different commit whose SHA starts the same way, wears it just as well.
+# Deriving it means a bumped pin changes the tag in the same edit.
+MIG_NVML_MOCK_IMAGE_TAG="mig-${MIG_UPSTREAM_SHA:0:8}"
+
+# The identity the tag cannot carry. The image is built with this label set to
+# the FULL commit, and the skip-rebuild path reads it back: a tag that is
+# present but whose label names another commit is rebuilt rather than reused.
+# The key is the OCI annotation for exactly this, so `docker inspect` and any
+# registry tooling read it without being told to.
+MIG_IMAGE_REVISION_LABEL="org.opencontainers.image.revision"
 
 # ---------------------------------------------------------------------------
 # The layout
@@ -183,6 +195,20 @@ mig::stage_upstream() {
             mokka::die 2 "${MOKKA_PROG}: MIG_UPSTREAM_DIR=${MIG_UPSTREAM_DIR} is not a git checkout, so its commit cannot be checked against the pin"
         fi
         mig::require_pinned_sha "${head}"
+
+        # HEAD naming the pinned commit is not the same as the TREE being that
+        # commit. An uncommitted change is what the image would actually be
+        # built from, under a tag and a label both naming a commit that no
+        # longer describes it, and nothing downstream could tell. On a runner
+        # this never happens; on the laptop where the upstream clone is also
+        # the one being experimented in, it is the normal state.
+        local dirty
+        dirty="$(git -C "${MIG_UPSTREAM_DIR}" status --porcelain 2> /dev/null)"
+        if [ -n "${dirty}" ]; then
+            printf '%s\n' "${dirty}" >&2
+            mokka::die 6 "${MOKKA_PROG}: MIG_UPSTREAM_DIR=${MIG_UPSTREAM_DIR} is at ${MIG_UPSTREAM_SHA} but has uncommitted changes (listed above); this lane builds an image from that tree and tags it with that commit"
+        fi
+
         # Used in place, not copied: in CI it is an actions/checkout of several
         # hundred megabytes and the only reader is a docker build.
         MIG_UPSTREAM_TREE="${MIG_UPSTREAM_DIR}"
