@@ -142,7 +142,7 @@ func runDebug(c *cobra.Command, o *cmd.Options, opts *options, name string) erro
 
 	report := buildReport(name, node, opts.gather.ArtifactDir, inventoryErr, gatherErr)
 
-	if err := print(o, opts, format, report); err != nil {
+	if err := printReport(o, opts, format, report); err != nil {
 		return err
 	}
 
@@ -290,8 +290,8 @@ func readManifest(dir string) *mustgather.Manifest {
 	return &m
 }
 
-// print renders the report in the chosen format.
-func print(o *cmd.Options, opts *options, format output.Format, report *debug.Report) error {
+// printReport renders the report in the chosen format.
+func printReport(o *cmd.Options, opts *options, format output.Format, report *debug.Report) error {
 	if format == output.FormatTable || format == output.FormatWide {
 		return summarise(o.Streams.Out, report)
 	}
