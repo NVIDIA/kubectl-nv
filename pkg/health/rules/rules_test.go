@@ -31,18 +31,26 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// wantCodes is this milestone's eight checks. Written out rather than derived
+// wantCodes is every check the catalog holds. Written out rather than derived
 // from All, because a test that asked All what All returns would pass on an
 // empty list, and an empty rule set reports every cluster as clean.
 var wantCodes = []string{
+	"NV-CD-001",
+	"NV-CTK-001",
 	"NV-DCGM-001",
 	"NV-DP-001",
+	"NV-DRA-001",
+	"NV-DRV-001",
+	"NV-MIG-001",
 	"NV-NODE-001",
 	"NV-NODE-002",
 	"NV-NODE-003",
 	"NV-NODE-004",
+	"NV-NODE-005",
 	"NV-OP-001",
 	"NV-OP-002",
+	"NV-TOPO-001",
+	"NV-UPG-001",
 }
 
 func TestAllReturnsEveryRuleInCodeOrder(t *testing.T) {
@@ -271,7 +279,7 @@ func TestOperandEvidenceIsSortedDedupedAndFreeOfBlanks(t *testing.T) {
 	}
 }
 
-// brokenInput is a cluster that trips all eight checks at once:
+// brokenInput is a cluster that trips every check at once:
 //
 //	worker-1  a GPU node short of allocatable GPUs, whose count label and
 //	          capacity disagree, and whose device plugin and dcgm-exporter
@@ -279,7 +287,16 @@ func TestOperandEvidenceIsSortedDedupedAndFreeOfBlanks(t *testing.T) {
 //	worker-2  an NVIDIA PCI device with no GPU labels, and one operand
 //	          switched off by label
 //	worker-3  a node that should have GPUs and advertises none
-//	          plus a ClusterPolicy that never went ready
+//	worker-4  a node whose operands are all present and whose every other
+//	          part is wrong: the driver pod unready, the toolkit validation
+//	          failed, the MIG config failed, the driver upgrade failed, an
+//	          NVSentinel check failing, cordoned, advertising its GPUs twice
+//	          over, missing a fabric tier, and in a ComputeDomain whose IMEX
+//	          daemon never came up
+//	worker-5  a healthy node, there to give worker-4 a tier to be missing
+//	          and a cluster to be partial against
+//
+//	plus a ClusterPolicy that never went ready
 func brokenInput() health.Input {
 	worker1 := buildNode("worker-1",
 		withLabels(map[string]string{rules.LabelGPUPresent: "true", rules.LabelPCIVendor: "true"}),
@@ -302,12 +319,54 @@ func brokenInput() health.Input {
 		hinted(),
 	)
 
+	// worker-4 runs every operand the earlier rules look for, so that it adds
+	// the second milestone's findings without adding more of the first
+	// milestone's: its count and capacity agree, its allocatable is whole, and
+	// its device plugin, exporter and GFD pods are all ready.
+	worker4 := buildNode("worker-4",
+		withLabels(map[string]string{rules.LabelGPUPresent: "true", rules.LabelPCIVendor: "true"}),
+		withEveryOperandDeployed(),
+		withCount(4),
+		withGPUs(4, 4),
+		withOperand(inventory.ComponentDevicePlugin, true),
+		withOperand(inventory.ComponentDCGMExporter, true),
+		withOperand(inventory.ComponentGFD, true),
+		withOperandPod(driverPod(inventory.ComponentDriver, false, 3)),
+		withValidatorInit(false, initResult("toolkit-validation", exitCode(1), "Error")),
+		withMIG("mixed", "all-1g.10gb", "failed", true),
+		withUpgradeState("upgrade-failed"),
+		withClique("uuid.1"),
+		withConditions(nvsentinelCondition("GPUXidError", true, "Xid 79 on GPU 3")),
+		cordoned(),
+		withMode(inventory.ModeBoth),
+		withResourceSlices("worker-4-gpu.nvidia.com"),
+		withOperand(inventory.ComponentIMEXDaemon, false),
+		withTopology(map[string]string{"fabric.topograph.run/tier-0": "sw-a"}),
+	)
+
+	worker5 := buildNode("worker-5",
+		withLabels(map[string]string{rules.LabelGPUPresent: "true", rules.LabelPCIVendor: "true"}),
+		withEveryOperandDeployed(),
+		withCount(4),
+		withGPUs(4, 4),
+		withOperand(inventory.ComponentDevicePlugin, true),
+		withOperand(inventory.ComponentDCGMExporter, true),
+		withOperand(inventory.ComponentGFD, true),
+		withTopology(map[string]string{
+			"fabric.topograph.run/tier-0": "sw-b",
+			"fabric.topograph.run/tier-1": "sw-top",
+		}),
+	)
+
 	return health.Input{
-		Nodes:  []inventory.GPUNode{worker1},
+		Nodes:  []inventory.GPUNode{worker1, worker4, worker5},
 		Hinted: []inventory.GPUNode{worker2, worker3},
 		// No spec, so every operand reads as enabled, which is the CRD's own
 		// default and what lets NV-DP-001 and NV-DCGM-001 fire here.
-		ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("notReady"))},
+		ClusterPolicies: []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("notReady"))},
+		ComputeDomains: []unstructured.Unstructured{
+			computeDomain("workload", "cd-a", "NotReady", cdNode("worker-4", "uuid.1", "NotReady")),
+		},
 		OperatorInstalled: true,
 	}
 }

@@ -70,21 +70,35 @@ const (
 	labelValueTrue = "true"
 )
 
-// All returns the health checks, one fresh instance each, in code order.
+// All returns the health checks at their default settings, one fresh instance
+// each, in code order.
 //
 // It is a function rather than a package variable so that two callers never
 // share a rule, and the rules are collected here rather than registered from
 // init functions so that the set of checks can be read off one list.
-func All() []health.Rule {
+func All() []health.Rule { return AllWith(Options{}) }
+
+// AllWith returns the same set with the caller's settings applied. The health
+// command uses this, because --upgrade-stuck-after is a threshold the user
+// chose and no Input can carry it.
+func AllWith(opts Options) []health.Rule {
 	all := []health.Rule{
 		NewNodePCIWithoutGPULabel(),
 		NewNodeNoAllocatableGPUs(),
 		NewNodeAllocatableBelowCapacity(),
 		NewNodeCountDiffersFromCapacity(),
+		NewNodeConditionOrCordon(),
 		NewOperatorClusterPolicyNotReady(),
 		NewOperatorOperandDisabled(),
+		NewDriverPodNotReady(),
+		NewToolkitValidationFailed(),
 		NewDevicePluginNotReady(),
+		NewDevicePluginAndDRABoth(),
+		NewMIGConfigNotApplied(),
 		NewDCGMExporterNotReady(),
+		NewComputeDomainNotReady(),
+		NewUpgradeStuck(opts.upgradeStuckAfter()),
+		NewTopologyLabelsPartial(),
 	}
 
 	sort.Slice(all, func(i, j int) bool { return all[i].Code() < all[j].Code() })

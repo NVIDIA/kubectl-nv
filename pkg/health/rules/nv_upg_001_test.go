@@ -28,7 +28,7 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// now is the injected clock every case in this file is written against. A
+// upgNow is the injected clock every case in this file is written against. A
 // rule that called time.Now would produce different findings on two runs over
 // the same input.
 var upgNow = time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)

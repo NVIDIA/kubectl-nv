@@ -50,6 +50,12 @@ type options struct {
 	failOn     string
 	summary    bool
 	fromBundle string
+	// upgradeStuckAfter is how long a node may sit in one step of a driver
+	// upgrade before NV-UPG-001 calls it stuck. It is a flag rather than a
+	// constant because the right answer is a cluster's own: a fleet whose
+	// drain takes an hour would be reported wedged on every upgrade at any
+	// fixed default short enough to be useful elsewhere.
+	upgradeStuckAfter time.Duration
 	// out is -o, --fields and --limit, registered together by pkg/output so
 	// that every command and the MCP server agree on what they are called.
 	out *output.OutputOptions
@@ -95,6 +101,8 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 		"Print the summary line only, without the findings")
 	flags.StringVar(&opts.fromBundle, "from-bundle", "",
 		"Read a must-gather directory instead of a cluster")
+	flags.DurationVar(&opts.upgradeStuckAfter, "upgrade-stuck-after", rules.DefaultUpgradeStuckAfter,
+		"Report a node stuck in a driver upgrade step once it has been there this long")
 	opts.out = output.AddOutputFlags(c)
 
 	return c
@@ -129,7 +137,7 @@ func run(c *cobra.Command, o *cmd.Options, opts *options) error {
 		return err
 	}
 
-	report, err := engine.Run(rules.All(), in, engine.Options{
+	report, err := engine.Run(rules.AllWith(rules.Options{UpgradeStuckAfter: opts.upgradeStuckAfter}), in, engine.Options{
 		Node:     opts.node,
 		InputErr: inputErr,
 	})
@@ -217,10 +225,16 @@ func buildInput(ctx context.Context, src source.Source) (health.Input, error, er
 		in.Events = events
 	}
 
-	// ComputeDomains stays empty: pkg/source has no reader for them, and no
-	// rule in this milestone looks at one. Track E2's NV-CD rules need both,
-	// and adding the read here before the rules exist would be a second
-	// cluster read on every run for a field nothing consults.
+	// The ComputeDomains are NV-CD-001's input. A cluster without the DRA
+	// driver serves no such collection, and pkg/source answers that with an
+	// empty list and no error: nothing was denied and nothing is missing, so
+	// it is not a partial read and the report must not say it is.
+	domains, err := source.ReadComputeDomains(ctx, src)
+	if err != nil {
+		partials = append(partials, err)
+	} else {
+		in.ComputeDomains = domains
+	}
 
 	return in, errors.Join(partials...), nil
 }

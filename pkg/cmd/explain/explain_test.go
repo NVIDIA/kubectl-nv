@@ -135,7 +135,9 @@ func TestExplainRejectsAnUnknownCode(t *testing.T) {
 	// mistyping, so it has to name what they typed and list every code in the
 	// order explain prints them.
 	want := `no finding catalogued as "NV-NODE-999": the codes are ` +
-		"NV-DCGM-001, NV-DP-001, NV-NODE-001, NV-NODE-002, NV-NODE-003, NV-NODE-004, NV-OP-001, NV-OP-002"
+		"NV-CD-001, NV-CTK-001, NV-DCGM-001, NV-DP-001, NV-DRA-001, NV-DRV-001, NV-MIG-001, " +
+		"NV-NODE-001, NV-NODE-002, NV-NODE-003, NV-NODE-004, NV-NODE-005, NV-OP-001, NV-OP-002, " +
+		"NV-TOPO-001, NV-UPG-001"
 	if err.Error() != want {
 		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)
 	}
