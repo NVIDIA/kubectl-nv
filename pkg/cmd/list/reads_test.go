@@ -147,11 +147,11 @@ func TestNoPodsSkipsThePodList(t *testing.T) {
 
 	counter, _, err := runCounted(t, list.NewCommand, []runtime.Object{gpuNode("worker-1", 4, nil)}, "--no-pods")
 	if err != nil {
-		t.Fatalf("gpu list --no-pods: %v", err)
+		t.Fatalf("kubectl nv list --no-pods: %v", err)
 	}
 
 	if got := counter.count("pods"); got != 0 {
-		t.Errorf("gpu list --no-pods listed pods %d times, want none", got)
+		t.Errorf("kubectl nv list --no-pods listed pods %d times, want none", got)
 	}
 }
 

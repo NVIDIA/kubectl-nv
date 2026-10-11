@@ -148,7 +148,7 @@ func itemNames(list *GPUNodeList) []string {
 	return names
 }
 
-// TestBuildReadsTheClusterOnce is the cost contract of gpu list: one
+// TestBuildReadsTheClusterOnce is the cost contract of kubectl nv list: one
 // classification, one pod list, one slice list, whatever the cluster's size,
 // and never a read keyed on a single node.
 func TestBuildReadsTheClusterOnce(t *testing.T) {
@@ -194,7 +194,7 @@ func TestBuildReadsTheClusterOnce(t *testing.T) {
 }
 
 // TestBuildOrdersByName pins the deterministic order, which is what makes two
-// runs of gpu list diffable.
+// runs of kubectl nv list diffable.
 func TestBuildOrdersByName(t *testing.T) {
 	t.Parallel()
 

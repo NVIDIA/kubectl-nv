@@ -36,16 +36,16 @@ func TestNewCommandFlags(t *testing.T) {
 
 	for _, name := range []string{"from-bundle", "output"} {
 		if c.Flags().Lookup(name) == nil {
-			t.Errorf("gpu info has no --%s flag", name)
+			t.Errorf("kubectl nv info has no --%s flag", name)
 		}
 	}
 
 	if short := c.Flags().ShorthandLookup("o"); short == nil || short.Name != "output" {
-		t.Error("gpu info has no -o shorthand for --output")
+		t.Error("kubectl nv info has no -o shorthand for --output")
 	}
 
 	if err := c.Args(c, []string{"worker-1", "worker-2"}); err == nil {
-		t.Error("gpu info accepted two nodes, want exactly one")
+		t.Error("kubectl nv info accepted two nodes, want exactly one")
 	}
 }
 

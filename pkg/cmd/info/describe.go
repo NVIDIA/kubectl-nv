@@ -244,7 +244,7 @@ func (p *printer) write(s string) {
 	_, p.err = io.WriteString(p.w, s)
 }
 
-// status reads like the STATUS column of gpu list, so that someone who moved
+// status reads like the STATUS column of kubectl nv list, so that someone who moved
 // from one command to the other does not have to learn a second vocabulary.
 func status(n *inventory.GPUNode) string {
 	out := "NotReady"

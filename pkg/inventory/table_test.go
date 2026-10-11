@@ -280,7 +280,7 @@ func TestColumnFieldsArePathsOfTheKind(t *testing.T) {
 }
 
 // TestGPUNodeSingleColumnsCarryTheirField pins the same for one node, which is
-// the shape gpu info prints at -o wide.
+// the shape kubectl nv info prints at -o wide.
 func TestGPUNodeSingleColumnsCarryTheirField(t *testing.T) {
 	t.Parallel()
 

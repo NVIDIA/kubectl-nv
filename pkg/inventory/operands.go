@@ -75,7 +75,7 @@ var draComponentLabelKeys = []string{
 //
 // An empty result means no operator pod was seen. That is an answer: a cluster
 // without the GPU Operator has no operands, and reporting that as a failure
-// would make gpu list refuse to describe a cluster running the device plugin
+// would make kubectl nv list refuse to describe a cluster running the device plugin
 // on its own.
 func operatorNamespace(pods []corev1.Pod) string {
 	for i := range pods {

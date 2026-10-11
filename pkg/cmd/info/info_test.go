@@ -55,7 +55,7 @@ type streams struct {
 	err *bytes.Buffer
 }
 
-// runInfo executes gpu info with the given arguments over a fake cluster.
+// runInfo executes kubectl nv info with the given arguments over a fake cluster.
 func runInfo(t *testing.T, objects []runtime.Object, args ...string) (*streams, error) {
 	t.Helper()
 
@@ -148,7 +148,7 @@ func TestInfoDescribesTheNode(t *testing.T) {
 
 	s, err := runInfo(t, cluster(), "worker-1")
 	if err != nil {
-		t.Fatalf("gpu info: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv info: %v\nstderr: %s", err, s.err)
 	}
 
 	got := s.out.String()
@@ -181,7 +181,7 @@ func TestInfoUnknownNode(t *testing.T) {
 
 			_, err := runInfo(t, cluster(), name)
 			if err == nil {
-				t.Fatalf("gpu info %s returned no error", name)
+				t.Fatalf("kubectl nv info %s returned no error", name)
 			}
 
 			want := "node " + name + " has no GPUs and no GPU labels"
@@ -203,7 +203,7 @@ func TestInfoHintedNode(t *testing.T) {
 
 	s, err := runInfo(t, cluster(), "control-plane", "-o", "json")
 	if err != nil {
-		t.Fatalf("gpu info control-plane: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv info control-plane: %v\nstderr: %s", err, s.err)
 	}
 
 	var node struct {
@@ -237,7 +237,7 @@ func TestInfoJSONCarriesTheDetails(t *testing.T) {
 
 	s, err := runInfo(t, cluster(), "worker-1", "-o", "json")
 	if err != nil {
-		t.Fatalf("gpu info -o json: %v", err)
+		t.Fatalf("kubectl nv info -o json: %v", err)
 	}
 
 	var node struct {
@@ -274,7 +274,7 @@ func TestInfoName(t *testing.T) {
 
 	s, err := runInfo(t, cluster(), "worker-1", "-o", "name")
 	if err != nil {
-		t.Fatalf("gpu info -o name: %v", err)
+		t.Fatalf("kubectl nv info -o name: %v", err)
 	}
 
 	if got := strings.TrimSpace(s.out.String()); got != "gpunode/worker-1" {
@@ -289,12 +289,12 @@ func TestInfoArgumentCount(t *testing.T) {
 
 	for _, args := range [][]string{{}, {"worker-1", "control-plane"}} {
 		if _, err := runInfo(t, cluster(), args...); err == nil {
-			t.Errorf("gpu info %v returned no error", args)
+			t.Errorf("kubectl nv info %v returned no error", args)
 		}
 	}
 }
 
-// TestInfoFromBundle is the offline path, over the same fixture gpu list uses.
+// TestInfoFromBundle is the offline path, over the same fixture kubectl nv list uses.
 func TestInfoFromBundle(t *testing.T) {
 	t.Parallel()
 
@@ -382,7 +382,7 @@ func TestInfoPartialReadIsNotAUsageError(t *testing.T) {
 
 	err := c.Execute()
 	if err == nil {
-		t.Fatal("gpu info returned no error with the slice list denied")
+		t.Fatal("kubectl nv info returned no error with the slice list denied")
 	}
 
 	if code := output.ExitCodeFor(err); code != output.ExitPartial {
@@ -402,7 +402,7 @@ func TestInfoUnknownNodeStillExitsTwoOnACompleteRead(t *testing.T) {
 
 	_, err := runInfo(t, cluster(), "no-such-node")
 	if err == nil {
-		t.Fatal("gpu info returned no error for a node the cluster does not have")
+		t.Fatal("kubectl nv info returned no error for a node the cluster does not have")
 	}
 
 	if code := output.ExitCodeFor(err); code != output.ExitUsage {
@@ -424,6 +424,6 @@ func TestInfoFromBundleTableExitsPartial(t *testing.T) {
 	// The description still has to be printed: a partial read comes with a
 	// usable answer, and withholding it would make exit 3 mean exit 4.
 	if !strings.Contains(s.out.String(), "worker-t4") {
-		t.Errorf("gpu info printed no description alongside the partial read:\n%s", s.out)
+		t.Errorf("kubectl nv info printed no description alongside the partial read:\n%s", s.out)
 	}
 }

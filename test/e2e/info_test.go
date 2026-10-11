@@ -35,7 +35,7 @@ var laneOperands = []string{
 }
 
 // infoNodeJSON is the part of one GPUNode this suite asserts on. It is the
-// detailed shape: gpu info fills the conditions and the slice names, and gpu
+// detailed shape: kubectl nv info fills the conditions and the slice names, and gpu
 // list does not.
 type infoNodeJSON struct {
 	Kind     string `json:"kind"`
@@ -68,18 +68,18 @@ type infoNodeJSON struct {
 	ResourceSlices []string `json:"resourceSlices"`
 }
 
-// infoJSON runs gpu info over a node and decodes it.
+// infoJSON runs kubectl nv info over a node and decodes it.
 func infoJSON(t *testing.T, args ...string) infoNodeJSON {
 	t.Helper()
 
 	res := run(t, append([]string{"info"}, append(args, "-o", "json")...)...)
 	if res.code != 0 {
-		t.Fatalf("gpu info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+		t.Fatalf("kubectl nv info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
 
 	var node infoNodeJSON
 	if err := json.Unmarshal([]byte(res.stdout), &node); err != nil {
-		t.Fatalf("decoding gpu info output: %v\n%s", err, res.stdout)
+		t.Fatalf("decoding kubectl nv info output: %v\n%s", err, res.stdout)
 	}
 
 	return node
@@ -117,9 +117,9 @@ func TestInfoAgainstTheLane(t *testing.T) {
 		}
 	})
 
-	t.Run("it fills the details gpu list leaves out", func(t *testing.T) {
+	t.Run("it fills the details kubectl nv list leaves out", func(t *testing.T) {
 		if len(node.Conditions) == 0 {
-			t.Error("conditions are empty; gpu info is the command that fills them")
+			t.Error("conditions are empty; kubectl nv info is the command that fills them")
 		}
 
 		// Never null, so that a consumer can range without a null check first.
@@ -180,7 +180,7 @@ func TestInfoAgainstTheLane(t *testing.T) {
 	t.Run("the described view names the operands", func(t *testing.T) {
 		res := run(t, "info", worker)
 		if res.code != 0 {
-			t.Fatalf("gpu info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+			t.Fatalf("kubectl nv info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		// Per key, by exact value. A substring check over the whole
@@ -212,7 +212,7 @@ func TestInfoOnANodeWithoutGPUs(t *testing.T) {
 	res := run(t, "info", "there-is-no-such-node")
 
 	if res.code != 2 {
-		t.Errorf("gpu info exited %d, want 2\nstderr:\n%s", res.code, res.stderr)
+		t.Errorf("kubectl nv info exited %d, want 2\nstderr:\n%s", res.code, res.stderr)
 	}
 
 	want := "node there-is-no-such-node has no GPUs and no GPU labels"
@@ -304,7 +304,7 @@ func TestInfoHintedFieldIsExact(t *testing.T) {
 
 	res := run(t, "info", controlPlane)
 	if res.code != 0 {
-		t.Fatalf("gpu info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+		t.Fatalf("kubectl nv info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
 
 	if got := describedField(t, res.stdout, "Hinted"); got != "true" {

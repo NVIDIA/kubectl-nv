@@ -108,7 +108,7 @@ type nodeContext struct {
 	requestedKnown bool
 	// operands are the GPU Operator and DRA driver pods on the node.
 	operands []OperandPod
-	// withDetails turns on the fields gpu info shows and gpu list does not.
+	// withDetails turns on the fields kubectl nv info shows and kubectl nv list does not.
 	withDetails bool
 }
 
@@ -168,7 +168,7 @@ func buildNode(node *corev1.Node, ctx nodeContext) *GPUNode {
 	out.Taints = append([]corev1.Taint(nil), node.Spec.Taints...)
 	out.Operands = ctx.operands
 
-	// Conditions and slice names are what gpu info shows and gpu list does
+	// Conditions and slice names are what kubectl nv info shows and kubectl nv list does
 	// not: a list of nodes with every condition on each one is not a list
 	// anyone reads.
 	if ctx.withDetails {

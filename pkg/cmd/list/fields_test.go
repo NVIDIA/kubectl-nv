@@ -75,7 +75,7 @@ func TestFieldsKeepsTheRightColumns(t *testing.T) {
 
 	s, err := runList(t, objects, "--fields", "product,mode")
 	if err != nil {
-		t.Fatalf("gpu list --fields: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list --fields: %v\nstderr: %s", err, s.err)
 	}
 
 	header := cells(lines(s.out.String())[0])
@@ -95,7 +95,7 @@ func TestFieldsProjectsJSON(t *testing.T) {
 
 	s, err := runList(t, objects, "-o", "json", "--fields", "product")
 	if err != nil {
-		t.Fatalf("gpu list -o json --fields: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list -o json --fields: %v\nstderr: %s", err, s.err)
 	}
 
 	var envelope struct {
@@ -133,7 +133,7 @@ func TestLimitBoundsTheList(t *testing.T) {
 
 	s, err := runList(t, objects, "--limit", "2", "-o", "name")
 	if err != nil {
-		t.Fatalf("gpu list --limit: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list --limit: %v\nstderr: %s", err, s.err)
 	}
 
 	want := []string{"gpunode/worker-1", "gpunode/worker-2"}
@@ -155,7 +155,7 @@ func TestUnknownFieldIsAUsageError(t *testing.T) {
 	counter, _, err := runCounted(t, list.NewCommand,
 		[]runtime.Object{gpuNode("worker-1", 4, nil)}, "--fields", "prodcut")
 	if err == nil {
-		t.Fatal("gpu list accepted a field path that does not exist")
+		t.Fatal("kubectl nv list accepted a field path that does not exist")
 	}
 
 	if code := output.ExitCodeFor(err); code != output.ExitUsage {

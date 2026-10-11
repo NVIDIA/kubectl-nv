@@ -45,7 +45,7 @@ type BuildOptions struct {
 	// no GPUs. They are out of the list by default, because on most clusters
 	// they are a control plane that node-feature-discovery labelled.
 	IncludeHinted bool
-	// WithDetails fills the fields gpu info shows and gpu list does not: the
+	// WithDetails fills the fields kubectl nv info shows and kubectl nv list does not: the
 	// node conditions and the names of its ResourceSlices.
 	WithDetails bool
 }
@@ -70,7 +70,7 @@ func Build(ctx context.Context, src source.Source, opts BuildOptions) (*GPUNodeL
 // BuildWithHinted is Build, and also reports how many hinted nodes were left
 // out because IncludeHinted was not set.
 //
-// The count is what gpu list says on stderr, and it has to come from the same
+// The count is what kubectl nv list says on stderr, and it has to come from the same
 // pass: asking the cluster a second time to count them would be a second read
 // of a second moment, and the number printed would not be the number of nodes
 // missing from the list beside it.

@@ -57,7 +57,7 @@ type streams struct {
 	err *bytes.Buffer
 }
 
-// newCommand builds gpu list over the given cluster objects.
+// newCommand builds kubectl nv list over the given cluster objects.
 func newCommand(t *testing.T, objects ...runtime.Object) (*cobra.Command, *streams) {
 	t.Helper()
 
@@ -82,7 +82,7 @@ func newCommand(t *testing.T, objects ...runtime.Object) (*cobra.Command, *strea
 	return c, s
 }
 
-// runList executes gpu list with the given arguments.
+// runList executes kubectl nv list with the given arguments.
 func runList(t *testing.T, objects []runtime.Object, args ...string) (*streams, error) {
 	t.Helper()
 
@@ -187,7 +187,7 @@ func TestListTable(t *testing.T) {
 
 	s, err := runList(t, objects)
 	if err != nil {
-		t.Fatalf("gpu list: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list: %v\nstderr: %s", err, s.err)
 	}
 
 	got := lines(s.out.String())
@@ -225,7 +225,7 @@ func TestListWide(t *testing.T) {
 
 	s, err := runList(t, objects, "-o", "wide")
 	if err != nil {
-		t.Fatalf("gpu list -o wide: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list -o wide: %v\nstderr: %s", err, s.err)
 	}
 
 	got := lines(s.out.String())
@@ -256,7 +256,7 @@ func TestListName(t *testing.T) {
 
 	s, err := runList(t, objects, "-o", "name")
 	if err != nil {
-		t.Fatalf("gpu list -o name: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list -o name: %v\nstderr: %s", err, s.err)
 	}
 
 	want := []string{"gpunode/worker-1", "gpunode/worker-2"}
@@ -272,7 +272,7 @@ func TestListJSON(t *testing.T) {
 
 	s, err := runList(t, objects, "-o", "json")
 	if err != nil {
-		t.Fatalf("gpu list -o json: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list -o json: %v\nstderr: %s", err, s.err)
 	}
 
 	var envelope struct {
@@ -336,7 +336,7 @@ func TestListHintedNote(t *testing.T) {
 
 		s, err := runList(t, objects)
 		if err != nil {
-			t.Fatalf("gpu list: %v", err)
+			t.Fatalf("kubectl nv list: %v", err)
 		}
 
 		if strings.Contains(s.out.String(), "control-plane") {
@@ -358,7 +358,7 @@ func TestListHintedNote(t *testing.T) {
 
 		s, err := runList(t, []runtime.Object{gpuNode("worker-1", 4, nil)})
 		if err != nil {
-			t.Fatalf("gpu list: %v", err)
+			t.Fatalf("kubectl nv list: %v", err)
 		}
 
 		if strings.Contains(s.err.String(), "--include-hinted") {
@@ -371,7 +371,7 @@ func TestListHintedNote(t *testing.T) {
 
 		s, err := runList(t, objects, "--include-hinted")
 		if err != nil {
-			t.Fatalf("gpu list --include-hinted: %v", err)
+			t.Fatalf("kubectl nv list --include-hinted: %v", err)
 		}
 
 		got := lines(s.out.String())
@@ -397,7 +397,7 @@ func TestListNoPods(t *testing.T) {
 
 	s, err := runList(t, objects, "--no-pods")
 	if err != nil {
-		t.Fatalf("gpu list --no-pods: %v", err)
+		t.Fatalf("kubectl nv list --no-pods: %v", err)
 	}
 
 	row := cells(lines(s.out.String())[1])
@@ -419,7 +419,7 @@ func TestListSelectorAndNode(t *testing.T) {
 
 		s, err := runList(t, objects, "-l", "nvidia.com/gpu.product=NVIDIA-T4", "-o", "name")
 		if err != nil {
-			t.Fatalf("gpu list -l: %v", err)
+			t.Fatalf("kubectl nv list -l: %v", err)
 		}
 
 		if got := lines(s.out.String()); !equalStrings(got, []string{"gpunode/t4-1"}) {
@@ -432,7 +432,7 @@ func TestListSelectorAndNode(t *testing.T) {
 
 		s, err := runList(t, objects, "--node", "a100-1", "-o", "name")
 		if err != nil {
-			t.Fatalf("gpu list --node: %v", err)
+			t.Fatalf("kubectl nv list --node: %v", err)
 		}
 
 		if got := lines(s.out.String()); !equalStrings(got, []string{"gpunode/a100-1"}) {
@@ -450,7 +450,7 @@ func TestListSelectorAndNode(t *testing.T) {
 
 		s, err := runList(t, prefixed, "--node", "w", "-o", "name")
 		if err != nil {
-			t.Fatalf("gpu list --node w: %v", err)
+			t.Fatalf("kubectl nv list --node w: %v", err)
 		}
 
 		if got := lines(s.out.String()); !equalStrings(got, []string{"gpunode/w"}) {
@@ -463,7 +463,7 @@ func TestListSelectorAndNode(t *testing.T) {
 
 		_, err := runList(t, objects, "-l", "==")
 		if err == nil {
-			t.Fatal("gpu list accepted a selector that does not parse")
+			t.Fatal("kubectl nv list accepted a selector that does not parse")
 		}
 
 		if code := output.ExitCodeFor(err); code != output.ExitUsage {
@@ -497,7 +497,7 @@ func TestListFromBundleMissing(t *testing.T) {
 
 	_, err := runList(t, nil, "--from-bundle", "testdata/there-is-no-bundle-here")
 	if err == nil {
-		t.Fatal("gpu list accepted a bundle directory that does not exist")
+		t.Fatal("kubectl nv list accepted a bundle directory that does not exist")
 	}
 
 	// The path is something the user typed, so it is theirs to fix. Exit 4
@@ -515,7 +515,7 @@ func TestListUnknownFormat(t *testing.T) {
 
 	_, err := runList(t, []runtime.Object{gpuNode("worker-1", 4, nil)}, "-o", "jsonn")
 	if err == nil {
-		t.Fatal("gpu list accepted an unknown output format")
+		t.Fatal("kubectl nv list accepted an unknown output format")
 	}
 
 	if code := output.ExitCodeFor(err); code != output.ExitUsage {
@@ -523,13 +523,13 @@ func TestListUnknownFormat(t *testing.T) {
 	}
 }
 
-// TestListTakesNoArguments pins that "gpu list worker-1" is a mistake rather
-// than a list of every node: the command that takes a node is gpu info.
+// TestListTakesNoArguments pins that "kubectl nv list worker-1" is a mistake rather
+// than a list of every node: the command that takes a node is kubectl nv info.
 func TestListTakesNoArguments(t *testing.T) {
 	t.Parallel()
 
 	if _, err := runList(t, []runtime.Object{gpuNode("worker-1", 4, nil)}, "worker-1"); err == nil {
-		t.Fatal("gpu list accepted a positional argument")
+		t.Fatal("kubectl nv list accepted a positional argument")
 	}
 }
 
@@ -554,7 +554,7 @@ func TestListDRAMode(t *testing.T) {
 
 	s, err := runList(t, objects)
 	if err != nil {
-		t.Fatalf("gpu list: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv list: %v\nstderr: %s", err, s.err)
 	}
 
 	row := cells(lines(s.out.String())[1])
@@ -602,7 +602,7 @@ func TestListHintedNoteIsExact(t *testing.T) {
 
 	s, err := runList(t, objects)
 	if err != nil {
-		t.Fatalf("gpu list: %v", err)
+		t.Fatalf("kubectl nv list: %v", err)
 	}
 
 	want := "2 node(s) carry an NVIDIA label but advertise no GPUs; pass --include-hinted to list them"
@@ -630,7 +630,7 @@ func TestListHintedNoteCountsOnlyWhatTheQueryLeftOut(t *testing.T) {
 
 		s, err := runList(t, objects, "-l", "nvidia.com/gpu.product=NVIDIA-T4")
 		if err != nil {
-			t.Fatalf("gpu list -l: %v", err)
+			t.Fatalf("kubectl nv list -l: %v", err)
 		}
 
 		want := "1 node(s) carry an NVIDIA label but advertise no GPUs; pass --include-hinted to list them"
@@ -645,7 +645,7 @@ func TestListHintedNoteCountsOnlyWhatTheQueryLeftOut(t *testing.T) {
 		s, err := runList(t, objects,
 			"-l", "nvidia.com/gpu.product=NVIDIA-T4", "--include-hinted", "-o", "name")
 		if err != nil {
-			t.Fatalf("gpu list -l --include-hinted: %v", err)
+			t.Fatalf("kubectl nv list -l --include-hinted: %v", err)
 		}
 
 		want := []string{"gpunode/broken-t4", "gpunode/worker-1"}
@@ -672,7 +672,7 @@ func TestListIncludeHintedOrder(t *testing.T) {
 
 	s, err := runList(t, objects, "--include-hinted", "-o", "name")
 	if err != nil {
-		t.Fatalf("gpu list --include-hinted: %v", err)
+		t.Fatalf("kubectl nv list --include-hinted: %v", err)
 	}
 
 	want := []string{"gpunode/broken-1", "gpunode/control-plane", "gpunode/worker-1"}

@@ -67,12 +67,12 @@ func TestDescribeSanitisesEveryControlByte(t *testing.T) {
 
 	s, err := runInfo(t, nil, "hostile-1", "--from-bundle", hostileBundle)
 	if err != nil && !strings.Contains(err.Error(), "could not read pods") {
-		t.Fatalf("gpu info over the hostile bundle: %v\nstderr: %s", err, s.err)
+		t.Fatalf("kubectl nv info over the hostile bundle: %v\nstderr: %s", err, s.err)
 	}
 
 	out := s.out.String()
 	if out == "" {
-		t.Fatal("gpu info printed nothing")
+		t.Fatal("kubectl nv info printed nothing")
 	}
 
 	for i, r := range out {

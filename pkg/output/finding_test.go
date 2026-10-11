@@ -153,7 +153,7 @@ func TestFindingRoundTrips(t *testing.T) {
 		Message:   "mig.config.state is pending",
 		Evidence:  map[string]string{"nvidia.com/mig.config": "all-1g.10gb"},
 		Docs:      "docs/mig.md",
-		Next:      "kubectl nv gpu info node-b",
+		Next:      "kubectl nv info node-b",
 	}
 
 	raw, err := json.Marshal(want)

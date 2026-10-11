@@ -57,25 +57,25 @@ type gpuNodeJSON struct {
 	} `json:"operands"`
 }
 
-// gpuNodeListJSON is the envelope gpu list prints.
+// gpuNodeListJSON is the envelope kubectl nv list prints.
 type gpuNodeListJSON struct {
 	APIVersion string        `json:"apiVersion"`
 	Kind       string        `json:"kind"`
 	Items      []gpuNodeJSON `json:"items"`
 }
 
-// listJSON runs gpu list with the given extra arguments and decodes it.
+// listJSON runs kubectl nv list with the given extra arguments and decodes it.
 func listJSON(t *testing.T, args ...string) gpuNodeListJSON {
 	t.Helper()
 
 	res := run(t, append([]string{"list", "-o", "json"}, args...)...)
 	if res.code != 0 {
-		t.Fatalf("gpu list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+		t.Fatalf("kubectl nv list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
 
 	var list gpuNodeListJSON
 	if err := json.Unmarshal([]byte(res.stdout), &list); err != nil {
-		t.Fatalf("decoding gpu list output: %v\n%s", err, res.stdout)
+		t.Fatalf("decoding kubectl nv list output: %v\n%s", err, res.stdout)
 	}
 
 	return list
@@ -101,7 +101,7 @@ func nodeNamed(t *testing.T, list gpuNodeListJSON, name string) gpuNodeJSON {
 		}
 	}
 
-	t.Fatalf("gpu list does not hold %q; it holds %v", name, nodeNames(list))
+	t.Fatalf("kubectl nv list does not hold %q; it holds %v", name, nodeNames(list))
 
 	return gpuNodeJSON{}
 }
@@ -116,7 +116,7 @@ func TestListAgainstTheLane(t *testing.T) {
 
 	t.Run("the GPU nodes are the workers", func(t *testing.T) {
 		if got := nodeNames(list); !reflect.DeepEqual(got, workers) {
-			t.Errorf("gpu list = %v, want the workers %v, sorted", got, workers)
+			t.Errorf("kubectl nv list = %v, want the workers %v, sorted", got, workers)
 		}
 	})
 
@@ -162,7 +162,7 @@ func TestListAgainstTheLane(t *testing.T) {
 		// that holds it is a list that cannot be used to find a node to run on.
 		for _, name := range nodeNames(list) {
 			if isControlPlane(t, name) {
-				t.Errorf("gpu list holds the control plane node %q", name)
+				t.Errorf("kubectl nv list holds the control plane node %q", name)
 			}
 		}
 	})
@@ -170,7 +170,7 @@ func TestListAgainstTheLane(t *testing.T) {
 	t.Run("the control plane is counted on stderr", func(t *testing.T) {
 		res := run(t, "list")
 		if res.code != 0 {
-			t.Fatalf("gpu list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+			t.Fatalf("kubectl nv list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		// The whole line, including the count. The lane has exactly one
@@ -186,7 +186,7 @@ func TestListAgainstTheLane(t *testing.T) {
 		withHinted := listJSON(t, "--include-hinted")
 
 		if got := nodeNames(withHinted); !reflect.DeepEqual(got, clusterNodeNames(t)) {
-			t.Errorf("gpu list --include-hinted = %v, want every node %v", got, clusterNodeNames(t))
+			t.Errorf("kubectl nv list --include-hinted = %v, want every node %v", got, clusterNodeNames(t))
 		}
 
 		for _, name := range nodeNames(withHinted) {
@@ -200,7 +200,7 @@ func TestListAgainstTheLane(t *testing.T) {
 	t.Run("name output is one gpunode line per node", func(t *testing.T) {
 		res := run(t, "list", "-o", "name")
 		if res.code != 0 {
-			t.Fatalf("gpu list -o name exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+			t.Fatalf("kubectl nv list -o name exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		want := make([]string, 0, len(workers))
@@ -209,14 +209,14 @@ func TestListAgainstTheLane(t *testing.T) {
 		}
 
 		if got := splitLines(res.stdout); !reflect.DeepEqual(got, want) {
-			t.Errorf("gpu list -o name = %v, want %v", got, want)
+			t.Errorf("kubectl nv list -o name = %v, want %v", got, want)
 		}
 	})
 
 	t.Run("the table has the agreed columns", func(t *testing.T) {
 		res := run(t, "list")
 		if res.code != 0 {
-			t.Fatalf("gpu list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+			t.Fatalf("kubectl nv list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		header := strings.Fields(splitLines(res.stdout)[0])
@@ -230,11 +230,11 @@ func TestListAgainstTheLane(t *testing.T) {
 	t.Run("no-pods reports the requested count as unknown", func(t *testing.T) {
 		res := run(t, "list", "--no-pods")
 		if res.code != 0 {
-			t.Fatalf("gpu list --no-pods exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
+			t.Fatalf("kubectl nv list --no-pods exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 		}
 
 		if !strings.Contains(res.stdout, "?/") {
-			t.Errorf("gpu list --no-pods counted the requested GPUs anyway:\n%s", res.stdout)
+			t.Errorf("kubectl nv list --no-pods counted the requested GPUs anyway:\n%s", res.stdout)
 		}
 	})
 }
@@ -264,14 +264,14 @@ func TestListAgainstTheLane(t *testing.T) {
 //     are all still compared.
 //
 // Nothing else is removed. Conditions and resourceSlices need no removal:
-// gpu list fills neither, so both are empty on both sides and are compared as
+// kubectl nv list fills neither, so both are empty on both sides and are compared as
 // such.
 func TestListFromABundleMatchesTheLane(t *testing.T) {
 	b := gather(t)
 
 	live := rawList(t)
 	if live.code != 0 {
-		t.Fatalf("the live gpu list exited %d, want 0\nstderr:\n%s", live.code, live.stderr)
+		t.Fatalf("the live kubectl nv list exited %d, want 0\nstderr:\n%s", live.code, live.stderr)
 	}
 
 	fromBundle := rawList(t, "--from-bundle", b.dir)
@@ -280,7 +280,7 @@ func TestListFromABundleMatchesTheLane(t *testing.T) {
 	// construction, and exit 3 is how the command says the answer is
 	// incomplete rather than clean.
 	if fromBundle.code != 3 {
-		t.Fatalf("gpu list --from-bundle exited %d, want 3\nstderr:\n%s", fromBundle.code, fromBundle.stderr)
+		t.Fatalf("kubectl nv list --from-bundle exited %d, want 3\nstderr:\n%s", fromBundle.code, fromBundle.stderr)
 	}
 
 	liveNodes := decodeNodes(t, live.stdout)
@@ -318,7 +318,7 @@ func TestListFromABundleMatchesTheLane(t *testing.T) {
 	})
 }
 
-// rawList runs gpu list -o json without failing on a non-zero exit, so that
+// rawList runs kubectl nv list -o json without failing on a non-zero exit, so that
 // the caller can assert the exit code itself.
 func rawList(t *testing.T, args ...string) result {
 	t.Helper()
@@ -337,7 +337,7 @@ func decodeNodes(t *testing.T, stdout string) map[string]map[string]any {
 	}
 
 	if err := json.Unmarshal([]byte(stdout), &envelope); err != nil {
-		t.Fatalf("decoding gpu list output: %v\n%s", err, stdout)
+		t.Fatalf("decoding kubectl nv list output: %v\n%s", err, stdout)
 	}
 
 	out := make(map[string]map[string]any, len(envelope.Items))
