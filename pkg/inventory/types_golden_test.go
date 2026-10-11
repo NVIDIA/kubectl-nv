@@ -121,7 +121,9 @@ const goldenNodeJSON = `{"kind":"GPUNode","apiVersion":"kubectl-nv.nvidia.com/v1
 	`"operands":[{"name":"nvidia-driver-daemonset-xyz","namespace":"gpu-operator",` +
 	`"component":"nvidia-driver-daemonset","phase":"Running","restarts":1,` +
 	`"images":["nvcr.io/nvidia/driver:580"],"ready":true,` +
-	`"initContainers":[{"name":"k8s-driver-manager","exitCode":0,"reason":"Completed"}]}],` +
+	`"lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""},` +
+	`"initContainers":[{"name":"k8s-driver-manager","exitCode":0,"reason":"Completed",` +
+	`"lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""}}]}],` +
 	`"resourceSlices":["node-a-gpu.nvidia.com-abcde"],"hinted":false}`
 
 func TestGPUNodeGoldenJSON(t *testing.T) {
@@ -211,7 +213,7 @@ func TestNestedTypesHaveTheSameFieldSetWhenEmpty(t *testing.T) {
 		wantMIG     = `{"strategy":"","config":"","configState":"","capable":false,"resources":{}}`
 		wantSharing = `{"strategy":"","replicas":0}`
 		wantOperand = `{"name":"","namespace":"","component":"","phase":"","restarts":0,` +
-			`"images":[],"ready":false,"initContainers":[{"name":"","reason":""}]}`
+			`"images":[],"ready":false,"lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""},"initContainers":[{"name":"","reason":"","lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""}}]}`
 	)
 
 	if string(got.MIG) != wantMIG {
@@ -243,14 +245,14 @@ func TestExitCodeIsTheOnlyVaryingKey(t *testing.T) {
 		result InitResult
 		want   string
 	}{
-		"unfinished": {InitResult{Name: "toolkit-validation"}, `{"name":"toolkit-validation","reason":""}`},
+		"unfinished": {InitResult{Name: "toolkit-validation"}, `{"name":"toolkit-validation","reason":"","lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""}}`},
 		"exited": {
 			InitResult{Name: "toolkit-validation", ExitCode: &exitCode, Reason: "Error"},
-			`{"name":"toolkit-validation","exitCode":3,"reason":"Error"}`,
+			`{"name":"toolkit-validation","exitCode":3,"reason":"Error","lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""}}`,
 		},
 		"exited zero": {
 			InitResult{Name: "toolkit-validation", ExitCode: new(int32), Reason: "Completed"},
-			`{"name":"toolkit-validation","exitCode":0,"reason":"Completed"}`,
+			`{"name":"toolkit-validation","exitCode":0,"reason":"Completed","lastTermination":{"observed":false,"exitCode":0,"reason":"","finishedAt":""}}`,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

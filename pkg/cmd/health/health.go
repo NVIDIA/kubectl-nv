@@ -118,6 +118,15 @@ func run(c *cobra.Command, o *cmd.Options, opts *options) error {
 		return err
 	}
 
+	// A window of zero would report every node the instant it entered an
+	// upgrade step, and a negative one every node always. Neither is a window
+	// anybody means, and finding that out after the scan has cost the user
+	// the wait for it.
+	if opts.upgradeStuckAfter <= 0 {
+		return output.NewUsageError(
+			"--upgrade-stuck-after must be positive, got %s", opts.upgradeStuckAfter)
+	}
+
 	if err := opts.out.Validate(health.NewHealthReport()); err != nil {
 		return err
 	}

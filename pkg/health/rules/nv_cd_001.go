@@ -34,11 +34,6 @@ import (
 // fb8b9674).
 const computeDomainReady = "Ready"
 
-// draDriverMinVersion is the first GPU Operator release that ships the NVIDIA
-// DRA driver, and so the first where a cluster can serve a ComputeDomain at
-// all.
-const draDriverMinVersion = "v25.3.0"
-
 // ComputeDomainNotReady is NV-CD-001: a ComputeDomain covers the node and the
 // IMEX daemon there is not ready, or the node carries no clique.
 //
@@ -64,21 +59,26 @@ const draDriverMinVersion = "v25.3.0"
 // next.
 type ComputeDomainNotReady struct{ versionRange }
 
-// NewComputeDomainNotReady returns the rule, gated at the operator release
-// that first ships the DRA driver. An unknown version still runs it, which is
-// what VersionInRange answers for a version it cannot read: a rule skipped on
-// a cluster whose version has an unusual shape reports clean for the wrong
-// reason.
-func NewComputeDomainNotReady() *ComputeDomainNotReady {
-	return &ComputeDomainNotReady{versionRange: versionRange{MinVersion: draDriverMinVersion}}
-}
+// NewComputeDomainNotReady returns the rule. Both version bounds are empty,
+// and a GPU Operator floor would be wrong: the NVIDIA DRA driver installs from
+// a chart of its own against any operator version, or none at all, so a
+// cluster serving ComputeDomains says nothing about which operator it runs.
+// The operator did not ship a DRA driver operand of its own until v26.7.0
+// (gpu-operator 7a9cf1966), which is later than the floor this rule first
+// carried and later than the version on most clusters that have one.
+func NewComputeDomainNotReady() *ComputeDomainNotReady { return &ComputeDomainNotReady{} }
 
 // Code implements health.Rule.
 func (r *ComputeDomainNotReady) Code() string { return "NV-CD-001" }
 
-// Severity implements health.Rule. An error: a workload waiting on an IMEX
-// domain that never goes ready is a job that never starts.
-func (r *ComputeDomainNotReady) Severity() output.Severity { return output.SeverityError }
+// Severity implements health.Rule.
+//
+// Informational until the Phase 2 false-positive baseline. The finding is
+// real, and nothing yet says how often a healthy fleet produces one; a rule
+// that fails a pipeline before anybody has measured that is a rule operators
+// switch off rather than read. The severity is raised once the baseline says
+// what a clean cluster looks like.
+func (r *ComputeDomainNotReady) Severity() output.Severity { return output.SeverityInfo }
 
 // Evaluate implements health.Rule.
 func (r *ComputeDomainNotReady) Evaluate(in health.Input) []output.Finding {
@@ -117,11 +117,11 @@ func (r *ComputeDomainNotReady) Evaluate(in health.Input) []output.Finding {
 			}
 
 			evidence := map[string]string{
-				"computeDomain":       name,
-				"computeDomainStatus": domainStatus(domain),
-				"nodeStatus":          entry.status,
+				"computeDomain": name,
+				"nodeStatus":    entry.status,
 			}
 
+			setIf(evidence, "computeDomainStatus", domainStatus(domain))
 			setIf(evidence, "cliqueID", entry.cliqueID)
 
 			if hasPod {
@@ -162,7 +162,7 @@ func cliqueFindings(r *ComputeDomainNotReady, cliqueless map[string][]string) []
 
 		out = append(out, output.Finding{
 			Code:      r.Code(),
-			Severity:  output.SeverityWarning,
+			Severity:  r.Severity(),
 			Node:      node,
 			Component: ComponentNode,
 			Message:   "the node is in a ComputeDomain and carries no " + inventory.LabelClique,

@@ -99,12 +99,18 @@ var leafFixtures = map[string]leafFixture{
 		args: func(*testing.T) []string { return []string{"NV-NODE-002"} },
 	},
 	"health": {
-		// The fixture cluster's node is hinted, which is a finding, so the
-		// run exits non-zero at a threshold that counts one. --fail-on info
-		// would make the guard assert on the finding rather than on the
-		// reads, so the default threshold is left alone and nothing here is
-		// at error.
-		args: func(*testing.T) []string { return nil },
+		// The fixture cluster's node is hinted and its driver pod reports no
+		// container statuses, so it is not ready: NV-NODE-002 and NV-DRV-001
+		// both fire, and a run with a finding at or above --fail-on exits
+		// non-zero by design.
+		//
+		// The error is asserted rather than avoided, because this leaf has to
+		// run to the end for the guard to prove anything about what it would
+		// have written, and the one thing that must not happen is the command
+		// stopping early. The text is the findings error's own, so a run that
+		// failed for some other reason still fails here.
+		args:    func(*testing.T) []string { return nil },
+		wantErr: "--fail-on is error",
 	},
 	"debug": {
 		// The same hinted node, and a directory of its own: debug runs the

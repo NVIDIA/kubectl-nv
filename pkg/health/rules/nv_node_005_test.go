@@ -70,8 +70,10 @@ func TestNodeConditionOrCordonReportsAnNVSentinelCondition(t *testing.T) {
 		"an NVSentinel health check is reporting the node unhealthy",
 		"kubectl nv info worker-1")
 
-	if finding.Severity != output.SeverityError {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	// Informational until the Phase 2 false-positive baseline says how often
+	// a healthy fleet produces one of these.
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
 	}
 
 	checkEvidence(t, finding.Evidence, map[string]string{
@@ -166,8 +168,12 @@ func TestNodeConditionOrCordonReportsBoth(t *testing.T) {
 		t.Fatalf("got %d findings, want 2: %+v", len(findings), findings)
 	}
 
-	if findings[0].Severity != output.SeverityError || findings[1].Severity != output.SeverityInfo {
-		t.Errorf("severities are %q and %q, want error then info", findings[0].Severity, findings[1].Severity)
+	if findings[0].Evidence["condition"] != "GPUXidError" {
+		t.Errorf("the first finding is %v, want the failing check", findings[0].Evidence)
+	}
+
+	if findings[1].Evidence["unschedulable"] != "true" {
+		t.Errorf("the second finding is %v, want the cordon", findings[1].Evidence)
 	}
 }
 

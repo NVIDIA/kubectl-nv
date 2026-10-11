@@ -21,6 +21,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/health"
 	"github.com/NVIDIA/kubectl-nv/pkg/health/rules"
@@ -237,16 +238,136 @@ func TestUpgradeStuckTakesTheNewestEvent(t *testing.T) {
 	}
 }
 
-func TestUpgradeStuckSkipsHintedNodes(t *testing.T) {
+// A node part way through an upgrade often has no driver and so advertises no
+// nvidia.com/gpu: it is hinted exactly while this rule has something to say
+// about it.
+func TestUpgradeStuckReportsAHintedWorker(t *testing.T) {
 	t.Parallel()
 
-	node := mokkaControlPlane()
-	node.UpgradeState = "upgrade-failed"
+	rule := rules.NewUpgradeStuck(30 * time.Minute)
+	node := upgradingNode("worker-1", "upgrade-failed")
+	node.Capacity, node.Allocatable, node.Mode = 0, 0, inventory.ModeNone
+	hinted()(&node)
 
 	in := health.Input{Hinted: []inventory.GPUNode{node}, OperatorInstalled: true, Now: upgNow}
 
+	finding := only(t, evaluate(rule, in))
+	if finding.Node != "worker-1" || finding.Severity != output.SeverityError {
+		t.Errorf("finding is %q at %q, want worker-1 at error", finding.Node, finding.Severity)
+	}
+}
+
+// The Mokka control plane carries no upgrade state label, so walking the
+// hinted nodes does not put it back into a report.
+func TestUpgradeStuckStaysQuietOnTheControlPlane(t *testing.T) {
+	t.Parallel()
+
+	in := health.Input{
+		Hinted:            []inventory.GPUNode{mokkaControlPlane()},
+		OperatorInstalled: true,
+		Now:               upgNow,
+	}
+
 	if findings := evaluate(rules.NewUpgradeStuck(30*time.Minute), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// The boundary, written as literals rather than as arithmetic on the window:
+// a state entered exactly the window ago is stuck, and one entered a second
+// later is not. A comparison off by one would pass every test that only ever
+// looked an hour either side of it.
+func TestUpgradeStuckAtTheBoundary(t *testing.T) {
+	t.Parallel()
+
+	at := upgradeInput(upgradingNode("worker-1", "cordon-required"),
+		upgradeEvent("worker-1", "cordon-required", upgNow.Add(-30*time.Minute)))
+
+	finding := only(t, evaluate(rules.NewUpgradeStuck(30*time.Minute), at))
+
+	if finding.Severity != output.SeverityWarning {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityWarning)
+	}
+
+	if got := finding.Evidence["for"]; got != "30m0s" {
+		t.Errorf("evidence for is %q, want %q", got, "30m0s")
+	}
+
+	if got := finding.Evidence["upgradeStuckAfter"]; got != "30m0s" {
+		t.Errorf("evidence upgradeStuckAfter is %q, want %q", got, "30m0s")
+	}
+
+	inside := upgradeInput(upgradingNode("worker-1", "cordon-required"),
+		upgradeEvent("worker-1", "cordon-required", upgNow.Add(-30*time.Minute+time.Second)))
+
+	if findings := evaluate(rules.NewUpgradeStuck(30*time.Minute), inside); len(findings) != 0 {
+		t.Fatalf("a second inside the window is not stuck: got %d findings: %+v", len(findings), findings)
+	}
+}
+
+// An event announcing the state the node has moved on to does not date the
+// state it is in. uncordon-required comes after cordon-required, so a node
+// still labelled cordon-required with an uncordon-required event has no event
+// for its own state and drops to info.
+func TestUpgradeStuckIgnoresALaterStatesEvent(t *testing.T) {
+	t.Parallel()
+
+	in := upgradeInput(upgradingNode("worker-1", "cordon-required"),
+		upgradeEvent("worker-1", "uncordon-required", upgNow.Add(-2*time.Hour)))
+
+	finding := only(t, evaluate(rules.NewUpgradeStuck(30*time.Minute), in))
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
+	}
+}
+
+// Which timestamp an event carries depends on which API recorded it: the
+// events/v1 recorders fill EventTime and leave LastTimestamp empty, and a
+// brand new core/v1 event has only its FirstTimestamp. Reading one field
+// alone would date half the clusters in the field from the zero time, which
+// reads as stuck since 1970 rather than as not dated at all.
+func TestUpgradeStuckDatesEveryEventShape(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		shape func(corev1.Event) corev1.Event
+	}{
+		{
+			name: "EventTime only",
+			shape: func(e corev1.Event) corev1.Event {
+				e.EventTime = metav1.NewMicroTime(e.LastTimestamp.Time)
+				e.LastTimestamp = metav1.Time{}
+
+				return e
+			},
+		},
+		{
+			name: "FirstTimestamp only",
+			shape: func(e corev1.Event) corev1.Event {
+				e.FirstTimestamp = e.LastTimestamp
+				e.LastTimestamp = metav1.Time{}
+
+				return e
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			event := tc.shape(upgradeEvent("worker-1", "cordon-required", upgNow.Add(-2*time.Hour)))
+			in := upgradeInput(upgradingNode("worker-1", "cordon-required"), event)
+
+			finding := only(t, evaluate(rules.NewUpgradeStuck(30*time.Minute), in))
+
+			if finding.Severity != output.SeverityWarning {
+				t.Fatalf("Severity is %q, want %q: the event was not dated", finding.Severity, output.SeverityWarning)
+			}
+
+			if got := finding.Evidence["since"]; got != "2026-10-11T10:00:00Z" {
+				t.Errorf("evidence since is %q, want the event's own time", got)
+			}
+		})
 	}
 }
 

@@ -19,6 +19,8 @@ package source
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -89,7 +91,12 @@ func TestLiveComputeDomainsReadsTheServedVersion(t *testing.T) {
 // and not a failure: an empty list and no error, because nothing was denied
 // and nothing is missing.
 func TestLiveComputeDomainsNotInstalledIsEmpty(t *testing.T) {
-	got, err := NewLive(fake.NewSimpleClientset(), newComputeDomainFake()).ComputeDomains(context.Background())
+	// The fake holds a ComputeDomain even though discovery serves none, so
+	// that a read reaching the collection anyway is visible. Without it this
+	// test would pass against a reader that listed unconditionally.
+	dyn := newComputeDomainFake(computeDomainObject("v1beta1", "workload", "cd-a"))
+
+	got, err := NewLive(fake.NewSimpleClientset(), dyn).ComputeDomains(context.Background())
 	if err != nil {
 		t.Fatalf("ComputeDomains() error = %v, want nil on a cluster without the CRD", err)
 	}
@@ -107,13 +114,38 @@ func TestLiveComputeDomainsIgnoresAnotherResourceOfTheGroup(t *testing.T) {
 		APIResources: []metav1.APIResource{{Name: "computedomaincliques", Kind: "ComputeDomainClique"}},
 	}}
 
-	got, err := NewLive(cs, newComputeDomainFake()).ComputeDomains(context.Background())
+	// Seeded for the same reason: the group version answers, and only the
+	// resource name keeps this read away from the objects.
+	dyn := newComputeDomainFake(computeDomainObject("v1beta1", "workload", "cd-a"))
+
+	got, err := NewLive(cs, dyn).ComputeDomains(context.Background())
 	if err != nil {
 		t.Fatalf("ComputeDomains() error = %v, want nil", err)
 	}
 
 	if len(got) != 0 {
 		t.Fatalf("ComputeDomains() returned %d objects, want none", len(got))
+	}
+}
+
+// The CRD can be deleted between the discovery read and the list, which is
+// what an uninstall part way through a run looks like. A cluster that answers
+// NotFound to the list after saying it serves the resource has none, which is
+// the same answer as never having had the CRD.
+func TestLiveComputeDomainsListNotFoundIsEmpty(t *testing.T) {
+	dyn := newComputeDomainFake()
+	dyn.PrependReactor("list", computeDomainResource, func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewNotFound(
+			schema.GroupResource{Group: computeDomainGroup, Resource: computeDomainResource}, "")
+	})
+
+	got, err := NewLive(computeDomainServer("v1beta1"), dyn).ComputeDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ComputeDomains() error = %v, want nil", err)
+	}
+
+	if got != nil {
+		t.Fatalf("ComputeDomains() returned %v, want nothing", got)
 	}
 }
 
@@ -190,6 +222,46 @@ func TestBundleComputeDomainsIsPartial(t *testing.T) {
 
 	if pe.Resource != fileComputeDomains {
 		t.Errorf("the partial read names %q, want %q", pe.Resource, fileComputeDomains)
+	}
+}
+
+// A bundle that does carry the file reads it, so that the partial read above
+// is the absence of the file rather than this method never reading one.
+func TestBundleComputeDomainsReadsTheFile(t *testing.T) {
+	dir := t.TempDir()
+
+	const doc = `apiVersion: v1
+kind: List
+items:
+- apiVersion: resource.nvidia.com/v1beta1
+  kind: ComputeDomain
+  metadata:
+    name: cd-a
+    namespace: workload
+  status:
+    status: NotReady
+`
+
+	if err := os.WriteFile(filepath.Join(dir, fileComputeDomains), []byte(doc), 0o600); err != nil {
+		t.Fatalf("writing the bundle file: %v", err)
+	}
+
+	b, err := NewBundle(dir)
+	if err != nil {
+		t.Fatalf("NewBundle() error = %v", err)
+	}
+
+	got, err := b.ComputeDomains(context.Background())
+	if err != nil {
+		t.Fatalf("ComputeDomains() error = %v, want nil", err)
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("ComputeDomains() returned %d objects, want 1: %v", len(got), got)
+	}
+
+	if got[0].GetName() != "cd-a" || got[0].GetNamespace() != "workload" {
+		t.Errorf("ComputeDomains() returned %s/%s, want workload/cd-a", got[0].GetNamespace(), got[0].GetName())
 	}
 }
 

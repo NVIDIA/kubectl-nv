@@ -42,18 +42,24 @@ import (
 // that the node has not finished moving, not that it is broken.
 type DevicePluginAndDRABoth struct{ versionRange }
 
-// NewDevicePluginAndDRABoth returns the rule, gated at the operator release
-// that first ships the DRA driver: below it no node can be in both modes. An
-// unknown version still runs it.
-func NewDevicePluginAndDRABoth() *DevicePluginAndDRABoth {
-	return &DevicePluginAndDRABoth{versionRange: versionRange{MinVersion: draDriverMinVersion}}
-}
+// NewDevicePluginAndDRABoth returns the rule. Both version bounds are empty:
+// the NVIDIA DRA driver installs from a chart of its own against any operator
+// version, so a node can be in both modes whatever the operator is, and a
+// floor read off the operator would silence the rule on exactly the clusters
+// that installed the driver separately.
+func NewDevicePluginAndDRABoth() *DevicePluginAndDRABoth { return &DevicePluginAndDRABoth{} }
 
 // Code implements health.Rule.
 func (r *DevicePluginAndDRABoth) Code() string { return "NV-DRA-001" }
 
 // Severity implements health.Rule.
-func (r *DevicePluginAndDRABoth) Severity() output.Severity { return output.SeverityWarning }
+//
+// Informational until the Phase 2 false-positive baseline. The finding is
+// real, and nothing yet says how often a healthy fleet produces one; a rule
+// that fails a pipeline before anybody has measured that is a rule operators
+// switch off rather than read. The severity is raised once the baseline says
+// what a clean cluster looks like.
+func (r *DevicePluginAndDRABoth) Severity() output.Severity { return output.SeverityInfo }
 
 // Evaluate implements health.Rule.
 func (r *DevicePluginAndDRABoth) Evaluate(in health.Input) []output.Finding {

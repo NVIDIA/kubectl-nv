@@ -48,7 +48,9 @@ func TestDevicePluginAndDRABothReportsADoubleAdvertisement(t *testing.T) {
 	rule := rules.NewDevicePluginAndDRABoth()
 	node := draModeNode("worker-1", inventory.ModeBoth,
 		withOperand(inventory.ComponentDRADriver, true),
-		withResourceSlices("worker-1-gpu.nvidia.com", "worker-1-imex.nvidia.com"))
+		// Reversed on purpose: the evidence encoding sorts, and a fixture
+		// already in order would pass against a rule that did not.
+		withResourceSlices("worker-1-imex.nvidia.com", "worker-1-gpu.nvidia.com"))
 
 	in := health.Input{Nodes: []inventory.GPUNode{node}, OperatorInstalled: true}
 	finding := only(t, evaluate(rule, in))
@@ -57,8 +59,8 @@ func TestDevicePluginAndDRABothReportsADoubleAdvertisement(t *testing.T) {
 		"the node advertises its GPUs through both the device plugin and dynamic resource allocation",
 		"kubectl nv info worker-1")
 
-	if finding.Severity != output.SeverityWarning {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityWarning)
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
 	}
 
 	checkEvidence(t, finding.Evidence, map[string]string{
@@ -103,19 +105,27 @@ func TestDevicePluginAndDRABothSkipsHintedNodes(t *testing.T) {
 	}
 }
 
-// Dynamic resource allocation arrives with the DRA driver the GPU Operator
-// ships from v25.3.0: below it no node can be in both modes, and an unknown
-// version still runs the rule.
-func TestDevicePluginAndDRABothIsGatedAtTheDRADriverRelease(t *testing.T) {
+// There is no GPU Operator floor. The NVIDIA DRA driver installs from a chart
+// of its own against any operator version, or none at all, so a node can be in
+// both modes whatever the operator is; the operator did not ship a DRA driver
+// operand of its own until v26.7.0. A floor read off the operator would
+// silence the rule on exactly the clusters that installed the driver
+// separately.
+func TestDevicePluginAndDRABothAppliesToEveryOperatorVersion(t *testing.T) {
 	t.Parallel()
 
 	rule := rules.NewDevicePluginAndDRABoth()
 
-	if rule.Applies("v24.9.0") {
-		t.Error("the rule must not apply below v25.3.0, where the operator ships no DRA driver")
+	for _, version := range []string{"v24.9.0", "v25.3.0", "v26.3.3", "v26.10.0", ""} {
+		if !rule.Applies(version) {
+			t.Errorf("the rule does not apply at operator version %q, and it has to", version)
+		}
 	}
 
-	if !rule.Applies("v25.3.0") || !rule.Applies("v25.10.0") || !rule.Applies("") {
-		t.Error("the rule has to apply from v25.3.0 upwards and to an unknown version")
+	bounded := rules.NewDevicePluginAndDRABoth()
+	bounded.MinVersion = "v99.0.0"
+
+	if bounded.Applies("v25.10.0") {
+		t.Error("the version gate is not wired: a bounded rule still applies below its minimum")
 	}
 }

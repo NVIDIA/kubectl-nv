@@ -102,7 +102,11 @@ func (r *MIGConfigNotApplied) Evaluate(in health.Input) []output.Finding {
 
 	tolerations := PolicyTolerations(in)
 
-	for _, node := range in.Nodes {
+	// The hinted nodes are walked too: a node the mig-manager is reconfiguring
+	// advertises its profiles at zero for a while, which is not membership, so
+	// the node this rule is most about is hinted exactly while it is about it.
+	// See everyNode.
+	for _, node := range everyNode(in) {
 		if isVirtualMachineWorkload(node) || !OperatorTargets(node, tolerations) {
 			continue
 		}

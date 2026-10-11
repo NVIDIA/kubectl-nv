@@ -17,84 +17,65 @@
 package rules
 
 import (
-	"strings"
+	"time"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/health"
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// The nvidia.com/gpu.deploy.<key> suffixes the operator gates the two driver
-// operands on.
+// The nvidia.com/gpu.deploy.<key> suffixes the operator gates the driver
+// operands and the container toolkit on.
 const (
 	deployKeyDriver       = "driver"
 	deployKeyVGPUManager  = "vgpu-manager"
 	deployKeyContainerTKT = "container-toolkit"
 )
 
-// componentDriverToolkit is the component a driver pod selected by
-// app.kubernetes.io/component=nvidia-driver arrives under. pkg/inventory takes
-// that label when a pod carries no "app" key, so the value is what reaches
-// OperandPod.Component verbatim.
-const componentDriverToolkit = "nvidia-driver"
-
-// IsDriverComponent reports whether an operand component names a driver pod.
+// DriverRestartWindow is how recently a driver pod must have died for a
+// restart to count as a fault.
 //
-// The set is pkg/mustgather's, because a driver this rule does not recognise
-// is a driver nobody collects a bug report from either: the two are kept the
-// same list by nv_drv_001_test.go, which reads that package's selectors and
-// fails on one this function does not claim.
-//
-// The exact names are not enough on their own. OpenShift builds one driver
-// DaemonSet per RHCOS version and names it
-// nvidia-driver-daemonset-<version>-<rhcos>, so the "app" label on those pods
-// is the base name with a suffix. The suffix has to start with a hyphen: a
-// bare prefix match would claim any future operand whose name merely begins
-// the same way.
-func IsDriverComponent(component string) bool {
-	if component == componentDriverToolkit {
-		return true
-	}
-
-	for _, base := range []string{inventory.ComponentDriver, inventory.ComponentVGPUManager} {
-		if component == base || strings.HasPrefix(component, base+"-") {
-			return true
-		}
-	}
-
-	return false
-}
+// Ten minutes, because the question the window answers is "is this pod dying
+// now": a driver that crashed once during this morning's rollout and has been
+// up since is not a finding, and a driver in CrashLoopBackOff produces a new
+// termination every few minutes at the longest back-off. It is a constant
+// rather than a flag because, unlike the upgrade window, it is not a property
+// of how a fleet is operated.
+const DriverRestartWindow = 10 * time.Minute
 
 // deployKeyForDriver returns the deploy label key gating the component, so
 // that the evidence names the label a reader can go and look at.
 func deployKeyForDriver(component string) string {
-	if component == inventory.ComponentVGPUManager ||
-		strings.HasPrefix(component, inventory.ComponentVGPUManager+"-") {
+	if component == inventory.ComponentVGPUManager {
 		return deployKeyVGPUManager
 	}
 
 	return deployKeyDriver
 }
 
-// DriverPodNotReady is NV-DRV-001: a driver pod on the node is not reporting
-// ready.
+// DriverPodNotReady is NV-DRV-001: a driver pod on the node is not ready, or
+// is restarting.
 //
 // The driver is what every other operand is waiting for: without it the
 // toolkit validation never passes, the device plugin never advertises
 // anything, and the node ends up in NV-NODE-002 with nothing saying why. This
 // rule is what says why.
 //
-// A crash-looping pod is covered by the same condition rather than by a
-// separate one: a container in CrashLoopBackOff is never ready, so a pod stuck
-// in it fails the readiness test whatever its phase says.
+// Two conditions, because they are different faults with the same cause:
 //
-// What this rule deliberately does not report is a pod that is ready now and
-// has restarted. inventory.OperandPod carries a restart count and no
-// termination time, so "restarted ten minutes ago" and "restarted in March"
-// are the same input here, and a rule that fired on a non-zero count would
-// report every long lived node in the cluster for ever. The count is in the
-// evidence of the findings that do fire, and dating the last termination needs
-// a field on the operand model that only pkg/inventory can add.
+//   - The pod is not ready. A container in CrashLoopBackOff is never ready, so
+//     a pod stuck in one fails this test whatever its phase says.
+//   - The pod is ready and has restarted inside DriverRestartWindow. This is
+//     the driver that comes up, runs for a minute and dies again, which a
+//     readiness check sampled at the wrong moment calls healthy. It needs both
+//     halves: a restart count on its own cannot tell "restarted ten minutes
+//     ago" from "restarted in March", which is why pkg/inventory carries the
+//     last termination beside the count.
+//
+// Which pods are driver pods is pkg/inventory's DriverComponent, the same
+// classification pkg/mustgather collects a bug report through. It cannot be
+// done on the pod's own "app" label: every DaemonSet the NVIDIADriver CR
+// produces carries its generated name there.
 //
 // Three conditions have to hold before it fires:
 //
@@ -105,6 +86,11 @@ func deployKeyForDriver(component string) string {
 //     driver, and reporting the absence would make a healthy lane red on every
 //     run. A node that is supposed to have one and does not is NV-OP-002's
 //     finding.
+//
+// Both the GPU nodes and the hinted ones are walked. A node whose driver is
+// broken stops advertising nvidia.com/gpu and moves into Input.Hinted, so a
+// rule reading only the GPU nodes would lose the fault exactly when it
+// appeared. See everyNode.
 type DriverPodNotReady struct{ versionRange }
 
 // NewDriverPodNotReady returns the rule. Both version bounds are empty: the
@@ -115,7 +101,8 @@ func NewDriverPodNotReady() *DriverPodNotReady { return &DriverPodNotReady{} }
 func (r *DriverPodNotReady) Code() string { return "NV-DRV-001" }
 
 // Severity implements health.Rule. An error: nothing else on the node works
-// without the driver.
+// without the driver. A finding on a node the operator is deliberately
+// upgrading lowers itself to info.
 func (r *DriverPodNotReady) Severity() output.Severity { return output.SeverityError }
 
 // Evaluate implements health.Rule.
@@ -126,28 +113,71 @@ func (r *DriverPodNotReady) Evaluate(in health.Input) []output.Finding {
 
 	var findings []output.Finding
 
-	for _, node := range in.Nodes {
+	for _, node := range everyNode(in) {
 		for _, pod := range node.Operands {
-			if !IsDriverComponent(pod.Component) || pod.Ready {
+			if !isDriverComponent(pod.Component) {
 				continue
 			}
 
-			deployKey := deployKeyForDriver(pod.Component)
-			if operandDisabledOn(node, deployKey) {
-				continue
+			finding, found := r.evaluatePod(in, node, pod)
+			if found {
+				findings = append(findings, finding)
 			}
-
-			findings = append(findings, output.Finding{
-				Code:      r.Code(),
-				Severity:  r.Severity(),
-				Node:      node.Name,
-				Component: pod.Component,
-				Message:   "the driver pod on the node is not ready",
-				Evidence:  operandEvidence(node, deployKey, pod, true),
-				Next:      infoCommand(node.Name),
-			})
 		}
 	}
 
 	return findings
+}
+
+// isDriverComponent reports whether a component value names a driver operand.
+// pkg/inventory assigns exactly the two constants, so this is a comparison
+// against them rather than a second classification.
+func isDriverComponent(component string) bool {
+	return component == inventory.ComponentDriver || component == inventory.ComponentVGPUManager
+}
+
+// evaluatePod is one driver pod's verdict.
+func (r *DriverPodNotReady) evaluatePod(
+	in health.Input, node inventory.GPUNode, pod inventory.OperandPod,
+) (output.Finding, bool) {
+	deployKey := deployKeyForDriver(pod.Component)
+	if operandDisabledOn(node, deployKey) {
+		return output.Finding{}, false
+	}
+
+	evidence := operandEvidence(node, deployKey, pod, true)
+
+	message := "the driver pod on the node is not ready"
+	if pod.Ready {
+		died, recent := insideWindow(pod.LastTermination, in.Now, DriverRestartWindow)
+		if pod.Restarts <= 0 || !recent {
+			return output.Finding{}, false
+		}
+
+		message = "the driver pod on the node is restarting"
+		evidence["lastTerminationAt"] = died.UTC().Format(time.RFC3339)
+		evidence["lastExitCode"] = itoa(pod.LastTermination.ExitCode)
+		evidence["restartWindow"] = DriverRestartWindow.String()
+	}
+
+	severity := r.Severity()
+
+	// An upgrade takes the driver down and puts it back on purpose. Reporting
+	// an error there would make every rolling driver upgrade in a fleet look
+	// like an outage; whether the upgrade itself is wedged is NV-UPG-001's
+	// finding.
+	if midUpgrade(node) {
+		severity = output.SeverityInfo
+		evidence[inventory.LabelUpgradeState] = node.UpgradeState
+	}
+
+	return output.Finding{
+		Code:      r.Code(),
+		Severity:  severity,
+		Node:      node.Name,
+		Component: pod.Component,
+		Message:   message,
+		Evidence:  evidence,
+		Next:      infoCommand(node.Name),
+	}, true
 }

@@ -28,6 +28,13 @@ import (
 // rather than in a log line.
 const initToolkitValidation = "toolkit-validation"
 
+// reasonCrashLoop is the waiting reason the kubelet gives a container it is
+// backing off from restarting. Under a pod restart policy of Always, which is
+// what the operator's validator runs with, this is the state a failing init
+// container actually sits in: the current state carries no exit code at all
+// and the one that matters is in the last termination.
+const reasonCrashLoop = "CrashLoopBackOff"
+
 // ToolkitValidationFailed is NV-CTK-001: the validator's toolkit check exited
 // non-zero on the node.
 //
@@ -45,10 +52,23 @@ const initToolkitValidation = "toolkit-validation"
 // component's verdict, and reporting a failed driver validation as a toolkit
 // fault sends a reader to the wrong place with the right level of confidence.
 //
-// A container that has not terminated carries no exit code at all, and "has
-// not finished" is not "failed": a validation still running, reported as a
+// A container that is running carries no exit code at all, and "has not
+// finished" is not "failed": a validation still running, reported as a
 // failure, is a finding that clears itself a second later and teaches a reader
 // to ignore the rule.
+//
+// A container that is crash looping is a different thing again, and it is the
+// shape this rule meets most often. Under a pod restart policy of Always the
+// validator does not sit terminated: the init container is Waiting with reason
+// CrashLoopBackOff and the exit code of the run that failed is in
+// LastTerminationState. A rule reading only the current state saw a validator
+// with nothing wrong with it, which is why pkg/inventory carries the last
+// termination beside the current one.
+//
+// Both the GPU nodes and the hinted ones are walked: a node whose toolkit
+// validation fails never gets a device plugin, so it advertises no
+// nvidia.com/gpu and is hinted by the time there is anything to report. See
+// everyNode.
 type ToolkitValidationFailed struct{ versionRange }
 
 // NewToolkitValidationFailed returns the rule. Both version bounds are empty:
@@ -71,32 +91,37 @@ func (r *ToolkitValidationFailed) Evaluate(in health.Input) []output.Finding {
 
 	var findings []output.Finding
 
-	for _, node := range in.Nodes {
+	for _, node := range everyNode(in) {
 		validator, found := operandFor(node, inventory.ComponentOperatorValidator)
 		if !found {
 			continue
 		}
 
 		for _, result := range validator.InitContainers {
-			if result.Name != initToolkitValidation || result.ExitCode == nil || *result.ExitCode == 0 {
+			if result.Name != initToolkitValidation {
+				continue
+			}
+
+			code, failed := toolkitFailure(result)
+			if !failed {
 				continue
 			}
 
 			evidence := map[string]string{
-				inventory.DeployLabel(deployKeyContainerTKT): node.Deploy[deployKeyContainerTKT],
 				"pod":           validator.Name,
 				"initContainer": result.Name,
-				"exitCode":      itoa(*result.ExitCode),
+				"exitCode":      itoa(code),
 			}
 
-			// A deploy label the node does not carry is left out rather than
-			// written as an empty string, and so is a termination with no
-			// reason recorded.
-			if evidence[inventory.DeployLabel(deployKeyContainerTKT)] == "" {
-				delete(evidence, inventory.DeployLabel(deployKeyContainerTKT))
-			}
-
+			setIf(evidence, inventory.DeployLabel(deployKeyContainerTKT), node.Deploy[deployKeyContainerTKT])
 			setIf(evidence, "reason", result.Reason)
+
+			// Only when the verdict came from the last termination rather than
+			// the current state, which is also what says the container is
+			// still failing now rather than having failed once.
+			if result.ExitCode == nil {
+				setIf(evidence, "lastTerminationAt", result.LastTermination.FinishedAt)
+			}
 
 			findings = append(findings, output.Finding{
 				Code:      r.Code(),
@@ -111,4 +136,27 @@ func (r *ToolkitValidationFailed) Evaluate(in health.Input) []output.Finding {
 	}
 
 	return findings
+}
+
+// toolkitFailure returns the exit code the validation failed with, and whether
+// it failed at all.
+//
+// Two places carry one, and which is filled depends only on the pod's restart
+// policy. A container that has terminated has its code in the current state; a
+// container the kubelet is backing off from restarting is Waiting, and the
+// code of the run that failed is the last termination's.
+//
+// A last termination is only read under CrashLoopBackOff. Any other waiting
+// reason is a container that has not got as far as running this time, and the
+// previous run's exit code says nothing about it.
+func toolkitFailure(result inventory.InitResult) (int32, bool) {
+	if result.ExitCode != nil {
+		return *result.ExitCode, *result.ExitCode != 0
+	}
+
+	if result.Reason != reasonCrashLoop || !result.LastTermination.Observed {
+		return 0, false
+	}
+
+	return result.LastTermination.ExitCode, result.LastTermination.ExitCode != 0
 }

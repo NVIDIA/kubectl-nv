@@ -112,9 +112,13 @@ func TestHealthUpgradeStuckAfterReachesTheRule(t *testing.T) {
 		t.Fatalf("got %d NV-UPG-001 findings at the default window, want 1:\n%s", len(found), s.out)
 	}
 
-	if got := found[0]["severity"]; got != string(output.SeverityWarning) {
+	if got := found[0]["severity"]; got != "warning" {
 		t.Errorf("severity is %v, want %q: the event dates the state, so the finding is not downgraded",
-			got, output.SeverityWarning)
+			got, "warning")
+	}
+
+	if got := found[0]["evidence"].(map[string]any)["upgradeStuckAfter"]; got != "30m0s" {
+		t.Errorf("the finding was measured against %v, want the 30m0s default", got)
 	}
 
 	// Raising the window past the event's age has to silence the same node.
@@ -151,8 +155,43 @@ func TestHealthUpgradeStuckAfterDefaultsToTheRuleDefault(t *testing.T) {
 		t.Fatal("the health command registers no --upgrade-stuck-after flag")
 	}
 
-	if flag.DefValue != rules.DefaultUpgradeStuckAfter.String() {
-		t.Errorf("the flag default is %q, want %q", flag.DefValue, rules.DefaultUpgradeStuckAfter)
+	// A literal, not the constant the flag is built from. Comparing the
+	// implementation against itself would pass whatever the default became,
+	// and the default is documented in docs/findings/NV-UPG-001.md as half an
+	// hour.
+	if flag.DefValue != "30m0s" {
+		t.Errorf("the flag default is %q, want %q", flag.DefValue, "30m0s")
+	}
+
+	if rules.DefaultUpgradeStuckAfter.String() != "30m0s" {
+		t.Errorf("the rule default is %q, want %q", rules.DefaultUpgradeStuckAfter, "30m0s")
+	}
+}
+
+// A window of zero would report every node the instant it entered an upgrade
+// step, and a negative one every node always. Neither is a window anybody
+// means, and it is worth catching before the scan rather than after the wait
+// for it.
+func TestHealthRejectsANonPositiveUpgradeStuckAfter(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"0", "0s", "-5m"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := run(t, healthyCluster(), "--upgrade-stuck-after", value)
+			if err == nil {
+				t.Fatalf("health accepted --upgrade-stuck-after %s", value)
+			}
+
+			if got := output.ExitCodeFor(err); got != output.ExitUsage {
+				t.Errorf("the error exits %d, want %d: %v", got, output.ExitUsage, err)
+			}
+
+			if !strings.Contains(err.Error(), "upgrade-stuck-after") {
+				t.Errorf("the error does not name the flag: %v", err)
+			}
+		})
 	}
 }
 

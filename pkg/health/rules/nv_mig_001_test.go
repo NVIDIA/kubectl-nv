@@ -247,15 +247,107 @@ func TestMIGConfigNotAppliedStaysQuietOnANodeThatIsNotMIGCapable(t *testing.T) {
 	}
 }
 
-func TestMIGConfigNotAppliedSkipsHintedNodes(t *testing.T) {
+// A node the mig-manager is reconfiguring advertises its profiles at zero,
+// which is not membership, so it is hinted exactly while its configuration is
+// the thing that is wrong.
+func TestMIGConfigNotAppliedReportsAHintedWorker(t *testing.T) {
 	t.Parallel()
 
-	node := mokkaControlPlane()
-	withMIG("mixed", "all-1g.10gb", "failed", true)(&node)
+	node := migNode("worker-1", withMIG("mixed", "all-1g.10gb", "failed", true))
+	node.Capacity, node.Allocatable, node.Mode = 0, 0, inventory.ModeNone
+	hinted()(&node)
 
 	in := health.Input{Hinted: []inventory.GPUNode{node}, OperatorInstalled: true}
 
+	finding := only(t, evaluate(rules.NewMIGConfigNotApplied(), in))
+	if finding.Node != "worker-1" || finding.Severity != output.SeverityError {
+		t.Errorf("finding is %q at %q, want worker-1 at error", finding.Node, finding.Severity)
+	}
+}
+
+// The Mokka control plane carries no MIG labels, so walking the hinted nodes
+// does not put it back into a report.
+func TestMIGConfigNotAppliedStaysQuietOnTheControlPlane(t *testing.T) {
+	t.Parallel()
+
+	in := health.Input{Hinted: []inventory.GPUNode{mokkaControlPlane()}, OperatorInstalled: true}
+
 	if findings := evaluate(rules.NewMIGConfigNotApplied(), in); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// The kubelet does not drop a removed extended resource, it keeps it at zero.
+// A node partitioned last week and running whole GPUs today still carries its
+// old nvidia.com/mig-1g.10gb entry, and counting that leftover reports a
+// working single-strategy node as advertising profiles its strategy does not
+// serve.
+func TestMIGConfigNotAppliedIgnoresALeftoverZeroMIGResource(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("single", "all-1g.5gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 0, Allocatable: 0},
+		}),
+	)
+
+	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// The mirror of the same rule: a mixed node whose only MIG entries are the
+// zeroed leftovers advertises nothing a MIG workload can ask for, so it is
+// the finding rather than a node that is quietly fine.
+func TestMIGConfigNotAppliedReportsMixedWithOnlyZeroMIGResources(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("mixed", "all-1g.10gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 0, Allocatable: 0},
+		}),
+	)
+
+	finding := only(t, evaluate(rules.NewMIGConfigNotApplied(), migInput(node)))
+
+	if got := finding.Message; got != "the node's MIG strategy and the resources it advertises disagree" {
+		t.Errorf("Message is %q", got)
+	}
+
+	// The leftover is still named, because it is what a reader will see on
+	// the node and wonder about.
+	if got := finding.Evidence["migResources"]; got != "nvidia.com/mig-1g.10gb" {
+		t.Errorf("evidence migResources is %q, want the zeroed leftover named", got)
+	}
+}
+
+// A node the operator was told to leave alone is not one to report a MIG
+// configuration on: every deploy label false is the cluster saying so.
+func TestMIGConfigNotAppliedStaysQuietWhenEveryOperandIsOff(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1", withMIG("mixed", "all-1g.10gb", "failed", true))
+	for key := range node.Deploy {
+		node.Deploy[key] = "false"
+	}
+
+	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// A node whose GPUs are handed to virtual machines advertises nothing to the
+// container scheduler by design, and MIG is not what is being done to it.
+func TestMIGConfigNotAppliedStaysQuietOnAVirtualMachineNode(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("mixed", "all-1g.10gb", "failed", true),
+		withWorkloadConfig("vm-passthrough"))
+
+	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }

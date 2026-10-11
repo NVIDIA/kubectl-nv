@@ -139,6 +139,8 @@ func operandFromPod(pod *corev1.Pod) OperandPod {
 		out.Restarts += pod.Status.ContainerStatuses[i].RestartCount
 	}
 
+	out.LastTermination = newestTermination(pod.Status.ContainerStatuses)
+
 	// Only the validator's init containers are a verdict. Every other
 	// operand's are setup steps, and carrying them would bury the one set of
 	// exit codes a reader is looking for under a dozen that mean nothing.
@@ -185,6 +187,9 @@ func draComponent(pod *corev1.Pod) string {
 //
 // The order is:
 //
+//  0. a driver selector, which names one of the two driver operands whatever
+//     the pod's own labels say it is called. It is first because the driver
+//     DaemonSets are the ones whose "app" label is a generated name.
 //  1. the "app" label, verbatim, which is what the GPU Operator writes and
 //     what a health rule matches on.
 //  2. a DRA driver label, which is how the standalone charts identify the
@@ -206,6 +211,14 @@ func draComponent(pod *corev1.Pod) string {
 // driver are known to use; a pod labelled with something nothing here names
 // still arrives under its own label value rather than under a guess.
 func componentOf(pod *corev1.Pod) string {
+	// The driver selectors come first, and they have to. Every driver
+	// DaemonSet the NVIDIADriver CR produces carries its own generated name in
+	// the "app" label, so the app-label rule below would report it under a
+	// name no rule and no reader recognises. See DriverComponent.
+	if driver, ok := DriverComponent(pod.Labels); ok {
+		return driver
+	}
+
 	if app := pod.Labels[appLabel]; app != "" {
 		return app
 	}
@@ -310,6 +323,12 @@ func initResults(statuses []corev1.ContainerStatus) []InitResult {
 		case s.State.Running != nil:
 			result.Reason = "Running"
 		}
+
+		// Read whether or not the current state is a termination. A container
+		// in CrashLoopBackOff is waiting, and the exit code of the run that
+		// failed is in LastTerminationState; without this the one verdict a
+		// reader wants is invisible.
+		result.LastTermination = lastTermination(s)
 
 		out = append(out, result)
 	}

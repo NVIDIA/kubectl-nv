@@ -17,10 +17,8 @@
 package rules_test
 
 import (
-	"os"
-	"regexp"
-	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -48,6 +46,18 @@ func driverPod(component string, ready bool, restarts int32) inventory.OperandPo
 	}
 }
 
+// drvNow is the injected clock every case in this file is written against.
+var drvNow = time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+
+// drvInput is one node, the clock and the operator installed.
+func drvInput(node inventory.GPUNode) health.Input {
+	return health.Input{
+		Nodes:             []inventory.GPUNode{node},
+		OperatorInstalled: true,
+		Now:               drvNow,
+	}
+}
+
 // driverNode is a worker whose driver pod is in the state the case is about.
 func driverNode(name string, pod inventory.OperandPod) inventory.GPUNode {
 	return buildNode(name,
@@ -64,10 +74,7 @@ func TestDriverPodNotReadyReportsAnUnreadyDriverPod(t *testing.T) {
 	t.Parallel()
 
 	rule := rules.NewDriverPodNotReady()
-	in := health.Input{
-		Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 7))},
-		OperatorInstalled: true,
-	}
+	in := drvInput(driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 7)))
 
 	finding := only(t, evaluate(rule, in))
 
@@ -92,10 +99,7 @@ func TestDriverPodNotReadyReportsAnUnreadyDriverPod(t *testing.T) {
 func TestDriverPodNotReadyStaysQuietOnAReadyDriverPod(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 0))},
-		OperatorInstalled: true,
-	}
+	in := drvInput(driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 0)))
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
@@ -113,19 +117,73 @@ func TestDriverPodNotReadyStaysQuietWhenTheNodeRunsNoDriverPod(t *testing.T) {
 	}
 }
 
-// A ready pod that has restarted is not reported. The operand model carries a
-// restart count and no termination time, so "restarted an hour ago" and
-// "restarted in March" are the same input, and a rule that fired on the count
-// alone would report every long lived node in the cluster for ever.
-func TestDriverPodNotReadyStaysQuietOnAReadyPodThatHasRestarted(t *testing.T) {
+// A ready pod whose last death is inside the window is a driver that comes
+// up, runs for a minute and dies again: a readiness check sampled at the wrong
+// moment calls it healthy, and the restart count plus the time of that death
+// are what catch it.
+func TestDriverPodNotReadyReportsARestartInsideTheWindow(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12))},
-		OperatorInstalled: true,
+	rule := rules.NewDriverPodNotReady()
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12))
+	withLastTermination(inventory.ComponentDriver, 1, drvNow.Add(-4*time.Minute))(&node)
+
+	finding := only(t, evaluate(rule, drvInput(node)))
+
+	checkFinding(t, rule, finding, inventory.ComponentDriver,
+		"the driver pod on the node is restarting",
+		"kubectl nv info worker-1")
+
+	checkEvidence(t, finding.Evidence, map[string]string{
+		"nvidia.com/gpu.deploy.driver": "true",
+		"operands":                     "nvidia-device-plugin-daemonset,nvidia-driver-daemonset",
+		"pod":                          "nvidia-driver-daemonset-abcde",
+		"phase":                        "Running",
+		"ready":                        "true",
+		"restarts":                     "12",
+		"lastTerminationAt":            "2026-10-11T11:56:00Z",
+		"lastExitCode":                 "1",
+		"restartWindow":                "10m0s",
+	})
+}
+
+// A restart outside the window is history. A driver that crashed during this
+// morning's rollout and has been up since is not a finding, and a rule firing
+// on the count alone would report every long lived node for ever.
+func TestDriverPodNotReadyStaysQuietOnARestartOutsideTheWindow(t *testing.T) {
+	t.Parallel()
+
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12))
+	withLastTermination(inventory.ComponentDriver, 1, drvNow.Add(-3*time.Hour))(&node)
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), drvInput(node)); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
+}
+
+// A restart count with no termination recorded cannot be dated, and an
+// undatable restart is not reported: the alternative is reading an absent
+// time as now, which reports every pod that ever restarted.
+func TestDriverPodNotReadyStaysQuietOnAnUndatableRestart(t *testing.T) {
+	t.Parallel()
+
+	in := drvInput(driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 12)))
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// A pod that has never restarted is not restarting, whatever else is dated on
+// it. Without the count the window alone would report a pod that terminated
+// once and was replaced.
+func TestDriverPodNotReadyStaysQuietWithoutARestart(t *testing.T) {
+	t.Parallel()
+
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, true, 0))
+	withLastTermination(inventory.ComponentDriver, 1, drvNow.Add(-1*time.Minute))(&node)
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), drvInput(node)); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }
@@ -136,41 +194,45 @@ func TestDriverPodNotReadyReportsTheVGPUManager(t *testing.T) {
 	t.Parallel()
 
 	rule := rules.NewDriverPodNotReady()
-	in := health.Input{
-		Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentVGPUManager, false, 0))},
-		OperatorInstalled: true,
-	}
+	in := drvInput(driverNode("worker-1", driverPod(inventory.ComponentVGPUManager, false, 0)))
 
 	finding := only(t, evaluate(rule, in))
-	if finding.Component != inventory.ComponentVGPUManager {
-		t.Errorf("Component is %q, want %q", finding.Component, inventory.ComponentVGPUManager)
-	}
+
+	checkFinding(t, rule, finding, inventory.ComponentVGPUManager,
+		"the driver pod on the node is not ready",
+		"kubectl nv info worker-1")
+
+	// The vGPU manager is gated on its own deploy label, so the evidence has
+	// to name that one and not the driver's.
+	checkEvidence(t, finding.Evidence, map[string]string{
+		"nvidia.com/gpu.deploy.vgpu-manager": "true",
+		"operands":                           "nvidia-device-plugin-daemonset,nvidia-vgpu-manager-daemonset",
+		"pod":                                "nvidia-vgpu-manager-daemonset-abcde",
+		"phase":                              "Pending",
+		"ready":                              "false",
+		"restarts":                           "0",
+	})
 }
 
-// OpenShift names each driver DaemonSet after the RHCOS version it was built
-// for, so the "app" label is nvidia-driver-daemonset-<version>-<rhcos> rather
-// than the bare name, and app.kubernetes.io/component=nvidia-driver is the
-// other spelling pkg/mustgather collects through.
-func TestDriverPodNotReadyReportsTheOpenShiftSpellings(t *testing.T) {
+// A driver DaemonSet the NVIDIADriver CR produces reaches the rule as
+// ComponentDriver, because pkg/inventory classifies it by selector rather than
+// by its generated "app" label. This is the pod shape on every modern cluster,
+// and before that classification existed the rule could not fire on one at
+// all.
+func TestDriverPodNotReadyReportsAnNVIDIADriverPod(t *testing.T) {
 	t.Parallel()
 
-	for _, component := range []string{
-		"nvidia-driver-daemonset-410.84.202203290245-0",
-		"nvidia-driver",
-	} {
-		t.Run(component, func(t *testing.T) {
-			t.Parallel()
+	pod := driverPod(inventory.ComponentDriver, false, 0)
+	pod.Name = "nvidia-gpu-driver-ubuntu22.04-7d9f4c2b1e-abcde"
 
-			in := health.Input{
-				Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod(component, false, 0))},
-				OperatorInstalled: true,
-			}
+	finding := only(t, evaluate(rules.NewDriverPodNotReady(), drvInput(driverNode("worker-1", pod))))
 
-			finding := only(t, evaluate(rules.NewDriverPodNotReady(), in))
-			if finding.Component != component {
-				t.Errorf("Component is %q, want %q", finding.Component, component)
-			}
-		})
+	if finding.Component != inventory.ComponentDriver {
+		t.Errorf("Component is %q, want %q", finding.Component, inventory.ComponentDriver)
+	}
+
+	if finding.Evidence["pod"] != pod.Name {
+		t.Errorf("evidence names %q, want the pod's own name %q", finding.Evidence["pod"], pod.Name)
 	}
 }
 
@@ -180,10 +242,7 @@ func TestDriverPodNotReadyReportsTheOpenShiftSpellings(t *testing.T) {
 func TestDriverPodNotReadyIgnoresAnUnrelatedComponent(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes:             []inventory.GPUNode{driverNode("worker-1", driverPod("nvidia-driver-daemonsetfoo", false, 0))},
-		OperatorInstalled: true,
-	}
+	in := drvInput(driverNode("worker-1", driverPod("nvidia-driver-daemonsetfoo", false, 0)))
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
@@ -198,7 +257,7 @@ func TestDriverPodNotReadyStaysQuietWhileTheDriverIsPaused(t *testing.T) {
 	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))
 	node.Deploy["driver"] = "paused-for-mig-change"
 
-	in := health.Input{Nodes: []inventory.GPUNode{node}, OperatorInstalled: true}
+	in := drvInput(node)
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
@@ -209,8 +268,55 @@ func TestDriverPodNotReadyStaysQuietWhileTheDriverIsPaused(t *testing.T) {
 func TestDriverPodNotReadyStaysQuietWithoutTheOperator(t *testing.T) {
 	t.Parallel()
 
+	in := health.Input{Nodes: []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))}, Now: drvNow}
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// A node whose driver is broken is a hinted node, and this is the case the
+// rule exists for.
+//
+// The driver is what the device plugin waits on, so a node with a broken
+// driver never advertises nvidia.com/gpu: it keeps its hint labels and leaves
+// Input.Nodes for Input.Hinted. A rule reading only the GPU nodes lost the
+// fault at exactly the moment it appeared.
+func TestDriverPodNotReadyReportsAHintedWorker(t *testing.T) {
+	t.Parallel()
+
+	rule := rules.NewDriverPodNotReady()
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 7))
+	node.Capacity, node.Allocatable, node.Mode = 0, 0, inventory.ModeNone
+	hinted()(&node)
+
+	in := health.Input{Hinted: []inventory.GPUNode{node}, OperatorInstalled: true, Now: drvNow}
+	finding := only(t, evaluate(rule, in))
+
+	checkFinding(t, rule, finding, inventory.ComponentDriver,
+		"the driver pod on the node is not ready",
+		"kubectl nv info worker-1")
+
+	checkEvidence(t, finding.Evidence, map[string]string{
+		"nvidia.com/gpu.deploy.driver": "true",
+		"operands":                     "nvidia-device-plugin-daemonset,nvidia-driver-daemonset",
+		"pod":                          "nvidia-driver-daemonset-abcde",
+		"phase":                        "Pending",
+		"ready":                        "false",
+		"restarts":                     "7",
+	})
+}
+
+// Walking the hinted nodes must not reopen the control plane problem. The
+// Mokka control plane carries every GPU hint label and every deploy label and
+// runs no driver pod at all, so there is nothing here for this rule to match.
+func TestDriverPodNotReadyStaysQuietOnTheControlPlane(t *testing.T) {
+	t.Parallel()
+
 	in := health.Input{
-		Nodes: []inventory.GPUNode{driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))},
+		Hinted:            []inventory.GPUNode{mokkaControlPlane()},
+		OperatorInstalled: true,
+		Now:               drvNow,
 	}
 
 	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
@@ -218,19 +324,58 @@ func TestDriverPodNotReadyStaysQuietWithoutTheOperator(t *testing.T) {
 	}
 }
 
-// The hinted nodes are not walked: a control plane that carries the GPU hint
-// labels is NV-NODE-002's business, and on this repository's own lane it
-// carries every deploy label while no operand will ever land on it.
-func TestDriverPodNotReadySkipsHintedNodes(t *testing.T) {
+// An upgrade takes the driver down and puts it back on purpose. Reporting an
+// error there would make every rolling driver upgrade in a fleet look like an
+// outage; whether the upgrade itself is wedged is NV-UPG-001's finding.
+func TestDriverPodNotReadyDropsToInfoMidUpgrade(t *testing.T) {
 	t.Parallel()
 
-	node := mokkaControlPlane()
-	node.Operands = append(node.Operands, driverPod(inventory.ComponentDriver, false, 3))
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))
+	withUpgradeState("pod-restart-required")(&node)
 
-	in := health.Input{Hinted: []inventory.GPUNode{node}, OperatorInstalled: true}
+	finding := only(t, evaluate(rules.NewDriverPodNotReady(), drvInput(node)))
 
-	if findings := evaluate(rules.NewDriverPodNotReady(), in); len(findings) != 0 {
-		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
+	}
+
+	if got := finding.Evidence["nvidia.com/gpu-driver-upgrade-state"]; got != "pod-restart-required" {
+		t.Errorf("the evidence does not say why the finding was lowered: %v", finding.Evidence)
+	}
+}
+
+// upgrade-done is not an upgrade in progress. A driver that is not ready on a
+// node the controller has finished with is an ordinary error.
+func TestDriverPodNotReadyStaysAnErrorAfterTheUpgrade(t *testing.T) {
+	t.Parallel()
+
+	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))
+	withUpgradeState("upgrade-done")(&node)
+
+	finding := only(t, evaluate(rules.NewDriverPodNotReady(), drvInput(node)))
+
+	if finding.Severity != output.SeverityError {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	}
+}
+
+// The vGPU manager is gated on its own deploy label, not the driver's, so a
+// paused vGPU manager has to go quiet and a paused driver must not silence it.
+func TestDriverPodNotReadyHonoursTheVGPUDeployLabel(t *testing.T) {
+	t.Parallel()
+
+	paused := driverNode("worker-1", driverPod(inventory.ComponentVGPUManager, false, 0))
+	paused.Deploy["vgpu-manager"] = "paused-for-driver-upgrade"
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), drvInput(paused)); len(findings) != 0 {
+		t.Fatalf("a paused vGPU manager is not a finding: got %d: %+v", len(findings), findings)
+	}
+
+	other := driverNode("worker-1", driverPod(inventory.ComponentVGPUManager, false, 0))
+	other.Deploy["driver"] = "false"
+
+	if findings := evaluate(rules.NewDriverPodNotReady(), drvInput(other)); len(findings) != 1 {
+		t.Fatalf("the driver label does not gate the vGPU manager: got %d findings, want 1", len(findings))
 	}
 }
 
@@ -247,46 +392,5 @@ func TestDriverPodNotReadyAppliesToEveryOperatorVersion(t *testing.T) {
 
 	if bounded.Applies("v25.10.0") {
 		t.Error("the version gate is not wired: a bounded rule still applies below its minimum")
-	}
-}
-
-// The selectors a driver pod is found through are pkg/mustgather's, because a
-// driver this rule does not recognise is a driver nobody collects a bug report
-// from either. The two lists are in different packages and only one of them is
-// exported, so this is what keeps them the same list: a selector added to
-// pkg/mustgather and not here fails this test by name.
-func TestDriverComponentsCoverEveryMustGatherSelector(t *testing.T) {
-	t.Parallel()
-
-	raw, err := os.ReadFile("../../mustgather/driverpods.go")
-	if err != nil {
-		t.Fatalf("reading pkg/mustgather/driverpods.go: %v", err)
-	}
-
-	block := regexp.MustCompile(`(?s)var driverLabels = \[\]string\{(.*?)\n\}`).FindStringSubmatch(string(raw))
-	if block == nil {
-		t.Fatal("pkg/mustgather/driverpods.go no longer declares driverLabels as a slice literal")
-	}
-
-	selectors := regexp.MustCompile(`"([^"]+)"`).FindAllStringSubmatch(block[1], -1)
-	if len(selectors) == 0 {
-		t.Fatal("driverLabels holds no selectors, so this test proves nothing")
-	}
-
-	for _, match := range selectors {
-		selector := match[1]
-
-		// A bare key with no value is a presence selector. OpenShift's
-		// driver-toolkit is the one of those, and the pod it marks carries a
-		// driver "app" label as well, which the value selectors below cover.
-		_, value, found := strings.Cut(selector, "=")
-		if !found {
-			continue
-		}
-
-		if !rules.IsDriverComponent(value) {
-			t.Errorf("pkg/mustgather selects driver pods by %q and IsDriverComponent(%q) is false",
-				selector, value)
-		}
 	}
 }

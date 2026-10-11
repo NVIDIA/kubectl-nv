@@ -70,8 +70,8 @@ func TestComputeDomainNotReadyReportsANotReadyNode(t *testing.T) {
 		"the IMEX daemon of a ComputeDomain covering the node is not ready",
 		"kubectl nv info worker-1")
 
-	if finding.Severity != output.SeverityError {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
 	}
 
 	checkEvidence(t, finding.Evidence, map[string]string{
@@ -131,8 +131,8 @@ func TestComputeDomainNotReadyReportsAMissingClique(t *testing.T) {
 		"the node is in a ComputeDomain and carries no nvidia.com/gpu.clique",
 		"kubectl nv info worker-1")
 
-	if finding.Severity != output.SeverityWarning {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityWarning)
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
 	}
 
 	checkEvidence(t, finding.Evidence, map[string]string{
@@ -222,19 +222,90 @@ func TestComputeDomainNotReadySkipsHintedNodes(t *testing.T) {
 	}
 }
 
-// The ComputeDomain CRD is served by the DRA driver the GPU Operator ships
-// from v25.3.0, so the rule declares that floor. An unknown version still
-// runs it, which is what VersionInRange answers for an empty string.
-func TestComputeDomainNotReadyIsGatedAtTheDRADriverRelease(t *testing.T) {
+// There is no GPU Operator floor. The NVIDIA DRA driver installs from a chart
+// of its own against any operator version, or none at all, so a cluster
+// serving ComputeDomains says nothing about which operator it runs; the
+// operator did not ship a DRA driver operand of its own until v26.7.0, later
+// than the floor this rule first carried.
+func TestComputeDomainNotReadyAppliesToEveryOperatorVersion(t *testing.T) {
 	t.Parallel()
 
 	rule := rules.NewComputeDomainNotReady()
 
-	if rule.Applies("v24.9.0") {
-		t.Error("the rule must not apply below v25.3.0, where no ComputeDomain CRD is served")
+	for _, version := range []string{"v24.9.0", "v25.3.0", "v26.3.3", "v26.10.0", ""} {
+		if !rule.Applies(version) {
+			t.Errorf("the rule does not apply at operator version %q, and it has to", version)
+		}
 	}
 
-	if !rule.Applies("v25.3.0") || !rule.Applies("v25.10.0") || !rule.Applies("") {
-		t.Error("the rule has to apply from v25.3.0 upwards and to an unknown version")
+	bounded := rules.NewComputeDomainNotReady()
+	bounded.MinVersion = "v99.0.0"
+
+	if bounded.Applies("v25.10.0") {
+		t.Error("the version gate is not wired: a bounded rule still applies below its minimum")
+	}
+}
+
+// A ComputeDomain entry carrying no cliqueID is not a claim that the node has
+// none: the field is the domain's record, and the node's own
+// nvidia.com/gpu.clique label is what decides. A labelled node must stay quiet
+// however empty the entry is.
+func TestComputeDomainNotReadyReadsTheCliqueOffTheNode(t *testing.T) {
+	t.Parallel()
+
+	domain := computeDomain("workload", "cd-a", "Ready", cdNode("worker-1", "", "Ready"))
+
+	if findings := evaluate(rules.NewComputeDomainNotReady(),
+		cdInput(imexNode("worker-1", "uuid.1", true, true), domain)); len(findings) != 0 {
+		t.Fatalf("the node carries a clique: got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// And the mirror: an entry that records a cliqueID does not give the node one.
+// A node with no label is outside every clique whatever the domain remembers.
+func TestComputeDomainNotReadyReportsAnUnlabelledNodeWithARecordedClique(t *testing.T) {
+	t.Parallel()
+
+	domain := computeDomain("workload", "cd-a", "Ready", cdNode("worker-1", "uuid.1", "Ready"))
+
+	finding := only(t, evaluate(rules.NewComputeDomainNotReady(),
+		cdInput(imexNode("worker-1", "", true, true), domain)))
+
+	if finding.Message != "the node is in a ComputeDomain and carries no nvidia.com/gpu.clique" {
+		t.Errorf("Message is %q", finding.Message)
+	}
+}
+
+// The CRD defaults status.nodes[].status to NotReady, so an entry that
+// carries none is a node nobody has joined. Reading an absent status as ready
+// would report a domain that never came up as working.
+func TestComputeDomainNotReadyTreatsAnAbsentStatusAsNotReady(t *testing.T) {
+	t.Parallel()
+
+	entry := cdNode("worker-1", "uuid.1", "Ready")
+	delete(entry, "status")
+
+	domain := computeDomain("workload", "cd-a", "NotReady", entry)
+
+	finding := only(t, evaluate(rules.NewComputeDomainNotReady(),
+		cdInput(imexNode("worker-1", "uuid.1", true, true), domain)))
+
+	if got := finding.Evidence["nodeStatus"]; got != "NotReady" {
+		t.Errorf("evidence nodeStatus is %q, want %q", got, "NotReady")
+	}
+}
+
+// A domain with no status of its own leaves the key out rather than writing
+// it as an empty string, which is the evidence encoding for absent.
+func TestComputeDomainNotReadyLeavesAnEmptyDomainStatusOut(t *testing.T) {
+	t.Parallel()
+
+	domain := computeDomain("workload", "cd-a", "", cdNode("worker-1", "uuid.1", "NotReady"))
+
+	finding := only(t, evaluate(rules.NewComputeDomainNotReady(),
+		cdInput(imexNode("worker-1", "uuid.1", true, true), domain)))
+
+	if _, present := finding.Evidence["computeDomainStatus"]; present {
+		t.Errorf("an empty domain status is left out, not written as \"\": %v", finding.Evidence)
 	}
 }

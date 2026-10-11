@@ -32,6 +32,9 @@ import (
 const (
 	// upgradeStateFailed is terminal: the operator tried and could not.
 	upgradeStateFailed = "upgrade-failed"
+	// upgradeStateDone is the other terminal state, and the one every node of
+	// a cluster that is not upgrading sits in.
+	upgradeStateDone = "upgrade-done"
 	// The three transitional states a node can sit in indefinitely when
 	// whatever the operator is waiting for never happens: a cordon that
 	// cannot be taken, a pod that will not go away, a validation that never
@@ -76,10 +79,22 @@ const upgradeEventPrefix = "Successfully updated node state label to "
 //	stuck, with an event        warning  measured against --upgrade-stuck-after
 //	stuck, with no event        info     the state is there, the duration is not
 //
-// The transitional states are only three of the eleven the controller uses.
-// The rest are either terminal and fine (upgrade-done), or steps the
-// controller drives itself within seconds; reporting those would be reporting
-// every node of every cluster mid-upgrade.
+// The transitional states are only three of the twelve the controller names
+// (k8s-operator-libs pkg/upgrade/consts.go). The rest are either terminal
+// (upgrade-done, upgrade-failed) or steps the controller drives itself within
+// seconds; reporting those would be reporting every node of every cluster
+// mid-upgrade.
+//
+// One consequence of reading the duration off an event is worth knowing
+// about: the API server expires events after an hour by default, so a node
+// that has been wedged for longer than that has no event left to be dated
+// from and drops to info. That is the honest answer rather than a wrong
+// duration, and the state itself is still reported.
+//
+// Both the GPU nodes and the hinted ones are walked. An upgrade takes the
+// driver down, so a node part way through one often advertises no
+// nvidia.com/gpu and is hinted exactly while this rule has something to say
+// about it. See everyNode.
 type UpgradeStuck struct {
 	versionRange
 	// after is how long a transitional state has to have lasted before it
@@ -115,7 +130,7 @@ func (r *UpgradeStuck) Severity() output.Severity { return output.SeverityWarnin
 func (r *UpgradeStuck) Evaluate(in health.Input) []output.Finding {
 	var findings []output.Finding
 
-	for _, node := range in.Nodes {
+	for _, node := range everyNode(in) {
 		finding, found := r.evaluateNode(in, node)
 		if found {
 			findings = append(findings, finding)

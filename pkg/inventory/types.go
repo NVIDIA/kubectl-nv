@@ -162,7 +162,20 @@ type InitResult struct {
 	// key is the one that does not break a reader that trusted the rest.
 	ExitCode *int32 `json:"exitCode,omitempty" yaml:"exitCode,omitempty"`
 	// Reason is the termination reason, for instance "Error" or "Completed".
+	// For a container that is waiting rather than terminated it is the waiting
+	// reason instead, which is where "CrashLoopBackOff" arrives.
 	Reason string `json:"reason" yaml:"reason"`
+	// LastTermination is the container's most recent exit, whether that is the
+	// state it is in now or the one it was in before the restart it is
+	// waiting out.
+	//
+	// This is what makes a crash looping validator visible. Under a pod
+	// restart policy of Always the operator's validator does not sit
+	// terminated: its init container is Waiting with reason CrashLoopBackOff
+	// and the exit code of the run that failed is in LastTerminationState, so
+	// ExitCode above is nil and a reader of it alone sees a validator with
+	// nothing wrong with it.
+	LastTermination Termination `json:"lastTermination" yaml:"lastTermination"`
 }
 
 // OperandPod is one GPU operator pod running on the node.
@@ -192,6 +205,20 @@ type OperandPod struct {
 	Images []string `json:"images" yaml:"images"`
 	// Ready is whether every container reports ready.
 	Ready bool `json:"ready" yaml:"ready"`
+	// LastTermination is the most recent exit across the pod's containers,
+	// which is what dates its last restart.
+	//
+	// Restarts above says how many times the pod has died and this says when
+	// it last did. Without the second, "restarted ten minutes ago" and
+	// "restarted in March" are the same input, and a rule firing on a
+	// non-zero count alone would report every long lived node in the cluster
+	// for ever.
+	//
+	// It is one value for the pod rather than one per container because the
+	// question a rule asks of it is the pod's: when did this operand last
+	// die. The containers' own exits are still each read, and the newest of
+	// them is what arrives here.
+	LastTermination Termination `json:"lastTermination" yaml:"lastTermination"`
 	// InitContainers are the init container results, in pod order.
 	InitContainers []InitResult `json:"initContainers" yaml:"initContainers"`
 }

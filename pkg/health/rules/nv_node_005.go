@@ -67,9 +67,18 @@ func NewNodeConditionOrCordon() *NodeConditionOrCordon { return &NodeConditionOr
 // Code implements health.Rule.
 func (r *NodeConditionOrCordon) Code() string { return "NV-NODE-005" }
 
-// Severity implements health.Rule. An error is what the rule is listed as,
-// for the failing health check; the cordon finding lowers itself to info.
-func (r *NodeConditionOrCordon) Severity() output.Severity { return output.SeverityError }
+// Severity implements health.Rule.
+//
+// Informational until the Phase 2 false-positive baseline. The finding is
+// real, and nothing yet says how often a healthy fleet produces one; a rule
+// that fails a pipeline before anybody has measured that is a rule operators
+// switch off rather than read. The severity is raised once the baseline says
+// what a clean cluster looks like.
+//
+// It applies with particular force here: what NVSentinel's checks are called
+// and how often they fire is a property of each deployment's configuration,
+// and nothing in this repository has seen a real one.
+func (r *NodeConditionOrCordon) Severity() output.Severity { return output.SeverityInfo }
 
 // Evaluate implements health.Rule.
 func (r *NodeConditionOrCordon) Evaluate(in health.Input) []output.Finding {

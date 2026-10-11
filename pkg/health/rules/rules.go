@@ -245,7 +245,23 @@ func migAllocatable(node inventory.GPUNode) int64 {
 
 // isMixedMIG reports whether the node advertises MIG profiles as its extended
 // resources, which is the case where GPUNode.Capacity is legitimately zero.
-func isMixedMIG(node inventory.GPUNode) bool { return len(node.MIG.Resources) > 0 }
+//
+// Only a profile with capacity above zero counts. The kubelet does not drop a
+// removed extended resource from a node's status, it keeps it at zero, so a
+// node that was partitioned last week and is now running whole GPUs still
+// carries a nvidia.com/mig-1g.10gb entry for ever. Counting those leftovers
+// told NV-NODE-002 that a node with no allocatable GPUs was a legitimate
+// mixed-strategy node, and told NV-MIG-001 that a node advertising nothing was
+// advertising its profiles.
+func isMixedMIG(node inventory.GPUNode) bool {
+	for _, count := range node.MIG.Resources {
+		if count.Capacity > 0 {
+			return true
+		}
+	}
+
+	return false
+}
 
 // setIf puts a key in an evidence map only when the value is not empty.
 // Absent is the encoding for "not there": the key is left out, never set to ""

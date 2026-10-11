@@ -37,67 +37,84 @@ func fabricNode(name string, labels map[string]string) inventory.GPUNode {
 	)
 }
 
-// A node missing a tier its peers carry is a node work will be placed on and
-// then run slowly on, and nothing else in a report shows it.
-func TestTopologyLabelsPartialReportsANodeMissingATier(t *testing.T) {
+func topoInput(nodes ...inventory.GPUNode) health.Input {
+	return health.Input{Nodes: nodes, OperatorInstalled: true}
+}
+
+// The shape E3 injects: one worker gets a tier and the other does not. The
+// worker without it is the finding, and it carries none of the tiers rather
+// than some of them, which is the common way Topograph misses a node.
+func TestTopologyLabelsPartialReportsANodeWithNoTierAtAll(t *testing.T) {
 	t.Parallel()
 
 	rule := rules.NewTopologyLabelsPartial()
-	in := health.Input{
-		Nodes: []inventory.GPUNode{
-			fabricNode("worker-1", map[string]string{
-				"fabric.topograph.run/tier-0": "sw-a",
-				"fabric.topograph.run/tier-1": "sw-top",
-			}),
-			fabricNode("worker-2", map[string]string{
-				"fabric.topograph.run/tier-0": "sw-b",
-			}),
-		},
-		OperatorInstalled: true,
-	}
+	in := topoInput(
+		fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}),
+		fabricNode("worker-2", nil),
+	)
 
 	finding := only(t, evaluate(rule, in))
 
 	checkFinding(t, rule, finding, rules.ComponentNode,
-		"the node is missing Topograph labels that other GPU nodes carry",
+		"the node is missing Topograph fabric tiers that other GPU nodes carry",
 		"kubectl nv info worker-2")
 
-	if finding.Severity != output.SeverityWarning {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityWarning)
+	if finding.Severity != output.SeverityInfo {
+		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityInfo)
 	}
+
+	// present is absent rather than an empty string: the node carries none of
+	// them, and an absent key is the encoding for that.
+	checkEvidence(t, finding.Evidence, map[string]string{
+		"missing": "fabric.topograph.run/tier-0",
+	})
+}
+
+// A node missing one tier of several is the other half of the same finding.
+func TestTopologyLabelsPartialReportsANodeMissingOneTier(t *testing.T) {
+	t.Parallel()
+
+	rule := rules.NewTopologyLabelsPartial()
+	in := topoInput(
+		fabricNode("worker-1", map[string]string{
+			"fabric.topograph.run/tier-0": "sw-a",
+			"fabric.topograph.run/tier-1": "sw-top",
+		}),
+		fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"}),
+	)
+
+	finding := only(t, evaluate(rule, in))
 
 	checkEvidence(t, finding.Evidence, map[string]string{
 		"present": "fabric.topograph.run/tier-0",
 		"missing": "fabric.topograph.run/tier-1",
 	})
+
+	if finding.Node != "worker-2" {
+		t.Errorf("the finding names %q, want worker-2", finding.Node)
+	}
 }
 
-// A fleet where every node carries the same labels is a fleet Topograph has
+// A fleet where every node carries the same tiers is a fleet Topograph has
 // finished with.
 func TestTopologyLabelsPartialStaysQuietWhenEveryNodeAgrees(t *testing.T) {
 	t.Parallel()
 
 	labels := map[string]string{
-		"fabric.topograph.run/tier-0":      "sw-a",
-		"accelerator.topograph.run/domain": "nvl-1",
+		"fabric.topograph.run/tier-0": "sw-a",
+		"fabric.topograph.run/tier-1": "sw-top",
 	}
 
-	in := health.Input{
-		Nodes: []inventory.GPUNode{
-			fabricNode("worker-1", labels),
-			fabricNode("worker-2", labels),
-		},
-		OperatorInstalled: true,
-	}
+	in := topoInput(fabricNode("worker-1", labels), fabricNode("worker-2", labels))
 
 	if findings := evaluate(rules.NewTopologyLabelsPartial(), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }
 
-// A cluster Topograph has never run against carries none of the labels, so
-// there is no set to be partial against.
-func TestTopologyLabelsPartialStaysQuietWithoutAnyTopographLabel(t *testing.T) {
+// A cluster Topograph has never run against carries no tiers at all, so there
+// is no set to be partial against.
+func TestTopologyLabelsPartialStaysQuietWithoutAnyTier(t *testing.T) {
 	t.Parallel()
 
 	if findings := evaluate(rules.NewTopologyLabelsPartial(), healthyLane()); len(findings) != 0 {
@@ -105,23 +122,22 @@ func TestTopologyLabelsPartialStaysQuietWithoutAnyTopographLabel(t *testing.T) {
 	}
 }
 
-// A node carrying none of the labels is outside the fabric entirely rather
-// than half inside it, and saying it is missing every label would bury the
-// nodes that are missing one. That is pkg/topology's definition, and this
-// rule reads the same partial set rather than inventing a second one.
-func TestTopologyLabelsPartialStaysQuietOnANodeOutsideTheFabric(t *testing.T) {
+// The accelerator domain is optional per provider: a fleet whose provider
+// publishes tiers and no domain is complete, not partial, and counting the
+// domain would report every such cluster. Only the fabric tiers decide.
+func TestTopologyLabelsPartialCountsTiersOnly(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes: []inventory.GPUNode{
-			fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}),
-			fabricNode("worker-2", nil),
-		},
-		OperatorInstalled: true,
-	}
+	in := topoInput(
+		fabricNode("worker-1", map[string]string{
+			"fabric.topograph.run/tier-0":      "sw-a",
+			"accelerator.topograph.run/domain": "nvl-1",
+		}),
+		fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"}),
+	)
 
 	if findings := evaluate(rules.NewTopologyLabelsPartial(), in); len(findings) != 0 {
-		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+		t.Fatalf("the domain is not a tier: got %d findings, want none: %+v", len(findings), findings)
 	}
 }
 
@@ -131,39 +147,29 @@ func TestTopologyLabelsPartialStaysQuietOnANodeOutsideTheFabric(t *testing.T) {
 func TestTopologyLabelsPartialIgnoresTheCliqueLabel(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes: []inventory.GPUNode{
-			fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}),
-			func() inventory.GPUNode {
-				node := fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"})
-				withClique("uuid.1")(&node)
+	second := fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"})
+	withClique("uuid.1")(&second)
 
-				return node
-			}(),
-		},
-		OperatorInstalled: true,
-	}
+	in := topoInput(fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}), second)
 
 	if findings := evaluate(rules.NewTopologyLabelsPartial(), in); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }
 
-// One finding per node missing labels, each naming its own node.
+// One finding per node missing tiers, each naming its own node, in node
+// order so that two runs over the same cluster produce the same bytes.
 func TestTopologyLabelsPartialReportsEveryPartialNode(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{
-		Nodes: []inventory.GPUNode{
-			fabricNode("worker-1", map[string]string{
-				"fabric.topograph.run/tier-0":      "sw-a",
-				"accelerator.topograph.run/domain": "nvl-1",
-			}),
-			fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"}),
-			fabricNode("worker-3", map[string]string{"accelerator.topograph.run/domain": "nvl-2"}),
-		},
-		OperatorInstalled: true,
-	}
+	in := topoInput(
+		fabricNode("worker-1", map[string]string{
+			"fabric.topograph.run/tier-0": "sw-a",
+			"fabric.topograph.run/tier-1": "sw-top",
+		}),
+		fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": "sw-b"}),
+		fabricNode("worker-3", nil),
+	)
 
 	findings := evaluate(rules.NewTopologyLabelsPartial(), in)
 	if len(findings) != 2 {
@@ -172,6 +178,39 @@ func TestTopologyLabelsPartialReportsEveryPartialNode(t *testing.T) {
 
 	if findings[0].Node != "worker-2" || findings[1].Node != "worker-3" {
 		t.Errorf("findings name %q and %q, want worker-2 and worker-3", findings[0].Node, findings[1].Node)
+	}
+
+	if got := findings[1].Evidence["missing"]; got != "fabric.topograph.run/tier-0,fabric.topograph.run/tier-1" {
+		t.Errorf("worker-3 is missing both tiers, sorted and comma joined; got %q", got)
+	}
+}
+
+// A label set to an empty string is not a tier the node carries. The node
+// would otherwise count as labelled by a value that says nothing.
+func TestTopologyLabelsPartialIgnoresAnEmptyTierValue(t *testing.T) {
+	t.Parallel()
+
+	in := topoInput(
+		fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}),
+		fabricNode("worker-2", map[string]string{"fabric.topograph.run/tier-0": ""}),
+	)
+
+	finding := only(t, evaluate(rules.NewTopologyLabelsPartial(), in))
+	if finding.Node != "worker-2" {
+		t.Errorf("the finding names %q, want worker-2", finding.Node)
+	}
+}
+
+// Only the GPU nodes are walked. The question is which nodes the fabric
+// describes, and a node that advertises no GPUs is not one work is placed on.
+func TestTopologyLabelsPartialSkipsHintedNodes(t *testing.T) {
+	t.Parallel()
+
+	in := topoInput(fabricNode("worker-1", map[string]string{"fabric.topograph.run/tier-0": "sw-a"}))
+	in.Hinted = []inventory.GPUNode{mokkaControlPlane(), fabricNode("worker-9", nil)}
+
+	if findings := evaluate(rules.NewTopologyLabelsPartial(), in); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
 	}
 }
 

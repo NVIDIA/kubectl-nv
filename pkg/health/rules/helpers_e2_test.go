@@ -17,6 +17,7 @@
 package rules_test
 
 import (
+	"strconv"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -102,6 +103,41 @@ func withResourceSlices(names ...string) nodeOption {
 	return func(n *inventory.GPUNode) { n.ResourceSlices = append(n.ResourceSlices, names...) }
 }
 
+// crashLoopInit builds the init container result a crash looping container
+// actually produces: Waiting with reason CrashLoopBackOff, no current exit
+// code, and the failed run's code in the last termination.
+func crashLoopInit(name string, code int32, finishedAt time.Time) inventory.InitResult {
+	return inventory.InitResult{
+		Name:   name,
+		Reason: "CrashLoopBackOff",
+		LastTermination: inventory.Termination{
+			Observed:   true,
+			ExitCode:   code,
+			Reason:     "Error",
+			FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+		},
+	}
+}
+
+// withLastTermination dates the most recent exit of the node's pod of that
+// component, which is what NV-DRV-001's restart window is measured against.
+func withLastTermination(component string, code int32, finishedAt time.Time) nodeOption {
+	return func(n *inventory.GPUNode) {
+		for i := range n.Operands {
+			if n.Operands[i].Component != component {
+				continue
+			}
+
+			n.Operands[i].LastTermination = inventory.Termination{
+				Observed:   true,
+				ExitCode:   code,
+				Reason:     "Error",
+				FinishedAt: finishedAt.UTC().Format(time.RFC3339),
+			}
+		}
+	}
+}
+
 // withValidatorInit puts the operator validator pod on the node with its init
 // container results spelled out, which is where the toolkit verdict lives.
 func withValidatorInit(ready bool, results ...inventory.InitResult) nodeOption {
@@ -121,6 +157,10 @@ func withValidatorInit(ready bool, results ...inventory.InitResult) nodeOption {
 		})
 	}
 }
+
+// itoaForTest renders an exit code the way the evidence does, so that a case
+// naming 127 and the assertion it makes cannot drift.
+func itoaForTest(code int32) string { return strconv.FormatInt(int64(code), 10) }
 
 // initResult builds one init container outcome. A nil code is a container that
 // has not terminated, which is a different fact from exiting zero.
