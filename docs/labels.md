@@ -121,10 +121,15 @@ So:
 
 - GPU Operator v24.3.0 and later write both the current and the deprecated
   CUDA version labels.
-- GPU Operator v23.9.x and earlier ship GFD v0.8.x, from the separate
-  `gpu-feature-discovery` repository that was merged into `k8s-device-plugin`,
-  and write only the deprecated names. On those clusters the `.full` labels are
-  absent and kubectl-nv reads the parts.
+- GPU Operator v23.9.x and earlier ship GFD v0.8.x, which came from the
+  separate `gpu-feature-discovery` repository before its source was copied into
+  `k8s-device-plugin` (commit `b9fe486d8`, which is also where the deprecated
+  names enter this repository's history). Those releases predate `eba41da40`,
+  so the `.full` labels are not there and kubectl-nv reads the parts. This one
+  is an inference from the two dates rather than a reading of the v0.8.x
+  source, which is not in this repository's history: a cluster old enough to
+  matter should be checked with `kubectl get node -o jsonpath` before the
+  conclusion is acted on.
 - GPU Operator v24.9.0 and later ship GFD v0.17.0 or newer and so write
   `nvidia.com/gpu.clique`.
 
