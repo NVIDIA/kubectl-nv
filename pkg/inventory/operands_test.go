@@ -571,3 +571,83 @@ func TestValidatorInitResultRunning(t *testing.T) {
 
 // ptrTo is the one-line helper the owner reference fixtures need.
 func ptrTo[T any](v T) *T { return &v }
+
+// TestDRAVariantsAreOperandsInEveryNamespace is the membership half of the
+// label classification, one case per spelling, each outside the operator's
+// namespace.
+//
+// Inside that namespace the namespace rule alone already makes the pod an
+// operand, so a test placed there passes whether or not the label is
+// recognised at all. That is what hid the operator-labelled variant: its pod
+// reaches the right component through the plain app label, and its fixture sat
+// in the operator's namespace, so deleting the DRA branch entirely changed
+// nothing any test could see.
+func TestDRAVariantsAreOperandsInEveryNamespace(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{
+			name:   "operator managed, app label, in its own namespace",
+			labels: map[string]string{"app": "nvidia-dra-driver-kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "standalone chart v25.x",
+			labels: map[string]string{"nvidia-dra-driver-gpu-component": "kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "renamed chart, v0.4.x",
+			labels: map[string]string{"dra-driver-nvidia-gpu-component": "kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "IMEX daemon",
+			labels: map[string]string{"resource.nvidia.com/computeDomain": "0b1d7a1e"},
+			want:   ComponentIMEXDaemon,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			for _, namespace := range []string{"gpu-operator", "nvidia-dra-driver-gpu"} {
+				pods := []corev1.Pod{draPod("dra-pod", namespace, "worker-1", tt.labels)}
+
+				operands := operandsByNode(pods, "gpu-operator")["worker-1"]
+				if len(operands) != 1 {
+					t.Fatalf("in namespace %s: operands = %#v, want the one DRA pod", namespace, operands)
+				}
+
+				if operands[0].Component != tt.want {
+					t.Errorf("in namespace %s: component = %q, want %q",
+						namespace, operands[0].Component, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// TestNonDRAPodOutsideTheOperatorNamespaceIsNotAnOperand is the other side of
+// the rule above: reaching outside the operator's namespace must not make
+// every pod in the cluster an operand.
+func TestNonDRAPodOutsideTheOperatorNamespaceIsNotAnOperand(t *testing.T) {
+	t.Parallel()
+
+	pods := []corev1.Pod{
+		// A workload with an app label that is not the driver's.
+		draPod("trainer", "team-ml", "worker-1", map[string]string{"app": "trainer"}),
+		// A pod of the driver's chart that is not the kubelet plugin.
+		draPod("dra-controller", "nvidia-dra-driver-gpu", "worker-1",
+			map[string]string{"nvidia-dra-driver-gpu-component": "controller"}),
+	}
+
+	if operands := operandsByNode(pods, "gpu-operator")["worker-1"]; len(operands) != 0 {
+		t.Errorf("operands = %#v, want none outside the operator namespace", operands)
+	}
+}
