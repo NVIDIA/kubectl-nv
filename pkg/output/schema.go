@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 
+	validator "github.com/google/jsonschema-go/jsonschema"
 	"github.com/invopop/jsonschema"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -59,6 +60,21 @@ var defaultSchemaRegistry = NewSchemaRegistry()
 // DefaultSchemaRegistry returns the registry RegisterSchema writes to and the
 // schema command reads from.
 func DefaultSchemaRegistry() *SchemaRegistry { return defaultSchemaRegistry }
+
+// swapDefaultSchemaRegistry puts another registry in the default's place and
+// returns the call that puts the real one back.
+//
+// It exists for the tests of this package, which have to exercise the package
+// level functions without registering anything into the registry the drift
+// check compares against docs/schema. A test that registered there would make
+// itself the only reason a kind is published, and a second run in the same
+// process would panic on the duplicate.
+func swapDefaultSchemaRegistry(r *SchemaRegistry) func() {
+	previous := defaultSchemaRegistry
+	defaultSchemaRegistry = r
+
+	return func() { defaultSchemaRegistry = previous }
+}
 
 // RegisterSchema records the prototype the JSON Schema of a kind is generated
 // from. It panics when the kind is already registered.
@@ -187,6 +203,7 @@ func GenerateSchema(kind string, prototype any) ([]byte, error) {
 	}
 
 	stampIdentity(schema, kind)
+	requireAlwaysMarshalled(schema, reflect.TypeOf(prototype))
 
 	raw, err := json.MarshalIndent(schema, "", "  ")
 	if err != nil {
@@ -282,13 +299,19 @@ func stampIdentity(schema *jsonschema.Schema, kind string) {
 		return
 	}
 
+	// Only what the kind actually has is pinned and required. A payload type
+	// nested inside a kind carries no TypeMeta, and requiring fields it has no
+	// property for would be a schema nothing can satisfy.
+	var identity []string
 	if _, ok := schema.Properties.Get("apiVersion"); ok {
 		schema.Properties.Set("apiVersion", &jsonschema.Schema{Type: "string", Const: APIVersion})
+		identity = append(identity, "apiVersion")
 	}
 	if _, ok := schema.Properties.Get("kind"); ok {
 		schema.Properties.Set("kind", &jsonschema.Schema{Type: "string", Const: kind})
+		identity = append(identity, "kind")
 	}
-	schema.Required = requireFirst(schema.Required, "apiVersion", "kind")
+	schema.Required = requireFirst(schema.Required, identity...)
 
 	// The items of a list carry their own identity, and it is the item kind:
 	// the items of a GPUNodeList are GPUNodes.
@@ -316,4 +339,139 @@ func requireFirst(required []string, names ...string) []string {
 	}
 
 	return out
+}
+
+// ValidateAgainstSchema checks that a sample of a kind validates against the
+// schema this registry generates for it.
+//
+// It is what a package that owns a kind calls in its own test. A schema is only
+// worth publishing if what the command actually prints satisfies it, and the
+// two drift apart silently: a field renamed in Go regenerates the schema, but a
+// field that marshals as null where the schema says array does not.
+func (r *SchemaRegistry) ValidateAgainstSchema(kind string, sample any) error {
+	raw, err := r.Schema(kind)
+	if err != nil {
+		return err
+	}
+
+	// Generated with invopop, validated with the draft 2020-12 validator the
+	// MCP SDK already brings in. One library writes schemas and the other
+	// checks them, which is the point: a schema that only its own generator
+	// understands is not a published contract.
+	var schema validator.Schema
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return fmt.Errorf("reading the generated schema of %s: %w", kind, err)
+	}
+	resolved, err := schema.Resolve(nil)
+	if err != nil {
+		return fmt.Errorf("resolving the schema of %s: %w", kind, err)
+	}
+
+	// The sample goes through JSON first, so that what is validated is what a
+	// consumer receives rather than the Go value behind it.
+	encoded, err := json.Marshal(sample)
+	if err != nil {
+		return fmt.Errorf("marshalling the %s sample: %w", kind, err)
+	}
+	var instance any
+	if err := json.Unmarshal(encoded, &instance); err != nil {
+		return fmt.Errorf("reading the %s sample back: %w", kind, err)
+	}
+
+	if err := resolved.Validate(instance); err != nil {
+		return fmt.Errorf("a %s sample does not satisfy its own schema: %w", kind, err)
+	}
+
+	return nil
+}
+
+// ValidateAgainstSchema is ValidateAgainstSchema on the default registry.
+func ValidateAgainstSchema(kind string, sample any) error {
+	return defaultSchemaRegistry.ValidateAgainstSchema(kind, sample)
+}
+
+// requireAlwaysMarshalled adds to required every property backed by a Go field
+// that marshals whatever its value is.
+//
+// A slice without omitempty renders as [] rather than disappearing, so a
+// consumer can rely on the key being there; leaving it optional in the schema
+// would tell it the opposite. The Go type is the source of that fact, not the
+// generated schema, so it is read here rather than guessed.
+func requireAlwaysMarshalled(schema *jsonschema.Schema, t reflect.Type) {
+	if schema == nil || schema.Properties == nil {
+		return
+	}
+
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return
+	}
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name, inline, skip := jsonName(field)
+		if skip {
+			continue
+		}
+		if inline {
+			requireAlwaysMarshalled(schema, field.Type)
+			continue
+		}
+
+		property, ok := schema.Properties.Get(name)
+		if !ok {
+			continue
+		}
+		if alwaysMarshalled(field) {
+			schema.Required = appendUnique(schema.Required, name)
+		}
+		requireAlwaysMarshalled(property, field.Type)
+		if property.Items != nil {
+			requireAlwaysMarshalled(property.Items, elemType(field.Type))
+		}
+	}
+}
+
+// alwaysMarshalled reports whether a field is written out whatever its value
+// is: a slice or a map with no omitempty and no omitzero.
+func alwaysMarshalled(field reflect.StructField) bool {
+	tag := field.Tag.Get("json")
+	if strings.Contains(tag, ",omitempty") || strings.Contains(tag, ",omitzero") {
+		return false
+	}
+
+	switch field.Type.Kind() {
+	case reflect.Slice, reflect.Map:
+		return true
+	}
+
+	return false
+}
+
+// elemType returns the element type of a slice, or the type itself.
+func elemType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Slice {
+		return t.Elem()
+	}
+
+	return t
+}
+
+// appendUnique appends a name that is not already in the list.
+func appendUnique(names []string, name string) []string {
+	for _, existing := range names {
+		if existing == name {
+			return names
+		}
+	}
+
+	return append(names, name)
 }

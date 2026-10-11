@@ -61,13 +61,89 @@ type BoundedOptions struct {
 // two flags mean the same thing everywhere rather than once per command.
 func AddBoundedOutputFlags(c *cobra.Command) *BoundedOptions {
 	b := &BoundedOptions{}
+	BindBoundedOutputFlags(c, b)
+
+	return b
+}
+
+// BindBoundedOutputFlags registers the two flags against options the caller
+// already holds. AddOutputFlags needs it: pflag binds to an address, so a
+// BoundedOptions copied out of a constructor would be a different struct from
+// the one the flags write into, and every call would read its zero value.
+func BindBoundedOutputFlags(c *cobra.Command, b *BoundedOptions) {
 	c.Flags().StringSliceVar(&b.Fields, "fields", nil,
 		"Keep only these dotted JSON paths on each item, for instance status.ready. "+
 			"apiVersion, kind and metadata.name are always kept")
 	c.Flags().IntVar(&b.Limit, "limit", 0,
 		"Print at most this many items, after sorting. 0 prints every item")
+}
 
-	return b
+// OutputOptions is the whole output interface of a list-like command: the
+// format behind -o and the two flags that bound what it prints.
+type OutputOptions struct {
+	// Format is the raw -o value, as ParseFormat reads it.
+	Format string
+	// Bounded is --fields and --limit.
+	Bounded BoundedOptions
+}
+
+// AddOutputFlags registers -o, --fields and --limit on a command and returns
+// the options they write into.
+//
+// The three are registered together because the MCP server and every command
+// have to agree on what the format flag is called: the server forces -o json,
+// and a command that spelled it differently would be served in whatever format
+// it defaults to and its output would not parse.
+func AddOutputFlags(c *cobra.Command) *OutputOptions {
+	o := &OutputOptions{}
+	c.Flags().StringVarP(&o.Format, "output", "o", string(FormatTable),
+		"Output format: one of "+strings.Join(formatNames(), ", "))
+	BindBoundedOutputFlags(c, &o.Bounded)
+
+	return o
+}
+
+// Print applies the bounds and prints obj in the chosen format.
+func (o *OutputOptions) Print(streams genericiooptions.IOStreams, obj runtime.Object) error {
+	return PrintBounded(streams, o.Format, o.Bounded, obj)
+}
+
+// Validate reports whether these bounds can be applied to a kind, without
+// printing anything.
+//
+// A command calls it before it reads from the cluster. A misspelled --fields
+// found afterwards has cost a scan nobody needed, and the caller waited for it
+// only to be told it typed the wrong thing.
+func (b BoundedOptions) Validate(prototype runtime.Object) error {
+	if b.Limit < 0 {
+		return NewUsageError("--limit must not be negative, got %d", b.Limit)
+	}
+
+	valid, err := FieldPaths(prototype)
+	if err != nil {
+		return err
+	}
+
+	return validateFields(b.Fields, valid)
+}
+
+// Validate is Validate on the bounds, for a command holding the whole set.
+func (o *OutputOptions) Validate(prototype runtime.Object) error {
+	if _, err := ParseFormat(o.Format); err != nil {
+		return err
+	}
+
+	return o.Bounded.Validate(prototype)
+}
+
+// formatNames lists the accepted -o values.
+func formatNames() []string {
+	names := make([]string, 0, len(formats))
+	for _, f := range formats {
+		names = append(names, string(f))
+	}
+
+	return names
 }
 
 // PrintBounded applies --limit and --fields to obj and prints it in the format
@@ -207,7 +283,11 @@ func collectFieldPaths(t reflect.Type, prefix string, seen map[reflect.Type]bool
 		return
 	}
 
-	if t.Kind() != reflect.Struct || marshalsItself(t) || seen[t] {
+	// marshalsItself is not consulted at the root. A list kind commonly has a
+	// MarshalJSON of its own, to stamp its envelope or to render a nil items as
+	// an empty array, and stopping there would leave the kind with no paths at
+	// all: every --fields a caller named would come back as unknown.
+	if t.Kind() != reflect.Struct || (prefix != "" && marshalsItself(t)) || seen[t] {
 		if prefix != "" {
 			*out = append(*out, prefix)
 		}
@@ -294,8 +374,11 @@ func validateFields(fields, valid []string) error {
 
 // applyLimit keeps the first limit items of a list, on a copy, and records how
 // many were left behind. It reports the original item count and whether
-// anything was dropped. Anything that is not a list passes through untouched:
-// there is no first N of a single object.
+// anything was dropped.
+//
+// A kind with no items cannot honour a limit, and answering a bounded request
+// with an unbounded one is worse than refusing it: the caller believes it
+// asked for less than it got.
 func applyLimit(obj runtime.Object, limit int) (runtime.Object, int, bool, error) {
 	if limit <= 0 {
 		return obj, 0, false, nil
@@ -303,7 +386,7 @@ func applyLimit(obj runtime.Object, limit int) (runtime.Object, int, bool, error
 
 	items := itemsField(obj)
 	if !items.IsValid() {
-		return obj, 0, false, nil
+		return nil, 0, false, NewUsageError("--limit cannot be used on %s, which is not a list", kindOf(obj))
 	}
 
 	total := items.Len()
@@ -328,6 +411,16 @@ func applyLimit(obj runtime.Object, limit int) (runtime.Object, int, bool, error
 	accessor.SetRemainingItemCount(&remaining)
 
 	return clone, total, true, nil
+}
+
+// kindOf names a kind for an error message, falling back to the Go type when
+// the object was never stamped.
+func kindOf(obj runtime.Object) string {
+	if kind := obj.GetObjectKind().GroupVersionKind().Kind; kind != "" {
+		return kind
+	}
+
+	return fmt.Sprintf("%T", obj)
 }
 
 // itemsField returns the settable Items slice of a list kind, or the zero Value
