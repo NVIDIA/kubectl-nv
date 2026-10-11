@@ -17,13 +17,23 @@
 package health_test
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/cli-runtime/pkg/genericiooptions"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/health"
@@ -173,5 +183,117 @@ func TestHealthReadsComputeDomainsWithoutTheCRD(t *testing.T) {
 
 	if strings.Contains(s.out.String()+s.err.String(), "computedomains") {
 		t.Errorf("a cluster without the DRA driver reported a partial read:\n%s\n%s", s.out, s.err)
+	}
+}
+
+// computeDomainGVR is what the dynamic fake has to be told about, or it
+// invents a list kind and the read comes back empty.
+var computeDomainGVR = schema.GroupVersionResource{
+	Group: "resource.nvidia.com", Version: "v1beta1", Resource: "computedomains",
+}
+
+// runWithComputeDomain executes the command against a cluster that serves the
+// ComputeDomain CRD and holds one domain.
+//
+// It builds its own clients rather than going through run, because both halves
+// of the read have to be there: the discovery that says the cluster serves the
+// resource, and the dynamic client that holds the object. A fake missing
+// either answers "no ComputeDomains", which is what a dropped read looks like
+// too.
+func runWithComputeDomain(t *testing.T, domain *unstructured.Unstructured, deny bool, args ...string) (*streams, error) {
+	t.Helper()
+
+	clientset := fake.NewSimpleClientset(healthyCluster().objects...)
+	clientset.Resources = append(clientset.Resources, &metav1.APIResourceList{
+		GroupVersion: computeDomainGVR.GroupVersion().String(),
+		APIResources: []metav1.APIResource{{Name: computeDomainGVR.Resource, Kind: "ComputeDomain"}},
+	})
+
+	scheme := runtime.NewScheme()
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme,
+		map[schema.GroupVersionResource]string{
+			clusterPolicyGVR: "ClusterPolicyList",
+			computeDomainGVR: "ComputeDomainList",
+		},
+		clusterPolicy("cluster-policy", "ready"), domain)
+
+	if deny {
+		dyn.PrependReactor("list", computeDomainGVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewForbidden(
+				schema.GroupResource{Group: computeDomainGVR.Group, Resource: computeDomainGVR.Resource},
+				"", errors.New("denied"))
+		})
+	}
+
+	s := &streams{out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	io := genericiooptions.IOStreams{In: strings.NewReader(""), Out: s.out, ErrOut: s.err}
+
+	command := health.NewCommand(&cmd.Options{
+		Streams: io,
+		Factory: &fakeFactory{clientset: clientset, dynamic: dyn},
+		Logger:  output.NewLogger(io, output.LoggerOptions{NoColor: true}),
+	})
+	command.SetOut(s.out)
+	command.SetErr(s.err)
+	command.SetArgs(args)
+	command.SilenceUsage = true
+	command.SilenceErrors = true
+
+	return s, command.Execute()
+}
+
+// A ComputeDomain the cluster serves has to reach Input.ComputeDomains, or
+// NV-CD-001 runs over an empty set on every cluster and reports every one of
+// them clean.
+func TestHealthComputeDomainsReachTheRule(t *testing.T) {
+	t.Parallel()
+
+	domain := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "resource.nvidia.com/v1beta1",
+		"kind":       "ComputeDomain",
+		"metadata":   map[string]any{"name": "cd-a", "namespace": "workload"},
+		"status": map[string]any{
+			"status": "NotReady",
+			"nodes": []any{map[string]any{
+				"name": "worker-1", "cliqueID": "uuid.1", "ipAddress": "10.0.0.1", "status": "NotReady",
+			}},
+		},
+	}}
+
+	s, _ := runWithComputeDomain(t, domain, false, "-o", "json")
+
+	found := findingsFor(t, s.out.String(), "NV-CD-001")
+	if len(found) == 0 {
+		t.Fatalf("the ComputeDomain never reached the rule:\n%s", s.out)
+	}
+
+	if got := found[0]["evidence"].(map[string]any)["computeDomain"]; got != "workload/cd-a" {
+		t.Errorf("the finding names %v, want workload/cd-a", got)
+	}
+}
+
+// A denied ComputeDomains read is a partial run, not a silent one. NV-CD-001
+// then evaluates an empty set, and a report that did not say so would tell a
+// reader the cluster's ComputeDomains are fine when nobody looked at them.
+func TestHealthDeniedComputeDomainsIsPartial(t *testing.T) {
+	t.Parallel()
+
+	domain := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "resource.nvidia.com/v1beta1",
+		"kind":       "ComputeDomain",
+		"metadata":   map[string]any{"name": "cd-a", "namespace": "workload"},
+	}}
+
+	s, err := runWithComputeDomain(t, domain, true)
+	if err == nil {
+		t.Fatalf("health succeeded with the ComputeDomains read denied:\n%s", s.out)
+	}
+
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("the error exits %d, want %d: %v", got, output.ExitPartial, err)
+	}
+
+	if !strings.Contains(err.Error(), "computedomains") {
+		t.Errorf("the error does not name what could not be read: %v", err)
 	}
 }
