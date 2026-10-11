@@ -133,6 +133,7 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 	taken := make(map[string]bool)
 	var errs []error
 	denied := false
+	collected := 0
 
 	for _, driver := range s.driverPods {
 		pod := driver.pod
@@ -170,11 +171,18 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 			continue
 		}
 		g.recordArtifact(destPath)
+		collected++
 	}
 
-	if denied {
+	switch {
+	case denied:
 		s.execDenied = append(s.execDenied, "bug-report")
 		return skip("forbidden: %v", errors.Join(errs...))
+	case collected == 0 && len(errs) == 0:
+		// Every driver pod was passed over, because none of them is running on
+		// a node yet. The bundle holds no report and the reason belongs in the
+		// manifest rather than only in the error log.
+		return skip("no driver pod could be reached")
 	}
 	return errors.Join(errs...)
 }
@@ -288,6 +296,8 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 		return skip("forbidden: %v", errors.Join(errs...))
 	case collected == 0 && len(withoutSMI) > 0:
 		return skip("no nvidia-smi in %s", strings.Join(withoutSMI, ", "))
+	case collected == 0 && len(errs) == 0:
+		return skip("no driver pod could be reached")
 	}
 	return errors.Join(errs...)
 }
