@@ -26,6 +26,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // debugReportJSON is the DebugReport as a consumer parses it. Only the fields
@@ -100,6 +101,13 @@ func bugReportNames(t *testing.T, dir string) []string {
 // driver.enabled=false, so without it there is no pod to exec into and the
 // node scope of the exec path is never exercised.
 func TestDebugAgainstTheLane(t *testing.T) {
+	// Registered before the stand-in is applied, so that it runs after the
+	// stand-in has been deleted: cleanups run in reverse. Deleting the
+	// daemonset returns as soon as the daemonset is gone, and its pods take a
+	// moment longer to terminate. A pod still terminating is still Running, so
+	// the next test to gather this namespace collects it and sees a cluster
+	// with a driver pod in it. This test leaves the lane as it found it.
+	t.Cleanup(func() { waitForNoStandInPods(t) })
 	applyStandIn(t)
 
 	workers := workerNodeNames(t)
@@ -365,5 +373,34 @@ func TestDebugOnTheControlPlane(t *testing.T) {
 	// rather than a file nobody can account for.
 	if got := bugReportNames(t, dir); len(got) != 0 {
 		t.Errorf("the bundle holds %v for a node with no driver pod", got)
+	}
+}
+
+// standInGoneTimeout bounds the wait for the stand-in's pods to go away.
+const standInGoneTimeout = 2 * time.Minute
+
+// waitForNoStandInPods blocks until no pod of the driver stand-in is left in
+// the operator namespace, whatever phase it is in.
+func waitForNoStandInPods(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(standInGoneTimeout)
+	for {
+		var left []string
+		for _, pod := range operatorPods(t) {
+			if strings.HasPrefix(pod.Name, standInDaemonSet) {
+				left = append(left, pod.Name+" ("+string(pod.Status.Phase)+")")
+			}
+		}
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("after %s the driver stand-in still has pods in %s: %s",
+				standInGoneTimeout, operatorNamespace, strings.Join(left, ", "))
+
+			return
+		}
+		time.Sleep(standInPoll)
 	}
 }
