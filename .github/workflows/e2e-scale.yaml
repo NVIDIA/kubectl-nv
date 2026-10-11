@@ -1,0 +1,191 @@
+# Copyright 2026 NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Measures the built binary against two thousand GPU nodes.
+#
+# The lane is a Mokka t4 lane, which brings up two real workers with simulated
+# GPUs, plus the KWOK nodes hack/mokka/kwok-nodes.sh adds on top. KWOK nodes
+# have no kubelet and run no pods, so they cost an API object each; that is
+# what makes this size affordable on a hosted runner, and it is also why this
+# job says nothing about whether the operands are healthy. e2e-mokka answers
+# that question, on every pull request, and this one does not try to.
+#
+# Nightly rather than per pull request. The run takes most of an hour and the
+# number it produces is a trend, not a gate: a pull request that makes "list"
+# twice as slow should be caught by the next night's numbers and by a reader,
+# not by a red check whose lane took 50 minutes to build.
+#
+# Every action is pinned to a commit, not to a tag: a tag is moved by whoever
+# owns the action, and this job has a checkout and a Docker daemon in reach.
+
+name: e2e scale
+
+on:
+  schedule:
+    # 03:30 UTC, off the hour, so this does not start in the same minute as
+    # every other nightly on the runner fleet.
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+    inputs:
+      nodes:
+        description: "How many KWOK nodes to add to the lane"
+        required: false
+        default: "2000"
+        type: string
+
+permissions:
+  contents: read
+
+# One scale lane at a time. Two of them on the same ref would be two kind
+# clusters and four thousand fake nodes competing for one runner's memory, and
+# the timings either produced would be worth nothing.
+concurrency:
+  group: e2e-scale-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scale:
+    name: list and health over ${{ inputs.nodes || '2000' }} nodes
+    runs-on: ubuntu-latest
+    # The lane install is the same work e2e-mokka does, plus the KWOK install,
+    # two thousand node creates and six timed runs of the binary.
+    timeout-minutes: 90
+    env:
+      MOKKA_LANE: scale
+      MOKKA_PROFILE: t4
+      SCALE_NODES: ${{ inputs.nodes || '2000' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The job reads the repository's own code and runs it. It has no
+          # reason to hold a credential that can write to the repository.
+          persist-credentials: false
+
+      - name: Get Golang version
+        id: go_version
+        run: |
+          GOLANG_VERSION=$(./hack/golang-version.sh)
+          echo "GOLANG_VERSION=${GOLANG_VERSION##GOLANG_VERSION := }" >> "$GITHUB_OUTPUT"
+
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ steps.go_version.outputs.GOLANG_VERSION }}
+
+      - name: Install kind
+        env:
+          # The same release and the same digest as e2e-mokka: the two jobs
+          # build the same lane, and a lane built by a different kind is a
+          # different lane.
+          KIND_VERSION: v0.31.0
+          KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cd "${workdir}"
+          curl -fsSLo kind \
+            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          # The binary creates the cluster everything after it trusts, so it is
+          # checked before it is installed, not after.
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          sudo install -m 0755 kind /usr/local/bin/kind
+          kind version
+
+      - name: Install helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Pinned rather than "latest": the lane scripts are verified against
+          # this release.
+          version: v4.3.0
+
+      - name: Report the runner's disk and memory
+        run: |
+          df -h
+          free -m
+
+      - name: Build the binary under test
+        run: make build
+
+      - name: Bring up the Mokka lane
+        env:
+          MOKKA_HELM_TIMEOUT: 15m
+          MOKKA_READY_TIMEOUT: "600"
+        run: hack/mokka/up.sh "${MOKKA_LANE}" "${MOKKA_PROFILE}"
+
+      - name: Add the KWOK nodes
+        env:
+          # Two thousand nodes, created in batches, then polled until every one
+          # of them is Ready and advertising its GPUs.
+          MOKKA_READY_TIMEOUT: "900"
+          MOKKA_POLL_INTERVAL: "10"
+        run: hack/mokka/kwok-nodes.sh "${SCALE_NODES}" "${MOKKA_LANE}"
+
+      - name: Measure list and health over the lane
+        env:
+          KUBECONFIG: ${{ github.workspace }}/hack/mokka/bin/kubeconfig-scale
+          KUBECTL_NV_BIN: ${{ github.workspace }}/bin/kubectl-nv
+          KUBECTL_NV_SCALE_NODES: ${{ inputs.nodes || '2000' }}
+          KUBECTL_NV_SCALE_REPORT_DIR: ${{ github.workspace }}/bin/e2e-diagnostics-scale
+        # -run pins this to the scale test. The rest of the e2e suite carries
+        # the e2e tag and would otherwise run here too, and a must-gather over
+        # two thousand nodes is neither what this job measures nor something
+        # its timeout has room for.
+        run: |
+          go test -tags e2e,scale -count=1 -timeout 60m -v \
+            -run TestScaleLane ./test/e2e/...
+
+      # Uploaded whichever way the suite ended: a run that missed its threshold
+      # is exactly the run whose numbers are wanted. hack/mokka/bin holds the
+      # lane's kubeconfig and is never uploaded.
+      - name: Upload the numbers
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-scale-timings
+          path: bin/e2e-diagnostics-scale/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Collect what the lane looked like
+        if: failure() || cancelled()
+        run: |
+          set -u
+          kubeconfig="${GITHUB_WORKSPACE}/hack/mokka/bin/kubeconfig-scale"
+          out="${GITHUB_WORKSPACE}/bin/e2e-diagnostics-scale"
+          mkdir -p "${out}"
+          # None of these may decide the exit code: they run to describe a
+          # failure that has already happened.
+          kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
+            get nodes -o wide > "${out}/nodes.txt" 2>&1 || true
+          kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
+            get pods -A -o wide > "${out}/pods.txt" 2>&1 || true
+          kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
+            get events -A --sort-by=.lastTimestamp > "${out}/events.txt" 2>&1 || true
+
+      - name: Upload the diagnostics of a failed lane
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-scale-diagnostics
+          path: bin/e2e-diagnostics-scale/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # The lane is a kind cluster on a hosted runner, which is thrown away
+      # after the job. It is torn down anyway: a down.sh that stops working is
+      # a bug a developer would otherwise only find on their own machine.
+      - name: Tear the lane down
+        if: always()
+        run: hack/mokka/down.sh "${MOKKA_LANE}" || true
