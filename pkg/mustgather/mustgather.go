@@ -483,11 +483,19 @@ func (g *Gatherer) gatherGPUNodes() error {
 	// twice makes a reader count GPU nodes wrong.
 	gpuNodes.Items = g.nodesWanted(dedupeNodes(gpuNodes.Items))
 
-	// If no GPU nodes were found, log and return an error.
 	if len(gpuNodes.Items) == 0 {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "No nodes found with NVIDIA PCI label\n"); lerr != nil {
 			_ = fmt.Errorf("error writing to stderr log file: %v", lerr)
 		}
+		// Narrowing to one node that is not a GPU node leaves this collector
+		// with nothing to collect, which is a fact about that node. The rest of
+		// the bundle is still what the user asked for, so the gather carries on
+		// and the manifest records why these four files are not in it.
+		if g.opts.Node != "" {
+			return skip("%s carries no NVIDIA PCI label", g.opts.Node)
+		}
+		// A whole cluster where nothing carries the label is a cluster this
+		// tool has nothing to report on, and saying so is the answer.
 		return fmt.Errorf("no nodes found with NVIDIA PCI label")
 	}
 
