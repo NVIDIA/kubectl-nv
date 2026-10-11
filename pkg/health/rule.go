@@ -36,6 +36,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
@@ -51,7 +52,7 @@ import (
 //	DRV   the driver            CTK   the container toolkit
 //	DP    the device plugin     DRA   dynamic resource allocation
 //	MIG   multi-instance GPU    DCGM  DCGM and the exporter
-//	CD    cluster policy and custom resources
+//	CD    ComputeDomain, the DRA driver's multi-node IMEX object
 //	UPG   driver upgrades       TOPO  fabric topology
 const CodePattern = `^NV-(NODE|OP|DRV|CTK|DP|DRA|MIG|DCGM|CD|UPG|TOPO)-[0-9]{3}$`
 
@@ -61,8 +62,17 @@ var codeRE = regexp.MustCompile(CodePattern)
 
 // Input is everything a rule may read. Rules are pure functions of it.
 type Input struct {
-	// Nodes are the GPU nodes: those with nvidia.com/gpu capacity or a
-	// gpu.nvidia.com ResourceSlice.
+	// Nodes are the GPU nodes, as pkg/source classifies them: those with
+	// nvidia.com/gpu capacity, those with capacity of any nvidia.com/mig-*
+	// profile, and those named by a gpu.nvidia.com ResourceSlice.
+	//
+	// health builds these with Conditions filled, unlike gpu list: NV-NODE-005
+	// reads the node conditions, so a rule may rely on them being there.
+	//
+	// Operands on each node are the GPU Operator's pods plus the NVIDIA DRA
+	// driver's kubelet-plugin and IMEX daemon pods running on that node. A
+	// rule matching on a component compares against one of the
+	// inventory.Component* constants.
 	Nodes []inventory.GPUNode
 	// Hinted are the label-only nodes, each with Hinted set. A node that
 	// carries a GPU hint label and advertises no GPUs is the most common
@@ -73,6 +83,15 @@ type Input struct {
 	// because the CRD is not vendored and its schema moves between operator
 	// versions.
 	ClusterPolicies []unstructured.Unstructured
+	// ComputeDomains are the NVIDIA DRA driver's ComputeDomain objects, which
+	// is what the NV-CD rules are about: a multi-node workload asks for one,
+	// and a ComputeDomain that never goes ready is a job that never starts.
+	// Unstructured for the same reason the cluster policies are.
+	ComputeDomains []unstructured.Unstructured
+	// ResourceSlices are the gpu.nvidia.com ResourceSlices, the DRA side of
+	// what a node advertises. GPUNode.ResourceSlices carries only their names
+	// per node; a rule that has to look inside one reads it here.
+	ResourceSlices []resourcev1.ResourceSlice
 	// OperatorVersion is the GPU Operator version, empty when unknown. A rule
 	// gates on it through Applies rather than reading it here, so that the
 	// gate is visible without running the rule.
@@ -102,8 +121,15 @@ type Rule interface {
 	// Applies reports whether the rule means anything against this GPU
 	// Operator version. A rule about a field that only exists from v25.3.0
 	// has to say so, or it reports a false finding on every older cluster.
-	// The empty version means unknown, and a rule decides for itself whether
-	// to run then.
+	//
+	// Implementations call VersionInRange rather than comparing strings: the
+	// components are compared numerically, so a gate written against v25.9.0
+	// keeps working at v25.10.0, which a lexical comparison does not.
+	//
+	// An empty or unreadable version means unknown, and VersionInRange answers
+	// true for it. A rule skipped on every cluster whose version has an
+	// unusual shape is a rule that reports clean for the wrong reason, which
+	// is the worse of the two failures.
 	Applies(operatorVersion string) bool
 	// Evaluate returns the findings, or nothing. It must not mutate in.
 	Evaluate(in Input) []output.Finding
@@ -113,7 +139,10 @@ type Rule interface {
 // rules register from their own files during package initialisation, and the
 // order those run in is not something a rule file can see.
 type Registry struct {
-	mu     sync.RWMutex
+	mu sync.RWMutex
+	// byCode is created on first use, so that a zero Registry works. A nil
+	// map reads fine and panics only on assignment, and that panic says
+	// nothing about rules.
 	byCode map[string]Rule
 }
 
@@ -127,13 +156,21 @@ func NewRegistry() *Registry {
 // Register adds a rule. It panics on a code that does not match CodePattern
 // and on a code that is already registered.
 //
-// Panicking is the point. Both mistakes are made once, at startup, by a
-// developer adding a rule, and both are silent at runtime: a duplicate code
+// It also panics when rule itself is nil, which is what a rule constructor
+// returning nil on an untested path produces: calling Code on it would panic
+// with a nil pointer dereference that names this file rather than theirs.
+//
+// Panicking is the point. All three mistakes are made once, at startup, by a
+// developer adding a rule, and all three are silent at runtime: a duplicate code
 // means one of the two rules never runs and the cluster is still reported
 // clean, and a malformed code means a finding nobody can suppress or grep for.
 // A run that reports clean because a rule was shadowed is worse than a run
 // that refused to start.
 func (r *Registry) Register(rule Rule) {
+	if rule == nil {
+		panic("health: Register was called with a nil rule")
+	}
+
 	code := rule.Code()
 	if !codeRE.MatchString(code) {
 		panic(fmt.Sprintf("health: rule code %q does not match %s", code, CodePattern))
@@ -141,6 +178,10 @@ func (r *Registry) Register(rule Rule) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	if r.byCode == nil {
+		r.byCode = map[string]Rule{}
+	}
 
 	if _, exists := r.byCode[code]; exists {
 		panic(fmt.Sprintf("health: rule code %q is registered twice", code))
@@ -170,6 +211,11 @@ func (r *Registry) Rules() []Rule {
 // defaultRegistry is the registry the package level Register and Rules reach.
 // Rule files across the package register into it from their own files, which
 // is the one thing a per-call registry cannot do.
+//
+// It is a variable rather than a constant expression so that a test can swap
+// in a fresh one and put it back: a test that registers into the real registry
+// leaves its rule there for the rest of the binary, and the second run of that
+// test panics on the duplicate code.
 var defaultRegistry = NewRegistry()
 
 // Register adds a rule to the default registry, panicking on a malformed or
