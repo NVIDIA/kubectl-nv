@@ -23,8 +23,6 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/cli-runtime/pkg/printers"
-
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 )
 
@@ -37,8 +35,7 @@ const none = "<none>"
 // forty fields is not a row, and rendering it as one would put the interesting
 // half off the right of the terminal.
 func describe(w io.Writer, n *inventory.GPUNode) error {
-	tw := printers.GetNewTabWriter(w)
-	p := &printer{w: tw}
+	p := &printer{w: w}
 
 	p.kv("Name", n.Name)
 	p.kv("Hinted", strconv.FormatBool(n.Hinted))
@@ -94,10 +91,6 @@ func describe(w io.Writer, n *inventory.GPUNode) error {
 
 	if p.err != nil {
 		return fmt.Errorf("writing the node description: %w", p.err)
-	}
-
-	if err := tw.Flush(); err != nil {
-		return fmt.Errorf("flushing the node description: %w", err)
 	}
 
 	return nil
@@ -187,6 +180,13 @@ func initResult(r *inventory.InitResult) string {
 	return r.Name + ": " + outcome
 }
 
+// keyWidth is how wide the key column is. A fixed width rather than a tab
+// writer's computed one: the widest line in a description is an operand's
+// image, sixty characters of it, and aligning the whole block to that puts
+// every value half a terminal away from the key it belongs to. A key longer
+// than this pushes its own value one space right and leaves the rest alone.
+const keyWidth = 20
+
 // printer writes lines and keeps the first write error, so that the caller
 // checks once rather than after every line.
 type printer struct {
@@ -194,20 +194,20 @@ type printer struct {
 	err error
 }
 
-// kv writes a key and its value, tab separated for the tab writer to align.
+// kv writes a key and its value in the key column.
 func (p *printer) kv(key, value string) {
-	p.write(key + ":\t" + value + "\n")
+	p.write(fmt.Sprintf("%-*s %s\n", keyWidth, key+":", value))
 }
 
 // section starts a group, as kubectl describe does: a heading whose value is
 // the indented lines under it.
 func (p *printer) section(name string) {
-	p.write(name + ":\t\n")
+	p.write(name + ":\n")
 }
 
 // line writes a line that is not a key and value pair.
 func (p *printer) line(text string) {
-	p.write(text + "\t\n")
+	p.write(text + "\n")
 }
 
 // mapSection writes a map of labels, sorted, or <none>.
