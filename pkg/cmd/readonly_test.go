@@ -95,6 +95,9 @@ var leafFixtures = map[string]leafFixture{
 		// hinted node rather than refusing.
 		args: func(*testing.T) []string { return []string{"gpu-node-1"} },
 	},
+	"topology": {
+		args: func(*testing.T) []string { return nil },
+	},
 	"explain": {
 		args: func(*testing.T) []string { return []string{"NV-NODE-002"} },
 	},
