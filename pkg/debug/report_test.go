@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/debug"
+	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
@@ -180,5 +181,137 @@ func TestSummariseBundleWithoutAManifest(t *testing.T) {
 	if got.Skipped == nil || got.Errored == nil {
 		t.Errorf("skipped = %#v and errored = %#v, want both empty rather than nil",
 			got.Skipped, got.Errored)
+	}
+}
+
+// TestSummariseBundleCountsOnlyTheOKStatusAsOK covers the status nobody
+// planned for. A collector status this package has never seen is not a
+// success: counting an unrecognised one as ok would turn a gatherer that grew
+// a new outcome into a bundle that reports itself complete, which is the one
+// claim a reader cannot check without unpacking it.
+func TestSummariseBundleCountsOnlyTheOKStatusAsOK(t *testing.T) {
+	t.Parallel()
+
+	m := manifestWith(
+		[2]string{"nodes", mustgather.StatusOK},
+		[2]string{"gpu-nodes", "okay"},
+		[2]string{"daemonsets", "OK"},
+		[2]string{"pod-logs", ""},
+		[2]string{"bug-report", "deferred:waiting for the driver"},
+	)
+
+	got := debug.SummariseBundle("/tmp/bundle", m)
+
+	if got.Collectors.OK != 1 {
+		t.Errorf("ok = %d, want 1: only the exact %q status is a success",
+			got.Collectors.OK, mustgather.StatusOK)
+	}
+	if got.Collectors.Error != 4 {
+		t.Errorf("error = %d, want 4: every status this package does not know is reported, not hidden",
+			got.Collectors.Error)
+	}
+
+	// The unrecognised status is carried whole, so that a reader can see what
+	// it actually said rather than a classification of it.
+	want := []debug.CollectorOutcome{
+		{Name: "gpu-nodes", Reason: "okay"},
+		{Name: "daemonsets", Reason: "OK"},
+		{Name: "pod-logs", Reason: ""},
+		{Name: "bug-report", Reason: "deferred:waiting for the driver"},
+	}
+	if !reflect.DeepEqual(got.Errored, want) {
+		t.Errorf("errored =\n%#v\nwant\n%#v", got.Errored, want)
+	}
+}
+
+// TestReportDeepCopyIsIndependent covers what runtime.Object asks of this
+// type. The printers copy before they print, and a copy sharing its slices
+// with the original is a copy a caller can change under the printer.
+func TestReportDeepCopyIsIndependent(t *testing.T) {
+	t.Parallel()
+
+	r := debug.NewReport("worker-1")
+	r.Bundle.Skipped = []debug.CollectorOutcome{{Name: "bug-report", Reason: "--no-exec"}}
+	r.Bundle.Errored = []debug.CollectorOutcome{{Name: "daemonsets", Reason: "bad day"}}
+	r.Status.Unreachable = []output.Unreachable{{Resource: "resourceslices", Reason: "forbidden"}}
+	r.Status.Findings = []output.Finding{{Code: "NV-NODE-001"}}
+	r.Node.Operands = []inventory.OperandPod{{Name: "dp-xyz", Component: "nvidia-device-plugin-daemonset"}}
+
+	copied, ok := r.DeepCopyObject().(*debug.Report)
+	if !ok {
+		t.Fatalf("DeepCopyObject returned %T, want *debug.Report", r.DeepCopyObject())
+	}
+
+	r.Bundle.Skipped[0].Name = "changed"
+	r.Bundle.Errored[0].Name = "changed"
+	r.Status.Unreachable[0].Resource = "changed"
+	r.Status.Findings[0].Code = "changed"
+	r.Node.Operands[0].Name = "changed"
+	r.Name = "changed"
+
+	for what, got := range map[string]string{
+		"bundle.skipped[0].name":     copied.Bundle.Skipped[0].Name,
+		"bundle.errored[0].name":     copied.Bundle.Errored[0].Name,
+		"status.unreachable[0].name": copied.Status.Unreachable[0].Resource,
+		"status.findings[0].code":    copied.Status.Findings[0].Code,
+		"node.operands[0].name":      copied.Node.Operands[0].Name,
+		"metadata.name":              copied.Name,
+	} {
+		if got == "changed" {
+			t.Errorf("%s followed the original, so the copy shares its memory", what)
+		}
+	}
+
+	if copied.Bundle.Skipped[0].Name != "bug-report" {
+		t.Errorf("the copy's skipped collector is %q, want bug-report", copied.Bundle.Skipped[0].Name)
+	}
+	if copied.Name != "worker-1" {
+		t.Errorf("the copy's name is %q, want worker-1", copied.Name)
+	}
+
+	// A nil receiver is what a printer handed an absent object would copy.
+	var absent *debug.Report
+	if absent.DeepCopy() != nil {
+		t.Error("DeepCopy of a nil report returned something")
+	}
+}
+
+// TestNewReportCarriesAStampedNode covers the one field of the report that is
+// itself a kind. A node left as a zero value would print with no apiVersion
+// and no kind inside a document that has both, and a consumer reading the
+// nested object would not know what it is holding.
+func TestNewReportCarriesAStampedNode(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(debug.NewReport("worker-1"))
+	if err != nil {
+		t.Fatalf("marshalling the report: %v", err)
+	}
+
+	var got struct {
+		Node struct {
+			APIVersion string `json:"apiVersion"`
+			Kind       string `json:"kind"`
+			Metadata   struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Operands []any `json:"operands"`
+		} `json:"node"`
+	}
+	if uerr := json.Unmarshal(raw, &got); uerr != nil {
+		t.Fatalf("the report does not parse: %v\n%s", uerr, raw)
+	}
+
+	if got.Node.Kind != output.KindGPUNode {
+		t.Errorf("node.kind = %q, want %q", got.Node.Kind, output.KindGPUNode)
+	}
+	if got.Node.APIVersion != output.APIVersion {
+		t.Errorf("node.apiVersion = %q, want %q", got.Node.APIVersion, output.APIVersion)
+	}
+	if got.Node.Metadata.Name != "worker-1" {
+		t.Errorf("node.metadata.name = %q, want worker-1", got.Node.Metadata.Name)
+	}
+	if got.Node.Operands == nil {
+		t.Error("node.operands is null, want an empty array")
 	}
 }

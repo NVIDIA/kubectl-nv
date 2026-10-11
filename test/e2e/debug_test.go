@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -194,6 +195,17 @@ func TestDebugAgainstTheLane(t *testing.T) {
 		if report.Node.Kind != fromInfo.Kind {
 			t.Errorf("debug stamps the node as %q, info stamps it as %q", report.Node.Kind, fromInfo.Kind)
 		}
+		if report.Node.MIG.Strategy != fromInfo.MIG.Strategy {
+			t.Errorf("debug reports the MIG strategy %q, info reports %q",
+				report.Node.MIG.Strategy, fromInfo.MIG.Strategy)
+		}
+
+		// The conditions are compared as a set of type and status pairs: the
+		// node's own conditions do not move while the lane is idle, and a
+		// report that filled them from somewhere else would not match.
+		if got, want := conditionPairs(report.Node), conditionPairs(fromInfo); !reflect.DeepEqual(got, want) {
+			t.Errorf("debug reports the conditions %v, info reports %v", got, want)
+		}
 		// kubectl nv info fills the conditions; so must debug, or it built the
 		// node without WithDetails and the report is thinner than it claims.
 		if len(report.Node.Conditions) == 0 {
@@ -233,14 +245,19 @@ func TestDebugAgainstTheLane(t *testing.T) {
 		if len(lines) > 30 {
 			t.Errorf("the summary is %d lines, want at most 30:\n%s", len(lines), res.stdout)
 		}
+		// Compared whole, not as substrings: on this lane
+		// kubectl-nv-mokka-worker is a prefix of kubectl-nv-mokka-worker2, so
+		// a substring check passes against the other node's command.
 		for _, want := range []string{
-			worker,
-			"kubectl nv health --node " + worker,
-			"kubectl nv health --from-bundle " + dir,
+			"  kubectl nv health --node " + worker,
+			"  kubectl nv health --from-bundle " + dir,
 		} {
-			if !strings.Contains(res.stdout, want) {
-				t.Errorf("the summary does not mention %q:\n%s", want, res.stdout)
+			if !containsLine(lines, want) {
+				t.Errorf("the summary has no line %q:\n%s", want, res.stdout)
 			}
+		}
+		if !containsLine(lines, "Node:            "+worker) {
+			t.Errorf("the summary does not name %s on its first line:\n%s", worker, res.stdout)
 		}
 	})
 }
@@ -257,5 +274,96 @@ func TestDebugOnANodeWithoutGPUs(t *testing.T) {
 	want := "node there-is-no-such-node has no GPUs and no GPU labels"
 	if !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr does not say %q:\n%s", want, res.stderr)
+	}
+}
+
+// containsLine reports whether lines holds want, compared whole.
+func containsLine(lines []string, want string) bool {
+	for _, line := range lines {
+		if line == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+// conditionPairs reduces a node's conditions to the type and status pairs two
+// readers of the same node must agree on, sorted so that the comparison does
+// not depend on the order the API server listed them in.
+func conditionPairs(node infoNodeJSON) []string {
+	out := make([]string, 0, len(node.Conditions))
+	for _, c := range node.Conditions {
+		out = append(out, c.Type+"="+c.Status)
+	}
+	sort.Strings(out)
+
+	return out
+}
+
+// TestDebugOnTheControlPlane covers the node a support engineer most often
+// asks about: a real node that carries an NVIDIA label and advertises no GPUs.
+// That it claims GPUs and has none is the answer, so it is gathered and
+// described rather than refused, and the run is a success.
+//
+// The lane always has one. The simulated-GPU DaemonSet tolerates every taint,
+// so node-feature-discovery labels the control plane too.
+func TestDebugOnTheControlPlane(t *testing.T) {
+	waitForStartedPods(t)
+
+	var controlPlane string
+	for _, node := range clusterNodes(t) {
+		if _, found := node.Labels[controlPlaneRoleLabel]; found {
+			controlPlane = node.Name
+
+			break
+		}
+	}
+	if controlPlane == "" {
+		t.Fatal("the lane has no control plane node, which it always has")
+	}
+
+	report, dir := debugInto(t, 0, controlPlane)
+
+	if report.Metadata.Name != controlPlane {
+		t.Errorf("metadata.name = %q, want %q", report.Metadata.Name, controlPlane)
+	}
+	if !report.Node.Hinted {
+		t.Error("the control plane is not reported as hinted, but it advertises no GPUs")
+	}
+	if report.Node.Capacity != 0 {
+		t.Errorf("capacity = %d, want 0 on the control plane", report.Node.Capacity)
+	}
+
+	// A bundle was still written, and it is the control plane's: that is what
+	// the user asked for and what they would send to support.
+	if report.Bundle.Directory != dir {
+		t.Errorf("bundle.directory = %q, want %q", report.Bundle.Directory, dir)
+	}
+	if want := filepath.Join(dir, "manifest.json"); report.Bundle.Manifest != want {
+		t.Errorf("bundle.manifest = %q, want %q", report.Bundle.Manifest, want)
+	}
+
+	var m struct {
+		Flags struct {
+			Node string `json:"node"`
+		} `json:"flags"`
+	}
+	data, rerr := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if rerr != nil {
+		t.Fatalf("reading manifest.json: %v", rerr)
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("manifest.json does not parse: %v\n%s", err, data)
+	}
+	if m.Flags.Node != controlPlane {
+		t.Errorf("manifest flags.node = %q, want %q", m.Flags.Node, controlPlane)
+	}
+
+	// No driver pod runs on the control plane, so there can be no bug report
+	// for it, and that absence has to be a skipped collector with a reason
+	// rather than a file nobody can account for.
+	if got := bugReportNames(t, dir); len(got) != 0 {
+		t.Errorf("the bundle holds %v for a node with no driver pod", got)
 	}
 }
