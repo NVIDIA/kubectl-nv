@@ -1,0 +1,39 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# The nvml-mock values this lane installs, everything except the topology
+# document itself, which names the kind workers and is therefore rendered by
+# up.sh from the cluster name.
+#
+# These go in through helm --values and never through --set: topology.enabled
+# and nri.enabled only mean anything together (the node agent stages the
+# document, the NRI plugin is what carries it and NODE_NAME into a container),
+# and a pair of switches that have to agree is not something a reader can
+# check on a command line.
+#
+# gb200 and not gb300: gb200 is the profile the ComputeDomain demo uses, and it
+# is the one whose fabric block the topology overlay rewrites
+# (profiles/gb200.yaml at k8s-test-infra v0.4.0 carries device_defaults.fabric;
+# a profile without one is skipped by applyTopologyOverlay). Four GPUs per
+# node, so a clique of two nodes has eight.
+gpu:
+  profile: gb200
+
+# Stage the cluster topology document on every node. Without this the mock
+# reports the profile's placeholder cluster UUID and clique 0 on every worker,
+# and the lane would have one clique rather than two.
+topology:
+  enabled: true
+
+# Carry the staged overlay, NODE_NAME and MOCK_TOPOLOGY_CONFIG into containers
+# node wide. The mock NVML engine's applyTopologyOverlay is a no-op without
+# NODE_NAME (engine/config.go at v0.4.0), and the CDI spec the node agent
+# writes carries neither (internal/agent/cdi/spec.go), so NRI is the only path
+# by which a GPU Feature Discovery pod can see which clique its node is in.
+nri:
+  enabled: true
+
+# imex.mockChannels is deliberately left off. It stages the IMEX capability
+# surface the NVIDIA DRA driver's compute-domain plugin reads, and this lane
+# runs no DRA driver and no ComputeDomain controller. Turning it on would mknod
+# a channel device per channel on every node for coverage nothing here asserts.

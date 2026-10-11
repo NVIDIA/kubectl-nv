@@ -1,0 +1,93 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind topology for the compute domain lane: one control plane and four
+# workers, which is what lets the lane hold two cliques of two nodes and a job
+# that needs three nodes and therefore fits in neither.
+#
+# The containerd patches enable CDI and NRI. CDI is what the GPU Operator
+# values overlay drives; NRI is what carries the per node fabric identity into
+# containers, so that the mock NVML library a GPU Feature Discovery pod loads
+# answers nvmlDeviceGetGpuFabricInfo with this node's clique rather than with
+# the gb200 profile's placeholder. Both have to be set before the node starts,
+# which is why they live here and not in a chart value. The CDI block is kept
+# even though the pinned node image already enables it: a node image bump that
+# dropped it would otherwise turn the whole lane red for an unrelated reason.
+# Copied from tests/e2e/kind-compute-domain-config.yaml in
+# NVIDIA/k8s-test-infra at tag v0.4.0.
+#
+# Every worker carries its topology labels statically. Three reasons:
+#
+#   1. The lane must not depend on GPU Feature Discovery resolving the fabric.
+#      If it does, it writes nvidia.com/gpu.clique with exactly the value
+#      below, because the chart's topology document declares the same cliques.
+#      If it does not, the label is still there.
+#   2. The Topograph keys have no writer on this lane. Topograph v1.0.0 reads
+#      an accelerator domain from a node label through the k8s engine's
+#      acceleratorDomainSourceLabel, but its fabric tiers come from a provider,
+#      and no v1.0.0 provider can discover a fabric on kind: infiniband-k8s
+#      walks the fabric by running ibnetdiscover in a node-data-broker pod
+#      (pkg/providers/infiniband/k8s.go) and Mokka simulates no InfiniBand
+#      switch (docs/index.md at v0.4.0). So the tier labels are fixtures, and a
+#      fixture belongs with the node it describes.
+#   3. The kubelet may set them. NodeRestriction limits a kubelet to an
+#      allowlist only within kubernetes.io and k8s.io; these keys are in
+#      third party domains. Mokka's own developer cluster does the same thing,
+#      at local/kind/compute-domain.kind.yaml in k8s-test-infra v0.4.0.
+#
+# The hierarchy the labels describe, narrowest first:
+#
+#   clique      ab.0 = worker, worker2      ab.1 = worker3, worker4
+#   sub-domain  nvl-partition-0 = the same two    nvl-partition-1 = the other two
+#   domain      nvl-domain-0 = all four
+#   tier-0      ib-leaf-0 = worker, worker2  ib-leaf-1 = worker3, worker4
+#   tier-1      ib-spine-0 = all four
+#
+# A domain that spans both cliques is what makes the walk observable: a job
+# needing three of the four nodes fits at the domain and nowhere narrower, so
+# an implementation that reported the first level wider than the clique would
+# answer sub-domain and be caught.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri"]
+      enable_cdi = true
+    [plugins."io.containerd.nri.v1.nri"]
+      disable = false
+      disable_connections = false
+      socket_path = "/var/run/nri/nri.sock"
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.0"
+      accelerator.topograph.run/sub-domain: nvl-partition-0
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-0
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.0"
+      accelerator.topograph.run/sub-domain: nvl-partition-0
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-0
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.1"
+      accelerator.topograph.run/sub-domain: nvl-partition-1
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-1
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.1"
+      accelerator.topograph.run/sub-domain: nvl-partition-1
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-1
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu

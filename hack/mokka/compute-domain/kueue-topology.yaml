@@ -1,0 +1,38 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# The Kueue topology aware scheduling objects the lane declares, so that
+# kubectl nv topology has Kueue levels to read.
+#
+# v1beta2 and not v1beta1: the pinned release serves both, v1beta2 is the
+# storage version, and v1beta1 is served with a deprecation warning. Reading
+# both is covered by unit tests; the lane exercises what a current cluster
+# actually stores.
+#
+# Both levels are already in the command's own walk: nvidia.com/gpu.clique is
+# its clique level and kubernetes.io/hostname is the node level. That is on
+# purpose. It is the case a report can get wrong by walking a level twice, and
+# it is what the suite asserts is reported as an alias instead.
+#
+# kubernetes.io/hostname is last because Kueue requires it: the CRD carries a
+# CEL rule that a levels list containing it must end with it.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: Topology
+metadata:
+  name: kubectl-nv-compute-domain
+spec:
+  levels:
+    - nodeLabel: nvidia.com/gpu.clique
+    - nodeLabel: kubernetes.io/hostname
+---
+# nodeLabels is not optional here: the CRD rejects a ResourceFlavor that names
+# a topology and selects no nodes. mokka.nvidia.com/type=sgpu is the marker the
+# kind config puts on every worker and on no control plane.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: kubectl-nv-compute-domain
+spec:
+  nodeLabels:
+    mokka.nvidia.com/type: sgpu
+  topologyName: kubectl-nv-compute-domain
