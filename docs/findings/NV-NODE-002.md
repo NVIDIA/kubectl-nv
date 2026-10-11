@@ -27,9 +27,9 @@ to run. Three questions decide it, in this order:
 
 1. Did the operator say not to? Every `nvidia.com/gpu.deploy.*` label
    false or paused means the operator was told to leave the node alone.
-2. Is an operand already running there? That settles it, whatever the
+1. Is an operand already running there? That settles it, whatever the
    taints say.
-3. Would every operand be blocked? A `NoSchedule` or `NoExecute` taint
+1. Would every operand be blocked? A `NoSchedule` or `NoExecute` taint
    that no operand toleration matches keeps all of them off.
 
 A node running MIG in the mixed strategy is excluded too. It advertises

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package findings_test
+package rules_test
 
 import (
 	"path"
@@ -26,6 +26,10 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/health/rules"
 )
 
+// These tests live beside the rules rather than beside the catalog on purpose.
+// make test runs ./cmd/... and ./pkg/... and nothing under docs/, so a
+// completeness test in docs/findings would be a gate nobody ever saw go red.
+//
 // The catalog and the rule set have to be the same set, in both directions.
 //
 // A rule with no entry hands the user a code, a link to a file that is not

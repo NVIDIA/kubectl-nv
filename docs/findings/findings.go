@@ -25,8 +25,12 @@
 // The files are the documentation as well as the data. They are rendered on
 // the repository's website and linted by `make mdlint`, and the engine fills
 // every finding's Docs with health.CatalogPath, which names the same path.
-// findings_test.go holds those three statements together: every rule has an
-// entry, every entry has a rule, and CatalogPath names the embedded file.
+//
+// Three statements hold that together: every rule has an entry, every entry
+// has a rule, and CatalogPath names the embedded file. They are tested in
+// pkg/health/rules/catalog_test.go rather than here, because `make test` runs
+// ./cmd/... and ./pkg/... and nothing under docs/, so a test in this directory
+// would be a gate nobody ever saw go red.
 package findings
 
 import (

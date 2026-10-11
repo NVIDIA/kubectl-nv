@@ -17,7 +17,6 @@
 package rules_test
 
 import (
-	"sort"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -183,19 +182,6 @@ func clusterPolicy(name, state string) unstructured.Unstructured {
 // table case is one line rather than four.
 func evaluate(rule health.Rule, in health.Input) []output.Finding {
 	return rule.Evaluate(in)
-}
-
-// nodesFor reduces findings to the nodes they name, sorted, which is what most
-// of the rule assertions are actually about.
-func nodesFor(findings []output.Finding) []string {
-	out := make([]string, 0, len(findings))
-	for _, f := range findings {
-		out = append(out, f.Node)
-	}
-
-	sort.Strings(out)
-
-	return out
 }
 
 // only returns the single finding, failing the test when there is not exactly
