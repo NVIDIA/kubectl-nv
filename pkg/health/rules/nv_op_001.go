@@ -26,11 +26,6 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// clusterPolicyReady is the status.state value that means the operator has
-// everything it was asked for running. Anything else, an empty state
-// included, is a policy that has not got there.
-const clusterPolicyReady = "ready"
-
 // OperatorClusterPolicyNotReady is NV-OP-001: a ClusterPolicy whose
 // status.state is not ready.
 //
@@ -39,6 +34,13 @@ const clusterPolicyReady = "ready"
 // that is not ready explains most of the node findings underneath it, which is
 // why the finding is cluster scoped and survives a --node filter: a node
 // reported clean while the policy it depends on is broken is a false clean.
+//
+// One shape is reported at warning instead. The operator reconciles a single
+// ClusterPolicy and marks every other one ignored, and it does that in memory:
+// the ignored objects never get a status at all. So a statusless policy beside
+// a ready one is a duplicate somebody left in the cluster rather than an
+// operator that failed, and reporting it at error would fail a run over a
+// cluster that is working perfectly.
 type OperatorClusterPolicyNotReady struct{ versionRange }
 
 // NewOperatorClusterPolicyNotReady returns the rule. Both version bounds are
@@ -51,7 +53,8 @@ func NewOperatorClusterPolicyNotReady() *OperatorClusterPolicyNotReady {
 // Code implements health.Rule.
 func (r *OperatorClusterPolicyNotReady) Code() string { return "NV-OP-001" }
 
-// Severity implements health.Rule.
+// Severity implements health.Rule. It is the severity of the finding this rule
+// is about; the ignored-duplicate case reports at warning, as Rule allows.
 func (r *OperatorClusterPolicyNotReady) Severity() output.Severity { return output.SeverityError }
 
 // Evaluate implements health.Rule.
@@ -62,8 +65,11 @@ func (r *OperatorClusterPolicyNotReady) Severity() output.Severity { return outp
 func (r *OperatorClusterPolicyNotReady) Evaluate(in health.Input) []output.Finding {
 	var findings []output.Finding
 
+	reconciling := reconciledPolicyName(in.ClusterPolicies)
+
 	for i := range in.ClusterPolicies {
 		policy := in.ClusterPolicies[i]
+		name := policy.GetName()
 
 		state := clusterPolicyState(policy)
 		// Matched without regard to case: the state is a free-form string the
@@ -73,7 +79,26 @@ func (r *OperatorClusterPolicyNotReady) Evaluate(in health.Input) []output.Findi
 			continue
 		}
 
-		evidence := map[string]string{"name": policy.GetName()}
+		if state == "" && reconciling != "" && reconciling != name {
+			findings = append(findings, output.Finding{
+				Code: r.Code(),
+				// A working cluster must not fail a run over an object that
+				// decides nothing.
+				Severity:  output.SeverityWarning,
+				Component: inventory.ComponentOperator,
+				Message:   "the ClusterPolicy is ignored: the operator is reconciling another one",
+				Evidence: map[string]string{
+					"name":          name,
+					"reconciling":   reconciling,
+					"ignoredPolicy": btoa(true),
+				},
+				Next: describePolicyCommand(name),
+			})
+
+			continue
+		}
+
+		evidence := map[string]string{"name": name}
 		// Absent rather than empty: a policy the operator has not reconciled
 		// has no status at all, and the encodings leave an absent value's key
 		// out rather than writing "".
@@ -85,22 +110,29 @@ func (r *OperatorClusterPolicyNotReady) Evaluate(in health.Input) []output.Findi
 			Component: inventory.ComponentOperator,
 			Message:   "the ClusterPolicy is not ready",
 			Evidence:  evidence,
-			Next:      "kubectl describe clusterpolicy " + policy.GetName(),
+			Next:      describePolicyCommand(name),
 		})
 	}
 
 	return findings
 }
 
-// clusterPolicyState reads status.state, returning an empty string when the
-// field is absent or is not a string. The CRD is not vendored and its schema
-// moves between operator versions, so a field of an unexpected type is
-// something this rule has to survive rather than something it can rule out.
-func clusterPolicyState(policy unstructured.Unstructured) string {
-	state, found, err := unstructured.NestedString(policy.Object, "status", "state")
-	if err != nil || !found {
-		return ""
+// reconciledPolicyName is the name of the ready ClusterPolicy, or an empty
+// string when none of them is ready. It is what tells an abandoned duplicate
+// from the only policy on a cluster whose operator never got anywhere: with
+// nothing ready, a statusless policy is the latter and is this rule's error.
+func reconciledPolicyName(policies []unstructured.Unstructured) string {
+	for i := range policies {
+		if strings.EqualFold(clusterPolicyState(policies[i]), clusterPolicyReady) {
+			return policies[i].GetName()
+		}
 	}
 
-	return state
+	return ""
+}
+
+// describePolicyCommand is the next command for a ClusterPolicy finding.
+// ClusterPolicy is cluster scoped, so the command carries no namespace.
+func describePolicyCommand(name string) string {
+	return "kubectl describe clusterpolicy " + name
 }

@@ -1,4 +1,4 @@
-# NV-NODE-001: an NVIDIA PCI device with no GPU labels
+# NV-NODE-001: the GPU Operator is not reconciling this node
 
 Severity: warning. Component: `node`.
 
@@ -6,19 +6,26 @@ Severity: warning. Component: `node`.
 
 Node feature discovery found a PCI device with NVIDIA's vendor id on the
 node and wrote `feature.node.kubernetes.io/pci-10de.present=true`, but
-`nvidia.com/gpu.present` is absent. That second label is written by GPU
-feature discovery, which is a GPU Operator operand, so its absence means
-the operator has not reached this node: the hardware is there and
-nothing has claimed it.
+`nvidia.com/gpu.present` is absent.
 
-The usual causes are a GPU feature discovery pod that never started on
-the node, a node selector or taint that keeps the operand off it, and an
-operator installed into a namespace that does not cover the node.
+That second label is written, and retracted, by the GPU Operator's own
+ClusterPolicy controller as it decides which nodes it manages. So its
+absence is a statement about the operator rather than about feature
+discovery: the hardware is there and the operator has not claimed it.
 
-The rule only looks at nodes the GPU Operator is expected to run on. A
-node whose every `nvidia.com/gpu.deploy.*` label is false, or that
-carries a taint no operand DaemonSet tolerates, is left alone: see
-NV-NODE-002 for why that exclusion exists.
+The usual causes are a node selector in the ClusterPolicy that does not
+cover the node, a taint the operands do not tolerate, and an operator
+that has not finished its first reconcile.
+
+The rule only fires where the operator is installed. On a cluster with
+no operator nobody was ever going to write the label, so its absence
+says nothing at all, and a node with four working GPUs and a device
+plugin installed by hand would otherwise be reported as broken.
+
+The rule also only looks at nodes the GPU Operator is expected to run
+on. A node whose every `nvidia.com/gpu.deploy.*` label is false, or that
+carries a taint no operand DaemonSet tolerates and runs no deploy-gated
+operand, is left alone: see NV-NODE-002 for why that exclusion exists.
 
 ## Evidence
 
@@ -44,14 +51,20 @@ kubectl nv info <node>
 
 ## Reproduction
 
-On a Mokka lane, remove the label GPU feature discovery wrote from one
-worker. The PCI label stays, because node feature discovery wrote that
-one.
+On a Mokka lane, remove the label the operator wrote from one worker.
+The PCI label stays, because node feature discovery wrote that one and
+node feature discovery is not an operand.
+
+Stop the operator first, or it writes the label straight back.
 
 ```shell
+kubectl -n gpu-operator scale deploy/gpu-operator --replicas=0
 kubectl label node <worker> nvidia.com/gpu.present-
 kubectl nv health --node <worker>
 ```
 
-GPU feature discovery rewrites the label on its next pass, so the
-finding clears on its own.
+Recover by scaling the deployment back to 1 and waiting for the label to
+return. Whether anything else restores it in the meantime is not
+recorded here: E3 runs the injection against a live lane and writes down
+what it observes, in
+`hack/mokka/faults/nv-node-001.sh inject|recover <node>`.

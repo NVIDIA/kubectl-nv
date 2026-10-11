@@ -4,40 +4,43 @@ Severity: warning. Component: `nvidia-dcgm-exporter`.
 
 ## Symptom
 
-A GPU node whose `nvidia.com/gpu.deploy.dcgm-exporter` label says the
-exporter belongs there has no dcgm-exporter pod, or has one that is not
-ready. The node still runs GPU work; it runs it unobserved, so nothing
-is collecting utilisation, temperature or error counters from it, and a
-Prometheus target is quietly empty.
+A GPU node whose ClusterPolicy enables dcgm-exporter has no
+dcgm-exporter pod, or has one that is not ready. The node still runs GPU
+work; it runs it unobserved, so nothing is collecting utilisation,
+temperature or error counters from it, and a Prometheus target is
+quietly empty.
 
 A warning rather than an error for that reason: the workloads are fine
 and the view of them is not.
 
-### Why this rule needs the label and NV-DP-001 does not
+### Where "should run" comes from
 
-dcgm-exporter is optional. Plenty of installs switch it off in the chart
-values, and this repository's own Mokka lane switches off the standalone
-host engine, the container toolkit, the mig-manager and the node status
-exporter exactly that way. So the rule waits for the node's own deploy
-label to say the operand belongs there before its absence is worth
-reporting. The device plugin needs no such evidence, because it is what
-makes a GPU node a GPU node.
+Not from the deploy label. The operator writes
+`nvidia.com/gpu.deploy.dcgm-exporter=true` on every node carrying the
+NVIDIA PCI label whatever the ClusterPolicy enables, so the label says
+only that the operator saw the node.
 
-The cost of the stricter test is stated plainly: on a cluster whose
-operator writes no deploy label for an exporter it does run, a dead
-exporter goes unreported here. The alternative is a warning on every
-cluster that chose not to run one, and a check that fires on a healthy
-cluster is a check nobody reads.
+dcgm-exporter is optional, and plenty of installs switch it off in their
+chart values: this repository's own Mokka lane switches off the
+standalone host engine, the container toolkit, the mig-manager and the
+node status exporter exactly that way. Reading the label as consent
+would warn on every node of every one of those clusters.
 
-The rule also stays quiet when the GPU Operator is not installed, when
-the label is false or paused, and on hinted nodes, which advertise no
-GPUs to collect metrics about.
+So the rule asks both questions, and they are different ones.
+`spec.dcgmExporter.enabled` in the ClusterPolicy says the cluster asked
+for an exporter at all; the node's deploy label says whether the
+operator is currently running it there, which is how a node parked
+mid-upgrade stays quiet. A missing `enabled` field means enabled, which
+is the CRD's own default.
+
+The rule also stays quiet when the GPU Operator is not installed and on
+hinted nodes, which advertise no GPUs to collect metrics about.
 
 ## Evidence
 
 | Key | Meaning |
 |---|---|
-| `nvidia.com/gpu.deploy.dcgm-exporter` | what the operator was told to do with the operand |
+| `nvidia.com/gpu.deploy.dcgm-exporter` | whether the operator is currently running the operand on this node, absent when the node carries no such label |
 | `operands` | the operand components running on the node, sorted and comma joined, absent when there are none |
 | `pod` | the exporter pod's name, absent when there is no pod |
 | `phase` | its pod phase |

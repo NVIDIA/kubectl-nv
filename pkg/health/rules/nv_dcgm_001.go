@@ -59,15 +59,14 @@ func (r *DCGMExporterNotReady) Severity() output.Severity { return output.Severi
 
 // Evaluate implements health.Rule.
 func (r *DCGMExporterNotReady) Evaluate(in health.Input) []output.Finding {
-	if !in.OperatorInstalled {
+	if !in.OperatorInstalled || !OperandEnabledInPolicy(in, PolicyFieldDCGMExporter) {
 		return nil
 	}
 
 	var findings []output.Finding
 
 	for _, node := range in.Nodes {
-		value, labelled := node.Deploy[deployKeyDCGMExporter]
-		if !labelled || DeployDisabled(value) {
+		if operandDisabledOn(node, deployKeyDCGMExporter) {
 			continue
 		}
 
@@ -78,7 +77,7 @@ func (r *DCGMExporterNotReady) Evaluate(in health.Input) []output.Finding {
 
 		message := "the dcgm-exporter pod on the node is not ready"
 		if !found {
-			message = "the node runs no dcgm-exporter pod and the operator says it should"
+			message = "the node runs no dcgm-exporter pod and the ClusterPolicy enables it"
 		}
 
 		findings = append(findings, output.Finding{

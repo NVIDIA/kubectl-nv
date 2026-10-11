@@ -22,15 +22,21 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// NodePCIWithoutGPULabel is NV-NODE-001: node feature discovery found an
-// NVIDIA PCI device on the node and GPU feature discovery never labelled it.
+// NodePCIWithoutGPULabel is NV-NODE-001: the GPU Operator is not reconciling a
+// node that has an NVIDIA PCI device.
 //
 // The two labels come from different places, which is what makes the pair
 // meaningful. feature.node.kubernetes.io/pci-10de.present is written by node
-// feature discovery, which is not a GPU Operator operand and runs on any node;
-// nvidia.com/gpu.present is written by GPU feature discovery, which is one. So
-// the first without the second says the hardware is there and the operator has
-// not reached it.
+// feature discovery, which is not a GPU Operator operand and runs on any node.
+// nvidia.com/gpu.present is written, and retracted, by the operator's own
+// ClusterPolicy controller as it decides which nodes it manages. So the first
+// without the second says the hardware is there and the operator has not
+// claimed it.
+//
+// That attribution is why the rule needs the operator to be installed. On a
+// cluster with no operator nobody was ever going to write the second label, so
+// its absence says nothing: a node with four working GPUs and a device plugin
+// installed by hand would otherwise be reported as broken.
 type NodePCIWithoutGPULabel struct{ versionRange }
 
 // NewNodePCIWithoutGPULabel returns the rule. Both version bounds are empty:
@@ -47,7 +53,13 @@ func (r *NodePCIWithoutGPULabel) Severity() output.Severity { return output.Seve
 
 // Evaluate implements health.Rule.
 func (r *NodePCIWithoutGPULabel) Evaluate(in health.Input) []output.Finding {
+	if !in.OperatorInstalled {
+		return nil
+	}
+
 	var findings []output.Finding
+
+	tolerations := PolicyTolerations(in)
 
 	// Both sets: a GPU node missing the GPU label is a node whose feature
 	// discovery stopped while its device plugin kept going, which is worth the
@@ -58,7 +70,7 @@ func (r *NodePCIWithoutGPULabel) Evaluate(in health.Input) []output.Finding {
 				continue
 			}
 
-			if !OperatorTargets(node) {
+			if !OperatorTargets(node, tolerations) {
 				continue
 			}
 
@@ -70,9 +82,10 @@ func (r *NodePCIWithoutGPULabel) Evaluate(in health.Input) []output.Finding {
 				Severity:  r.Severity(),
 				Node:      node.Name,
 				Component: ComponentNode,
-				Message:   "the node has an NVIDIA PCI device and no " + LabelGPUPresent + " label",
-				Evidence:  evidence,
-				Next:      infoCommand(node.Name),
+				Message: "the GPU Operator is not reconciling this node: it has an NVIDIA PCI device and no " +
+					LabelGPUPresent + " label",
+				Evidence: evidence,
+				Next:     infoCommand(node.Name),
 			})
 		}
 	}

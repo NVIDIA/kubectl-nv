@@ -61,12 +61,22 @@ func (r *NodeCountDiffersFromCapacity) Severity() output.Severity { return outpu
 func (r *NodeCountDiffersFromCapacity) Evaluate(in health.Input) []output.Finding {
 	var findings []output.Finding
 
+	tolerations := PolicyTolerations(in)
+
 	for _, node := range in.Nodes {
 		if node.Count <= 0 || isMixedMIG(node) {
 			continue
 		}
 
-		if !OperatorTargets(node) {
+		// A node advertising its GPUs through dynamic resource allocation
+		// alone has no nvidia.com/gpu capacity for the count label to
+		// disagree with, so comparing the two would report every healthy DRA
+		// node in the cluster.
+		if node.Mode == inventory.ModeDRA {
+			continue
+		}
+
+		if !OperatorTargets(node, tolerations) {
 			continue
 		}
 

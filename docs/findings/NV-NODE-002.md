@@ -27,15 +27,37 @@ to run. Three questions decide it, in this order:
 
 1. Did the operator say not to? Every `nvidia.com/gpu.deploy.*` label
    false or paused means the operator was told to leave the node alone.
-1. Is an operand already running there? That settles it, whatever the
-   taints say.
+1. Is a deploy-gated operand already running there? That settles it,
+   whatever the taints say. Only operands with a
+   `nvidia.com/gpu.deploy.<key>` of their own count. The node feature
+   discovery worker runs on every node of the cluster and the
+   `gpu-operator` controller runs on one of them, and neither is
+   evidence that an operand can land there.
 1. Would every operand be blocked? A `NoSchedule` or `NoExecute` taint
-   that no operand toleration matches keeps all of them off.
+   that no operand toleration matches keeps all of them off. The
+   tolerations are the operator's defaults plus whatever
+   `spec.daemonsets.tolerations` in the ClusterPolicy adds.
 
-A node running MIG in the mixed strategy is excluded too. It advertises
-one extended resource per profile and no `nvidia.com/gpu` at all, so a
-zero whole-GPU allocatable is what a healthy mixed node looks like; its
-real numbers are in `mig.resources`.
+### The other exclusions
+
+A node running MIG in the mixed strategy advertises one extended
+resource per profile and no `nvidia.com/gpu` at all, so a zero
+whole-GPU allocatable is what a healthy mixed node looks like; its real
+numbers are in `mig.resources`. A mixed node whose every profile is
+unplaceable is still reported.
+
+A node in `dra` mode advertises its GPUs through a `gpu.nvidia.com`
+ResourceSlice and publishes no extended resource, so its zero
+allocatable `nvidia.com/gpu` is correct. The case this rule still covers
+is the DRA node that publishes no slice either: `pkg/source` classifies
+that one as hinted with mode `none`.
+
+A node whose `nvidia.com/gpu.workload.config` is `vm-passthrough` or
+`vm-vgpu` has its GPUs set up for virtual machines and advertises
+nothing to the container scheduler on purpose. Those are the operator's
+sandbox workloads, which are Phase 2 for this plugin: no rule here has
+anything to say about them yet, and the only thing the current rules
+have to do is not report a working one as broken.
 
 ## Evidence
 
@@ -75,4 +97,5 @@ kubectl nv health --node <worker>
 
 Only that one label changes, so the node is still one the operator
 targets and the rule still evaluates it. Put it back with
-`nvidia.com/gpu.deploy.device-plugin=true`.
+`nvidia.com/gpu.deploy.device-plugin=true`. E3 scripts both halves as
+`hack/mokka/faults/nv-node-002.sh inject|recover <node>`.

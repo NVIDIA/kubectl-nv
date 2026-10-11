@@ -59,6 +59,10 @@ const (
 	LabelGPUReplicas = "nvidia.com/gpu.replicas"
 	// LabelSharingStrategy is how a node shares each device between pods.
 	LabelSharingStrategy = "nvidia.com/gpu.sharing-strategy"
+	// LabelWorkloadConfig is what kind of workload the node's GPUs are set up
+	// for: container, vm-passthrough or vm-vgpu. A node set up for virtual
+	// machines advertises nothing to the container scheduler by design.
+	LabelWorkloadConfig = "nvidia.com/gpu.workload.config"
 
 	// labelValueTrue is the only value a hint label is honoured at. The
 	// DaemonSets that write these labels write "true" and nothing else, so
@@ -136,17 +140,51 @@ func labelIsTrue(node inventory.GPUNode, name string) bool {
 	return node.Labels[name] == labelValueTrue
 }
 
-// operandComponents returns the components of the operand pods on a node,
-// sorted and comma joined, which is the evidence encoding for a list. It is
-// empty when the node runs none, and setIf leaves an empty value out of the
-// evidence map rather than writing it as "".
-func operandComponents(node inventory.GPUNode) string {
-	if len(node.Operands) == 0 {
-		return ""
-	}
+// The values of nvidia.com/gpu.workload.config that mean the node's GPUs are
+// handed to virtual machines rather than to containers. Such a node advertises
+// no nvidia.com/gpu to the container scheduler on purpose.
+//
+// Phase 2 of the operator's sandbox workload support is what these are about,
+// and gpu health has no rules for them yet: the only thing the current rules
+// have to do is not report a working one as broken.
+const (
+	workloadVMPassthrough = "vm-passthrough"
+	workloadVMvGPU        = "vm-vgpu"
+)
 
+// isVirtualMachineWorkload reports whether the node's GPUs are set up for
+// virtual machines.
+func isVirtualMachineWorkload(node inventory.GPUNode) bool {
+	switch node.Labels[LabelWorkloadConfig] {
+	case workloadVMPassthrough, workloadVMvGPU:
+		return true
+	default:
+		return false
+	}
+}
+
+// operandComponents returns the components of the operand pods on a node,
+// sorted, deduplicated and comma joined, which is the evidence encoding for a
+// list. It is empty when the node runs none, and setIf leaves an empty value
+// out of the evidence map rather than writing it as "".
+//
+// Deduplicated because a node runs two pods of the same component for as long
+// as a rollout takes, and sorted because the builder hands the pods over in
+// whatever order the API server listed them: without both, two runs over the
+// same cluster print different bytes. A pod whose labels named no component is
+// dropped rather than joined as an empty string, which would read as a stray
+// comma.
+func operandComponents(node inventory.GPUNode) string {
+	seen := make(map[string]bool, len(node.Operands))
 	names := make([]string, 0, len(node.Operands))
+
 	for _, pod := range node.Operands {
+		if pod.Component == "" || seen[pod.Component] {
+			continue
+		}
+
+		seen[pod.Component] = true
+
 		names = append(names, pod.Component)
 	}
 

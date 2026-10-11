@@ -28,6 +28,10 @@ Nodes running MIG in the mixed strategy are excluded. They advertise one
 extended resource per profile and no `nvidia.com/gpu`, so their capacity
 is legitimately zero while the count label still reports whole devices.
 
+Nodes in `dra` mode are excluded for the same reason: they publish a
+`gpu.nvidia.com` ResourceSlice and no extended resource, so there is no
+capacity for the count label to disagree with.
+
 A node with no count label at all is not evaluated: zero there means
 "GPU feature discovery has not run", which is NV-NODE-001's finding.
 
@@ -67,4 +71,5 @@ kubectl nv health --node <worker>
 ```
 
 GPU feature discovery rewrites the label on its next pass, so the
-finding clears on its own.
+finding clears on its own. E3 scripts both halves as
+`hack/mokka/faults/nv-node-004.sh inject|recover <node>`.

@@ -60,13 +60,30 @@ func (r *NodeNoAllocatableGPUs) Severity() output.Severity { return output.Sever
 func (r *NodeNoAllocatableGPUs) Evaluate(in health.Input) []output.Finding {
 	var findings []output.Finding
 
+	tolerations := PolicyTolerations(in)
+
 	for _, set := range [][]inventory.GPUNode{in.Nodes, in.Hinted} {
 		for _, node := range set {
 			if !labelIsTrue(node, LabelGPUPresent) || node.Allocatable > 0 {
 				continue
 			}
 
-			if !OperatorTargets(node) {
+			// A node that advertises its GPUs through dynamic resource
+			// allocation publishes a ResourceSlice and no extended resource,
+			// so zero allocatable nvidia.com/gpu is what a healthy one looks
+			// like. pkg/source classifies a DRA node with no slice as hinted
+			// with mode none, which is the case this rule still covers.
+			if node.Mode == inventory.ModeDRA {
+				continue
+			}
+
+			// A node whose GPUs are handed to virtual machines advertises
+			// nothing to the container scheduler by design.
+			if isVirtualMachineWorkload(node) {
+				continue
+			}
+
+			if !OperatorTargets(node, tolerations) {
 				continue
 			}
 

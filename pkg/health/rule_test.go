@@ -178,66 +178,6 @@ func TestRulesReturnsACopy(t *testing.T) {
 	}
 }
 
-// swapDefaultRegistry points the package level Register and Rules at a fresh
-// registry for the duration of one test and restores the real one afterwards.
-//
-// Without it the test leaves its rule in the process-wide registry, and a
-// second run of the same test in the same binary, which is what -count=2 does,
-// panics on the duplicate code. A test that only passes once is not a test.
-func swapDefaultRegistry(t *testing.T) {
-	t.Helper()
-
-	saved := defaultRegistry
-	defaultRegistry = NewRegistry()
-
-	t.Cleanup(func() { defaultRegistry = saved })
-}
-
-// The package level Register and Rules are the ones rule files use. They have
-// to reach the same registry.
-func TestPackageLevelRegistry(t *testing.T) {
-	swapDefaultRegistry(t)
-
-	Register(stubRule{code: "NV-TOPO-900"})
-
-	var found bool
-
-	for _, rule := range Rules() {
-		if rule.Code() == "NV-TOPO-900" {
-			found = true
-		}
-	}
-
-	if !found {
-		t.Error("a rule registered through Register is not in Rules")
-	}
-}
-
-// The swap has to actually isolate: after the cleanup the rule the test
-// registered must be gone, or the next test in the binary inherits it.
-func TestPackageLevelRegistryIsRestored(t *testing.T) {
-	before := len(Rules())
-
-	t.Run("registers into a swapped registry", func(t *testing.T) {
-		swapDefaultRegistry(t)
-		Register(stubRule{code: "NV-TOPO-901"})
-
-		if len(Rules()) != 1 {
-			t.Fatalf("swapped registry holds %d rules, want 1", len(Rules()))
-		}
-	})
-
-	if got := len(Rules()); got != before {
-		t.Errorf("the default registry holds %d rules after the subtest, want %d", got, before)
-	}
-
-	for _, rule := range Rules() {
-		if rule.Code() == "NV-TOPO-901" {
-			t.Error("a rule registered inside the subtest leaked into the default registry")
-		}
-	}
-}
-
 // A Registry used before NewRegistry ran has a nil map. Assigning into one
 // panics with a runtime error that says nothing about rules, so the zero value
 // has to work rather than fail obscurely.

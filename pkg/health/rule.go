@@ -135,9 +135,16 @@ type Rule interface {
 	Evaluate(in Input) []output.Finding
 }
 
-// Registry collects rules under their codes. It is safe for concurrent use:
-// rules register from their own files during package initialisation, and the
-// order those run in is not something a rule file can see.
+// Registry collects rules under their codes, panicking on a duplicate or a
+// malformed one. It is safe for concurrent use.
+//
+// There is no package level registry to reach instead. A process-wide one
+// would have to be filled by init functions, and then a caller that forgot to
+// import the package holding the rules would get an empty registry, run zero
+// checks and report every cluster clean. pkg/health/rules collects its rules
+// in an ordinary function and fills a registry a caller owns, so running no
+// rules has to be something a caller asked for rather than something an import
+// list did quietly.
 type Registry struct {
 	mu sync.RWMutex
 	// byCode is created on first use, so that a zero Registry works. A nil
@@ -207,20 +214,3 @@ func (r *Registry) Rules() []Rule {
 
 	return out
 }
-
-// defaultRegistry is the registry the package level Register and Rules reach.
-// Rule files across the package register into it from their own files, which
-// is the one thing a per-call registry cannot do.
-//
-// It is a variable rather than a constant expression so that a test can swap
-// in a fresh one and put it back: a test that registers into the real registry
-// leaves its rule there for the rest of the binary, and the second run of that
-// test panics on the duplicate code.
-var defaultRegistry = NewRegistry()
-
-// Register adds a rule to the default registry, panicking on a malformed or
-// duplicate code. See Registry.Register.
-func Register(rule Rule) { defaultRegistry.Register(rule) }
-
-// Rules returns the default registry's rules, sorted by code.
-func Rules() []Rule { return defaultRegistry.Rules() }

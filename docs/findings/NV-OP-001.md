@@ -26,12 +26,29 @@ the evidence rather than written as an empty string.
 A cluster with no ClusterPolicy produces nothing here. The operator not
 being installed is an answer rather than a failure.
 
+### The ignored duplicate, reported at warning
+
+The operator reconciles exactly one ClusterPolicy and marks every other
+one ignored, and it does that in memory: the ignored objects never get a
+status at all. So a ClusterPolicy with no status sitting beside one that
+is `ready` is a duplicate somebody left in the cluster, not an operator
+that failed, and this entry reports it at warning with
+`ignoredPolicy: true` rather than at error. Failing a run over an object
+that decides nothing would be failing a cluster that works.
+
+A duplicate that does carry a state the operator does not call `ready`
+is a real failure and stays an error, and so does a statusless policy
+when nothing else is ready: the exclusion is about the absent status
+beside a ready one, not about there being more than one policy.
+
 ## Evidence
 
 | Key | Meaning |
 |---|---|
 | `name` | the ClusterPolicy's name |
 | `status.state` | the state the operator reported, absent when the policy has no status yet |
+| `reconciling` | the name of the ready policy, on an ignored duplicate only |
+| `ignoredPolicy` | `true`, on an ignored duplicate only |
 
 ## Versions
 
@@ -50,15 +67,20 @@ kubectl describe clusterpolicy <name>
 
 ## Reproduction
 
-On a Mokka lane, make one operand unschedulable and the policy leaves
-`ready` while the operator waits for it.
+On a Mokka lane, point the device plugin at an image tag that does not
+exist. The operand never becomes ready, so the policy leaves `ready`.
 
 ```shell
-kubectl -n gpu-operator patch clusterpolicy cluster-policy --type=merge \
-  -p '{"spec":{"devicePlugin":{"nodeSelector":{"nv.example/absent":"yes"}}}}'
+kubectl patch clusterpolicy cluster-policy --type=merge \
+  -p '{"spec":{"devicePlugin":{"version":"v0.0.0-absent"}}}'
 kubectl nv health
 ```
 
-Remove the node selector to put it back. This writes to the lane, so it
-belongs in a lane fixture and never in anything `kubectl nv` itself
-runs: the plugin is read-only toward a cluster.
+ClusterPolicy is cluster scoped, so the command carries no `-n`. Save
+`spec.devicePlugin.version` before the patch and write the saved value
+back to recover.
+
+This writes to the lane, so it belongs in a lane fixture and never in
+anything `kubectl nv` itself runs: the plugin is read-only toward a
+cluster. E3 scripts both halves as
+`hack/mokka/faults/nv-op-001.sh inject|recover <node>`.

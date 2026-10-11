@@ -28,7 +28,6 @@
 package engine
 
 import (
-	"errors"
 	"sort"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -69,7 +68,10 @@ func Run(rules []health.Rule, in health.Input, opts Options) (*health.HealthRepo
 	// Copied before anything else touches it: the caller's input is the
 	// caller's, and a rule that sorted a slice in place would otherwise change
 	// what every later rule, and the caller, sees.
-	in, err = narrow(in, opts.Node)
+	in.Nodes = copyNodes(in.Nodes)
+	in.Hinted = copyNodes(in.Hinted)
+
+	checked, err := nodesChecked(in, opts.Node, unreachable, opts.InputErr)
 	if err != nil {
 		return nil, err
 	}
@@ -85,6 +87,11 @@ func Run(rules []health.Rule, in health.Input, opts Options) (*health.HealthRepo
 			continue
 		}
 
+		// Over the whole input, never over the --node subset. A rule that
+		// answers a question about the cluster rather than about one node at a
+		// time, such as Track E2's topology check, has to see the peers to
+		// have anything to say: handed one node it finds that node consistent
+		// with itself and reports clean. The filter belongs on the findings.
 		for _, finding := range rule.Evaluate(in) {
 			// A finding with no link is a worse version of the problem the
 			// user already had. A rule that set its own is left alone: it
@@ -107,7 +114,7 @@ func Run(rules []health.Rule, in health.Input, opts Options) (*health.HealthRepo
 		report.Findings = found
 	}
 
-	report.Summary = summarize(in, report.Findings)
+	report.Summary = summarize(checked, report.Findings)
 
 	return report, nil
 }
@@ -119,35 +126,102 @@ func keep(finding output.Finding, nodeFilter string) bool {
 	return nodeFilter == "" || finding.Node == "" || finding.Node == nodeFilter
 }
 
-// narrow returns a copy of in restricted to nodeFilter, or a copy of in when
-// no filter was given. The copy is shallow per node, which is enough: a rule
-// that writes through a node's maps is writing into the caller's input, and
-// the deep copy below is what stops it.
-func narrow(in health.Input, nodeFilter string) (health.Input, error) {
-	out := in
-	out.Nodes = copyNodes(in.Nodes)
-	out.Hinted = copyNodes(in.Hinted)
+// nodesChecked returns the nodes the summary is counted over: every node in
+// the input, or the one --node named.
+//
+// A name that matches nothing is an error rather than an empty report, because
+// an empty report reads as "clean". Which error it is depends on whether the
+// run saw the whole cluster: with a resource denied, the named node may be in
+// the half that was not read, and telling the user to check their spelling
+// would be the wrong advice and a claim this command never checked.
+func nodesChecked(
+	in health.Input,
+	nodeFilter string,
+	unreachable []output.Unreachable,
+	inputErr error,
+) ([]inventory.GPUNode, error) {
+	all := make([]inventory.GPUNode, 0, len(in.Nodes)+len(in.Hinted))
+	all = append(all, in.Nodes...)
+	all = append(all, in.Hinted...)
 
 	if nodeFilter == "" {
-		return out, nil
+		return all, nil
 	}
 
-	nodes := selectNode(out.Nodes, nodeFilter)
-	hinted := selectNode(out.Hinted, nodeFilter)
+	var checked []inventory.GPUNode
 
-	if len(nodes)+len(hinted) == 0 {
-		// The node list is a primary read: a failure to list nodes is a plain
-		// error rather than a partial one, so a name missing from the input is
-		// a name missing from the cluster.
-		return out, output.NewUsageError(
-			"no node named %q: --node names a node of this cluster, and %s",
-			nodeFilter, knownNodes(in))
+	for _, node := range all {
+		if node.Name == nodeFilter {
+			checked = append(checked, node)
+		}
 	}
 
-	out.Nodes = nodes
-	out.Hinted = hinted
+	if len(checked) > 0 {
+		return checked, nil
+	}
 
-	return out, nil
+	// Said as what this command knows rather than as what the cluster holds.
+	// gpu health only ever looks at GPU nodes and at nodes labelled as having
+	// GPUs, so a name it cannot match is either a typo or an ordinary node
+	// with no GPUs, and it cannot tell which: "no node named X" would be a
+	// claim about the cluster that nothing here checked.
+	usage := output.NewUsageError(
+		"gpu health looked at no node named %q: it checks GPU nodes and nodes labelled as having GPUs, and %s",
+		nodeFilter, knownNodes(all))
+
+	if len(unreachable) > 0 {
+		return nil, &partialNodeError{usage: usage, missed: unreachable, cause: inputErr}
+	}
+
+	return nil, usage
+}
+
+// partialNodeError is an unmatched --node on a run that could not read
+// everything. It exits 3 rather than 2: the node may be in the part of the
+// cluster that was denied, and sending the user off to check their spelling
+// would be the wrong advice.
+type partialNodeError struct {
+	usage  *output.UsageError
+	missed []output.Unreachable
+	// cause is the builder's own error, kept so that errors.Is reaches the
+	// PartialError underneath. A caller told its node is missing and not told
+	// why the run could not see it has been handed half an answer.
+	cause error
+}
+
+func (e *partialNodeError) Error() string {
+	names := make([]string, 0, len(e.missed))
+	for _, u := range e.missed {
+		names = append(names, u.Resource)
+	}
+
+	sort.Strings(names)
+
+	return e.usage.Error() + "; this run could not read " + join(names)
+}
+
+// Unwrap exposes both halves: the usage error a caller may be testing for, and
+// the partial read that is the reason this is exit 3 rather than exit 2.
+func (e *partialNodeError) Unwrap() []error { return []error{e.usage, e.cause} }
+
+// ExitCode is what output.ExitCodeFor reads. It overrides the usage error's
+// own 2, which is why this type exists at all.
+func (e *partialNodeError) ExitCode() int { return output.ExitPartial }
+
+// knownNodes renders what the user could have asked for instead.
+func knownNodes(nodes []inventory.GPUNode) string {
+	if len(nodes) == 0 {
+		return "this run found none"
+	}
+
+	names := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		names = append(names, n.Name)
+	}
+
+	sort.Strings(names)
+
+	return "this run found " + join(names)
 }
 
 // copyNodes deep copies a node set, so that a rule writing through a node's
@@ -167,42 +241,9 @@ func copyNodes(nodes []inventory.GPUNode) []inventory.GPUNode {
 	return out
 }
 
-// selectNode returns the nodes named name, as a fresh slice.
-func selectNode(nodes []inventory.GPUNode, name string) []inventory.GPUNode {
-	var out []inventory.GPUNode
-
-	for _, n := range nodes {
-		if n.Name == name {
-			out = append(out, n)
-		}
-	}
-
-	return out
-}
-
-// knownNodes renders what the user could have asked for instead.
-func knownNodes(in health.Input) string {
-	names := make([]string, 0, len(in.Nodes)+len(in.Hinted))
-	for _, n := range in.Nodes {
-		names = append(names, n.Name)
-	}
-
-	for _, n := range in.Hinted {
-		names = append(names, n.Name)
-	}
-
-	if len(names) == 0 {
-		return "this run found none"
-	}
-
-	sort.Strings(names)
-
-	return "this run found " + join(names)
-}
-
 // summarize counts what was found over what was looked at.
-func summarize(in health.Input, findings []output.Finding) health.Summary {
-	summary := health.Summary{NodesChecked: len(in.Nodes) + len(in.Hinted)}
+func summarize(checked []inventory.GPUNode, findings []output.Finding) health.Summary {
+	summary := health.Summary{NodesChecked: len(checked)}
 
 	for _, f := range findings {
 		switch f.Severity {
@@ -217,17 +258,15 @@ func summarize(in health.Input, findings []output.Finding) health.Summary {
 
 	// Vacuously true over no nodes would print a requested count nobody
 	// computed, so an empty run is reported as unknown rather than as zero.
-	requestedKnown := summary.NodesChecked > 0
+	requestedKnown := len(checked) > 0
 
-	for _, set := range [][]inventory.GPUNode{in.Nodes, in.Hinted} {
-		for _, n := range set {
-			summary.GPUCapacity += n.Capacity
-			summary.GPUAllocatable += n.Allocatable
-			summary.GPURequested += n.Requested
+	for _, n := range checked {
+		summary.GPUCapacity += n.Capacity
+		summary.GPUAllocatable += n.Allocatable
+		summary.GPURequested += n.Requested
 
-			if !n.RequestedKnown {
-				requestedKnown = false
-			}
+		if !n.RequestedKnown {
+			requestedKnown = false
 		}
 	}
 
@@ -280,35 +319,59 @@ func (e *runError) Unwrap() error { return e.err }
 // can be concluded from this run.
 func (e *runError) ExitCode() int { return output.ExitError }
 
-// collectPartial walks an errors.Join tree and returns every PartialError in
-// it. ok is false as soon as one leaf is not a PartialError.
+// collectPartial walks an error tree and returns every PartialError in it. ok
+// is false as soon as one leaf is something else.
+//
+// The walk is by type, and that is the whole point of it. The shape of the
+// tree is not something this package controls: the builder wraps its reads
+// with context, so a denied read arrives as fmt.Errorf("...: %w", partial),
+// and several of them arrive as a wrapped errors.Join. A walk that only knew
+// about Unwrap() []error stopped at the wrapper, found a PartialError
+// underneath it with errors.As, and called the whole tree partial. That turns
+// "the API server is unreachable, and by the way pods were denied" into exit
+// 3, "here are some incomplete findings", over a run that found nothing at
+// all.
+//
+// So each node is classified before anything is concluded from it:
+//
+//	*source.PartialError      a leaf, and the thing being collected
+//	Unwrap() []error          recurse into every child, all must be partial
+//	Unwrap() error            recurse into the one child
+//	anything else             a hard failure, and the run did not happen
 func collectPartial(err error) ([]*source.PartialError, bool) {
-	var partial *source.PartialError
-	if errors.As(err, &partial) {
-		// errors.As reaches through a wrapper, so a single PartialError, and a
-		// PartialError somebody wrapped with context, both land here.
-		if joined, ok := err.(interface{ Unwrap() []error }); !ok || len(joined.Unwrap()) == 0 {
-			return []*source.PartialError{partial}, true
+	if err == nil {
+		return nil, true
+	}
+
+	// A direct type assertion rather than errors.As, which walks the chain:
+	// the question here is what this one node is, not what is somewhere
+	// underneath it. Checked first because a PartialError is itself
+	// unwrappable, carrying the API error it was built from, and recursing
+	// into that would find an ordinary forbidden error and call the tree hard.
+	if partial, ok := err.(*source.PartialError); ok {
+		return []*source.PartialError{partial}, true
+	}
+
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		var out []*source.PartialError
+
+		for _, child := range joined.Unwrap() {
+			children, ok := collectPartial(child)
+			if !ok {
+				return nil, false
+			}
+
+			out = append(out, children...)
 		}
+
+		return out, true
 	}
 
-	joined, ok := err.(interface{ Unwrap() []error })
-	if !ok {
-		return nil, false
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return collectPartial(wrapped.Unwrap())
 	}
 
-	var out []*source.PartialError
-
-	for _, child := range joined.Unwrap() {
-		children, ok := collectPartial(child)
-		if !ok {
-			return nil, false
-		}
-
-		out = append(out, children...)
-	}
-
-	return out, true
+	return nil, false
 }
 
 // reasonFor turns the cause of a partial read into the short reason the report

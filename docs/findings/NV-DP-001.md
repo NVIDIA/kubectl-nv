@@ -18,6 +18,9 @@ did not load; and a configuration the plugin rejects.
 - No GPU Operator. It writes the deploy labels, so a cluster without it
   has none, and a device plugin installed by hand is nothing the
   operator promised to run.
+- The ClusterPolicy sets `spec.devicePlugin.enabled: false`. That is the
+  cluster saying it never wanted one. A missing field means enabled,
+  which is the CRD's own default.
 - `nvidia.com/gpu.deploy.device-plugin` is false or paused for the node.
   That is NV-OP-002's finding, and the absence is then expected.
 - The node advertises its GPUs through dynamic resource allocation
@@ -31,7 +34,7 @@ did not load; and a configuration the plugin rejects.
 
 | Key | Meaning |
 |---|---|
-| `nvidia.com/gpu.deploy.device-plugin` | what the operator was told to do with the operand, absent when the node carries no such label |
+| `nvidia.com/gpu.deploy.device-plugin` | whether the operator is currently running the operand on this node, absent when the node carries no such label. A value of `true` means the operator saw the node, not that the cluster asked for the operand: `spec.devicePlugin.enabled` is what says that |
 | `operands` | the operand components running on the node, sorted and comma joined, absent when there are none |
 | `pod` | the device plugin pod's name, absent when there is no pod |
 | `phase` | its pod phase |

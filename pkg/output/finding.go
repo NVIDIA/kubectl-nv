@@ -41,9 +41,15 @@ type Finding struct {
 	// Node is the node the finding is about. It is empty for a finding about
 	// the cluster as a whole.
 	Node string `json:"node,omitempty" yaml:"node,omitempty"`
-	// Component is the part the finding is about, for instance an operand
-	// name such as "nvidia-driver-daemonset" or "gpu-feature-discovery". It
-	// is empty when the finding is about the node itself.
+	// Component is the part the finding is about. For an operand it is the
+	// verbatim value of the pod's "app" label, such as
+	// "nvidia-driver-daemonset" or "gpu-feature-discovery", which is what
+	// pkg/inventory's Component* constants hold.
+	//
+	// A finding about the node itself carries the literal "node" rather than
+	// an empty string. The column is one a reader scans down and one a script
+	// groups by, and an empty cell there is indistinguishable from a component
+	// the producing command failed to name.
 	Component string `json:"component,omitempty" yaml:"component,omitempty"`
 	// Message is the human readable detail, one sentence, no trailing period.
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`

@@ -59,12 +59,14 @@ func (r *NodeAllocatableBelowCapacity) Severity() output.Severity { return outpu
 func (r *NodeAllocatableBelowCapacity) Evaluate(in health.Input) []output.Finding {
 	var findings []output.Finding
 
+	tolerations := PolicyTolerations(in)
+
 	for _, node := range in.Nodes {
 		if node.Allocatable <= 0 || node.Allocatable >= node.Capacity {
 			continue
 		}
 
-		if !OperatorTargets(node) {
+		if !OperatorTargets(node, tolerations) {
 			continue
 		}
 

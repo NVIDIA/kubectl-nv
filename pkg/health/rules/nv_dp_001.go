@@ -38,6 +38,11 @@ const deployKeyDevicePlugin = "device-plugin"
 //   - The operator is installed. It writes the deploy labels, so a cluster
 //     without it has none, and a device plugin installed by hand is nothing
 //     the operator promised to run.
+//   - The ClusterPolicy asks for the operand. The deploy label cannot answer
+//     that: the operator writes nvidia.com/gpu.deploy.device-plugin=true on
+//     every node carrying the NVIDIA PCI label whatever the policy enables, so
+//     reading the label as consent made this rule fire on every node of every
+//     cluster that switched the device plugin off in its chart values.
 //   - The operand is not switched off or paused for the node.
 //   - The node advertises its GPUs through the device plugin at all. A node in
 //     pure DRA mode publishes a ResourceSlice and runs a kubelet plugin
@@ -62,7 +67,7 @@ func (r *DevicePluginNotReady) Severity() output.Severity { return output.Severi
 // Only the GPU nodes are walked. A hinted node advertises no GPUs at all, and
 // that is NV-NODE-002's finding rather than this one's.
 func (r *DevicePluginNotReady) Evaluate(in health.Input) []output.Finding {
-	if !in.OperatorInstalled {
+	if !in.OperatorInstalled || !OperandEnabledInPolicy(in, PolicyFieldDevicePlugin) {
 		return nil
 	}
 

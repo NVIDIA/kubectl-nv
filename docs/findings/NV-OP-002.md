@@ -21,6 +21,13 @@ targets the node. That gate's first question is whether every deploy
 label is false, so gating this rule on it would silence the rule exactly
 where it has the most to say.
 
+A label of `true` is not the opposite of this finding. The operator
+writes every `nvidia.com/gpu.deploy.<key>` as `true` on every node
+carrying the NVIDIA PCI label, whatever the ClusterPolicy enables, so
+`true` says only that the operator saw the node. Whether an operand was
+asked for at all is a question for the ClusterPolicy's
+`spec.<operand>.enabled`, which is what NV-DP-001 and NV-DCGM-001 read.
+
 Every key the operator writes is reported, including the ones this
 plugin has no component name for. The operator publishes more of them
 than `pkg/inventory` maps and the list grows between versions, so an
@@ -69,4 +76,5 @@ kubectl nv health --node <worker> --fail-on info
 
 `--fail-on info` is what makes the run exit non-zero on it; at the
 default threshold an info finding is printed and does not fail the run.
-Put the label back with `=true`.
+Put the label back with `=true`. E3 scripts both halves as
+`hack/mokka/faults/nv-op-002.sh inject|recover <node>`.
