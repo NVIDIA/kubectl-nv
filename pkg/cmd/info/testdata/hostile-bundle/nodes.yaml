@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: List
+metadata:
+  resourceVersion: ""
+items:
+- apiVersion: v1
+  kind: Node
+  metadata:
+    name: hostile-1
+    labels:
+      nvidia.com/gpu.product: "NVIDIA-T4\u001B[2J\u001B[1;31mPWNED"
+      nvidia.com/gpu.count: "4"
+      "evil\u001B]0;title\u0007label": "value\u009B31m"
+  spec:
+    taints:
+    - key: "nvidia.com/gpu\u001B[2K"
+      value: "present\rrewritten"
+      effect: NoSchedule
+  status:
+    capacity:
+      nvidia.com/gpu: "4"
+    allocatable:
+      nvidia.com/gpu: "4"
+    conditions:
+    - type: Ready
+      status: "True"
+      reason: "KubeletReady\u001B[8m"
+      message: "kubelet is posting ready status\u0000"
