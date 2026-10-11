@@ -581,3 +581,137 @@ func TestBuildReportsEachLostResourceOnce(t *testing.T) {
 		t.Errorf("Build error = %v, want a source.PartialError", err)
 	}
 }
+
+// TestBuildHintedCountIsAfterTheFilters pins what the count describes: the
+// hinted nodes this query left out, not every hinted node in the cluster.
+//
+// A user who asked about one node, or about one product, is told "4 nodes
+// carry an NVIDIA label" about nodes their query never touched. The number has
+// to answer "what did I not see here", or it sends them looking for nodes that
+// were never in scope.
+func TestBuildHintedCountIsAfterTheFilters(t *testing.T) {
+	t.Parallel()
+
+	newSource := func() *countingSource {
+		return &countingSource{
+			gpu: []corev1.Node{
+				*testNode("worker-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-T4"},
+					map[string]string{"nvidia.com/gpu": "4"}, nil),
+			},
+			hinted: []corev1.Node{
+				*testNode("broken-t4", map[string]string{
+					"nvidia.com/gpu.present": "true",
+					"nvidia.com/gpu.product": "NVIDIA-T4",
+				}, nil, nil),
+				*testNode("broken-a100", map[string]string{
+					"nvidia.com/gpu.present": "true",
+					"nvidia.com/gpu.product": "A100-SXM4-40GB",
+				}, nil, nil),
+				*testNode("control-plane", map[string]string{"nvidia.com/gpu.present": "true"}, nil, nil),
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		opts BuildOptions
+		want int
+	}{
+		{name: "no filter counts them all", want: 3},
+		{
+			name: "a selector counts only the matching ones",
+			opts: BuildOptions{Selector: "nvidia.com/gpu.product=NVIDIA-T4"},
+			want: 1,
+		},
+		{
+			name: "a node filter counts only that node",
+			opts: BuildOptions{Node: "broken-a100"},
+			want: 1,
+		},
+		{
+			name: "a node filter that matches no hinted node counts none",
+			opts: BuildOptions{Node: "worker-1"},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, excluded, err := BuildWithHinted(context.Background(), newSource(), tt.opts)
+			if err != nil {
+				t.Fatalf("BuildWithHinted: %v", err)
+			}
+
+			if excluded != tt.want {
+				t.Errorf("excluded = %d, want %d", excluded, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildSelectorFiltersHintedNodesToo pins that -l reaches both sets, and
+// that the item it keeps is the one that matched.
+func TestBuildSelectorFiltersHintedNodesToo(t *testing.T) {
+	t.Parallel()
+
+	src := &countingSource{
+		gpu: []corev1.Node{
+			*testNode("worker-1", map[string]string{"nvidia.com/gpu.product": "NVIDIA-T4"},
+				map[string]string{"nvidia.com/gpu": "4"}, nil),
+		},
+		hinted: []corev1.Node{
+			*testNode("broken-t4", map[string]string{
+				"nvidia.com/gpu.present": "true",
+				"nvidia.com/gpu.product": "NVIDIA-T4",
+			}, nil, nil),
+			*testNode("broken-a100", map[string]string{
+				"nvidia.com/gpu.present": "true",
+				"nvidia.com/gpu.product": "A100-SXM4-40GB",
+			}, nil, nil),
+		},
+	}
+
+	list, excluded, err := BuildWithHinted(context.Background(), src, BuildOptions{
+		Selector:      "nvidia.com/gpu.product=NVIDIA-T4",
+		IncludeHinted: true,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithHinted: %v", err)
+	}
+
+	want := []string{"broken-t4", "worker-1"}
+	if got := itemNames(list); !reflect.DeepEqual(got, want) {
+		t.Errorf("items = %v, want %v", got, want)
+	}
+
+	if excluded != 0 {
+		t.Errorf("excluded = %d, want 0 when the hinted nodes were included", excluded)
+	}
+}
+
+// TestBuildOrdersHintedNodesAmongTheRest pins that a hinted node sits between
+// its neighbours rather than in an appendix: one sorted list is what makes two
+// runs diffable.
+func TestBuildOrdersHintedNodesAmongTheRest(t *testing.T) {
+	t.Parallel()
+
+	src := &countingSource{
+		gpu: []corev1.Node{*testNode("worker-1", nil, map[string]string{"nvidia.com/gpu": "4"}, nil)},
+		hinted: []corev1.Node{
+			*testNode("control-plane", map[string]string{"nvidia.com/gpu.present": "true"}, nil, nil),
+			*testNode("broken-1", map[string]string{"nvidia.com/gpu.present": "true"}, nil, nil),
+		},
+	}
+
+	list, err := Build(context.Background(), src, BuildOptions{IncludeHinted: true})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	want := []string{"broken-1", "control-plane", "worker-1"}
+	if got := itemNames(list); !reflect.DeepEqual(got, want) {
+		t.Errorf("order = %v, want %v", got, want)
+	}
+}

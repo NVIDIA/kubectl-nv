@@ -556,3 +556,108 @@ func contains(haystack []string, needle string) bool {
 
 	return false
 }
+
+// TestListHintedNoteIsExact pins the whole line, not a fragment of it. The
+// note is the only thing standing between a user and a node that silently
+// vanished from the inventory, so its wording, its count and the flag it names
+// are all part of the contract.
+func TestListHintedNoteIsExact(t *testing.T) {
+	t.Parallel()
+
+	objects := []runtime.Object{
+		gpuNode("worker-1", 4, nil),
+		hintedNode("control-plane"),
+		hintedNode("broken-1"),
+	}
+
+	s, err := runList(t, objects)
+	if err != nil {
+		t.Fatalf("gpu list: %v", err)
+	}
+
+	want := "2 node(s) carry an NVIDIA label but advertise no GPUs; pass --include-hinted to list them"
+	if got := strings.TrimSpace(s.err.String()); got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
+	}
+}
+
+// TestListHintedNoteCountsOnlyWhatTheQueryLeftOut pins that the number answers
+// "what did I not see here". A user who asked about one product being told
+// about hinted nodes of another goes looking for nodes their query never
+// touched.
+func TestListHintedNoteCountsOnlyWhatTheQueryLeftOut(t *testing.T) {
+	t.Parallel()
+
+	objects := []runtime.Object{
+		gpuNode("worker-1", 4, map[string]string{"nvidia.com/gpu.product": "NVIDIA-T4"}),
+		hintedNodeWithLabels("broken-t4", map[string]string{"nvidia.com/gpu.product": "NVIDIA-T4"}),
+		hintedNodeWithLabels("broken-a100", map[string]string{"nvidia.com/gpu.product": "A100-SXM4-40GB"}),
+		hintedNode("control-plane"),
+	}
+
+	t.Run("the note counts only the matching hinted node", func(t *testing.T) {
+		t.Parallel()
+
+		s, err := runList(t, objects, "-l", "nvidia.com/gpu.product=NVIDIA-T4")
+		if err != nil {
+			t.Fatalf("gpu list -l: %v", err)
+		}
+
+		want := "1 node(s) carry an NVIDIA label but advertise no GPUs; pass --include-hinted to list them"
+		if got := strings.TrimSpace(s.err.String()); got != want {
+			t.Errorf("stderr = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("the selector keeps the matching hinted node and drops the rest", func(t *testing.T) {
+		t.Parallel()
+
+		s, err := runList(t, objects,
+			"-l", "nvidia.com/gpu.product=NVIDIA-T4", "--include-hinted", "-o", "name")
+		if err != nil {
+			t.Fatalf("gpu list -l --include-hinted: %v", err)
+		}
+
+		want := []string{"gpunode/broken-t4", "gpunode/worker-1"}
+		if got := lines(s.out.String()); !equalStrings(got, want) {
+			t.Errorf("output = %v, want %v", got, want)
+		}
+
+		if strings.Contains(s.err.String(), "node(s) carry") {
+			t.Errorf("stderr still counts hinted nodes that were listed: %q", s.err)
+		}
+	})
+}
+
+// TestListIncludeHintedOrder pins the single sorted order: a hinted node sits
+// between its neighbours rather than in an appendix.
+func TestListIncludeHintedOrder(t *testing.T) {
+	t.Parallel()
+
+	objects := []runtime.Object{
+		gpuNode("worker-1", 4, nil),
+		hintedNode("control-plane"),
+		hintedNode("broken-1"),
+	}
+
+	s, err := runList(t, objects, "--include-hinted", "-o", "name")
+	if err != nil {
+		t.Fatalf("gpu list --include-hinted: %v", err)
+	}
+
+	want := []string{"gpunode/broken-1", "gpunode/control-plane", "gpunode/worker-1"}
+	if got := lines(s.out.String()); !equalStrings(got, want) {
+		t.Errorf("output = %v, want %v", got, want)
+	}
+}
+
+// hintedNodeWithLabels is a hinted node carrying extra labels, for the
+// selector cases.
+func hintedNodeWithLabels(name string, labels map[string]string) *corev1.Node {
+	node := hintedNode(name)
+	for k, v := range labels {
+		node.Labels[k] = v
+	}
+
+	return node
+}
