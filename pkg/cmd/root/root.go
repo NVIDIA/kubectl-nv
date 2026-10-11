@@ -36,6 +36,7 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/list"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/schema"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/topology"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
@@ -168,6 +169,7 @@ func NewCommand(version string, d Deps) *cobra.Command {
 
 	root.AddCommand(list.NewCommand(o))
 	root.AddCommand(info.NewCommand(o))
+	root.AddCommand(topology.NewCommand(o))
 	root.AddCommand(health.NewCommand(o))
 	root.AddCommand(explain.NewCommand(o))
 	root.AddCommand(debug.NewCommand(o, runMustGather))
