@@ -144,6 +144,26 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
+// TestDescribeStaysReadable pins that one long line does not push every value
+// in the description to the right. A tab writer aligns a whole column block to
+// its widest cell, and an operand image line is sixty characters wide, so the
+// obvious rendering puts every value half a terminal away from its key.
+func TestDescribeStaysReadable(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	if err := describe(&buf, fullNode()); err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+
+	line := sectionLine(t, buf.String(), "Product:")
+
+	gap := strings.Index(line, "A100-SXM4-40GB") - len("Product:")
+	if gap > 20 {
+		t.Errorf("the value of Product sits %d columns past its key:\n%s", gap, line)
+	}
+}
+
 // TestDescribeRequestedUnknown pins that a node whose pods were not listed
 // says so rather than reporting 0 requested GPUs.
 func TestDescribeRequestedUnknown(t *testing.T) {
