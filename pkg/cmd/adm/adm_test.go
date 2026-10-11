@@ -18,16 +18,19 @@ package adm
 
 import (
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // TestDefaultArtifactDir pins the name the gpu-operator must-gather script
@@ -166,4 +169,144 @@ func TestMustGatherRejectsAnUnparseableSince(t *testing.T) {
 	if !strings.Contains(err.Error(), "since") {
 		t.Errorf("error = %q, want it to name the flag", err.Error())
 	}
+}
+
+// TestExecTimeoutFlagReachesTheGatherer covers the bound on one exec. Without
+// it a driver pod that accepts the connection and never answers costs the user
+// the whole bundle rather than one file.
+func TestExecTimeoutFlagReachesTheGatherer(t *testing.T) {
+	got, err := runMustGather(t, "--exec-timeout", "30s")
+	if err != nil {
+		t.Fatalf("adm must-gather: %v", err)
+	}
+	if got.ExecTimeout != 30*time.Second {
+		t.Errorf("ExecTimeout = %v, want 30s", got.ExecTimeout)
+	}
+}
+
+// TestExecTimeoutDefaults pins the default. A zero reaching the gatherer would
+// be read as "no deadline", which is the behaviour this flag exists to end.
+func TestExecTimeoutDefaults(t *testing.T) {
+	got, err := runMustGather(t)
+	if err != nil {
+		t.Fatalf("adm must-gather: %v", err)
+	}
+	if got.ExecTimeout != mustgather.DefaultExecTimeout {
+		t.Errorf("ExecTimeout = %v, want the default %v", got.ExecTimeout, mustgather.DefaultExecTimeout)
+	}
+}
+
+// TestRejectsAnUnusableWindow covers the flags whose value only makes sense
+// above a floor. A sub-second log window collects nothing and a sub-second exec
+// timeout cannot finish a bug report, so both are a mistake worth naming rather
+// than a gather that quietly produces an empty bundle.
+func TestRejectsAnUnusableWindow(t *testing.T) {
+	cases := map[string][]string{
+		"since below a second":        {"--since", "500ms"},
+		"negative since":              {"--since", "-1h"},
+		"exec timeout below a second": {"--exec-timeout", "10ms"},
+	}
+
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := runMustGather(t, args...)
+			if err == nil {
+				t.Fatalf("adm must-gather %v returned nil, want a usage error", args)
+			}
+			if got := output.ExitCodeFor(err); got != output.ExitUsage {
+				t.Errorf("exit code = %d, want %d (error: %v)", got, output.ExitUsage, err)
+			}
+			if !strings.Contains(err.Error(), strings.TrimPrefix(args[0], "--")) {
+				t.Errorf("error = %q, want it to name the flag", err.Error())
+			}
+		})
+	}
+}
+
+// TestContextReachesTheManifest covers what a bundle says about where it came
+// from. A bundle that names the wrong cluster, or none, gets filed against the
+// wrong one, and the field is filled in by the command rather than by the
+// gatherer so nothing but a run through the real wiring proves it.
+func TestContextReachesTheManifest(t *testing.T) {
+	kubeconfig := writeKubeconfigWithContexts(t)
+
+	t.Run("the current context when none is named", func(t *testing.T) {
+		got, err := runMustGatherWithKubeconfig(t, kubeconfig)
+		if err != nil {
+			t.Fatalf("adm must-gather: %v", err)
+		}
+		if got.Context != "lane-a" {
+			t.Errorf("Context = %q, want the kubeconfig's current context lane-a", got.Context)
+		}
+	})
+
+	t.Run("the named context wins", func(t *testing.T) {
+		got, err := runMustGatherWithKubeconfig(t, kubeconfig, "--context", "lane-b")
+		if err != nil {
+			t.Fatalf("adm must-gather: %v", err)
+		}
+		if got.Context != "lane-b" {
+			t.Errorf("Context = %q, want lane-b", got.Context)
+		}
+	})
+}
+
+// writeKubeconfigWithContexts writes a kubeconfig holding two contexts, so that
+// "the current one" and "the one that was asked for" can be told apart.
+func writeKubeconfigWithContexts(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config")
+	contents := `apiVersion: v1
+kind: Config
+clusters:
+- name: lane
+  cluster:
+    server: https://127.0.0.1:1
+contexts:
+- name: lane-a
+  context:
+    cluster: lane
+    user: lane
+- name: lane-b
+  context:
+    cluster: lane
+    user: lane
+current-context: lane-a
+users:
+- name: lane
+  user: {}
+`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("writing kubeconfig: %v", err)
+	}
+	return path
+}
+
+// runMustGatherWithKubeconfig runs the command against a named kubeconfig,
+// through the real configuration flags rather than a stub.
+func runMustGatherWithKubeconfig(t *testing.T, kubeconfig string, args ...string) (*mustgather.Options, error) {
+	t.Helper()
+	isolateKubeconfig(t)
+
+	var got *mustgather.Options
+	o := &cmd.Options{
+		Streams:     genericiooptions.NewTestIOStreamsDiscard(),
+		ConfigFlags: genericclioptions.NewConfigFlags(true),
+	}
+	adm := NewCommand(o, func(opts *mustgather.Options) error { got = opts; return nil })
+
+	parent := &cobra.Command{Use: "kubectl-nv", Version: "v9.9.9"}
+	cmd.AddConfigFlags(parent.PersistentFlags(), o.ConfigFlags)
+	parent.AddCommand(adm)
+	parent.SetArgs(append([]string{
+		"adm", "must-gather",
+		"--artifacts-dir", filepath.Join(t.TempDir(), "artifacts"),
+		"--kubeconfig", kubeconfig,
+	}, args...))
+	parent.SetOut(io.Discard)
+	parent.SetErr(io.Discard)
+	parent.SilenceUsage = true
+	parent.SilenceErrors = true
+
+	return got, parent.Execute()
 }
