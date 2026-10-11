@@ -601,9 +601,9 @@ func TestDebugTakesExactlyOneNode(t *testing.T) {
 	}
 }
 
-// deniedExec is the API server refusing the subresource, in the shape a denial
+// errDeniedExec is the API server refusing the subresource, in the shape a denial
 // actually arrives in: an upgrade that failed before any Status was decoded.
-var deniedExec = errors.New(`unable to upgrade connection: pods "nvidia-driver-daemonset-on-worker-1" ` +
+var errDeniedExec = errors.New(`unable to upgrade connection: pods "nvidia-driver-daemonset-on-worker-1" ` +
 	`is forbidden: User "system:serviceaccount:support:reader" cannot create resource "pods/exec"`)
 
 // TestDebugExitsPartialWhenTheExecIsDenied is the difference between asking
@@ -613,8 +613,8 @@ func TestDebugExitsPartialWhenTheExecIsDenied(t *testing.T) {
 	t.Parallel()
 
 	seam := gatherSeam{
-		fetch:    func(context.Context, *corev1.Pod, string) error { return deniedExec },
-		runInPod: func(context.Context, *corev1.Pod, string, string) (string, error) { return "", deniedExec },
+		fetch:    func(context.Context, *corev1.Pod, string) error { return errDeniedExec },
+		runInPod: func(context.Context, *corev1.Pod, string, string) (string, error) { return "", errDeniedExec },
 	}
 
 	r, err := runDebug(t, seam, "worker-1", "-o", "json")
