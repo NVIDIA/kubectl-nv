@@ -87,9 +87,19 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 
 	node := nodeNamed(list, name)
 	if node == nil {
-		// Not an error about the cluster: the node is either not there or not
-		// one this tool has anything to say about, and either way the user
-		// typed the name. Exit 2.
+		// A node missing from an incomplete read is not a node with no GPUs.
+		// A DRA node is a GPU node only because a ResourceSlice names it, so
+		// with that list denied the node falls out of the inventory entirely;
+		// saying it has none would state a fact about the cluster that nobody
+		// established. The partial error says what was not read, and exit 3
+		// says the answer is incomplete.
+		if buildErr != nil {
+			return buildErr
+		}
+
+		// The read was complete and the node still is not in it: either the
+		// cluster does not have it or it has nothing to do with GPUs, and
+		// either way the user typed the name. Exit 2.
 		return output.NewUsageError("node %s has no GPUs and no GPU labels", name)
 	}
 
