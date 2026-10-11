@@ -1,0 +1,101 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# A stand-in for the NVIDIA driver daemonset, so that the end to end suite can
+# exercise the exec path of must-gather against a Mokka lane.
+#
+# The lane installs the GPU Operator with driver.enabled=false, because the
+# simulated GPUs need no kernel module. That leaves no pod carrying a driver
+# label, so the bug report collector has nothing to exec into and the whole
+# path, which is the one that reaches into a pod and copies a file out, goes
+# untested against a real API server.
+#
+# This daemonset carries the two labels the collector looks for and ships a
+# shell nvidia-bug-report.sh that writes the file the collector copies out. It
+# deliberately ships no nvidia-smi: the device usage section must be recorded
+# as skipped rather than producing a file of error messages, and a stand-in
+# that pretended to have one would never exercise that.
+#
+# The image is pinned by digest. A floating tag would make a failure here
+# unreproducible, and the suite would be testing whatever busybox was pushed
+# that morning.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: driver-standin-scripts
+  namespace: gpu-operator
+data:
+  # The report is a gzip of one line naming the node, so that the e2e test can
+  # tell each node's report apart from every other node's. Anything less
+  # specific would pass just as well if the collector copied one node's report
+  # into every file.
+  nvidia-bug-report.sh: |
+    #!/bin/sh
+    set -eu
+    printf 'nvidia-bug-report from node %s\n' "${NODE_NAME}" \
+        | gzip -c > /tmp/nvidia-bug-report.log.gz
+    echo "nvidia-bug-report.sh: wrote /tmp/nvidia-bug-report.log.gz"
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-driver-standin
+  namespace: gpu-operator
+  labels:
+    app: nvidia-driver-daemonset
+    app.kubernetes.io/component: nvidia-driver
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-driver-daemonset
+  template:
+    metadata:
+      labels:
+        app: nvidia-driver-daemonset
+        app.kubernetes.io/component: nvidia-driver
+      annotations:
+        # The container the collector execs into. The pod runs one container,
+        # so the annotation is not load bearing here; it is set because a real
+        # driver pod sets it and the collector reads it.
+        kubectl.kubernetes.io/default-container: nvidia-driver-ctr
+    spec:
+      # The lane's control plane carries no operands, and the assertions are
+      # per worker, so the stand-in stays off it.
+      nodeSelector:
+        kubernetes.io/os: linux
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
+      containers:
+        - name: nvidia-driver-ctr
+          image: busybox@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+          command: ["/bin/sh", "-c", "trap : TERM INT; sleep infinity & wait"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            # The collector runs "cd /tmp && nvidia-bug-report.sh", with no
+            # path, so the script has to be found on PATH.
+            - name: PATH
+              value: /opt/driver-standin/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          volumeMounts:
+            - name: scripts
+              mountPath: /opt/driver-standin/bin
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      volumes:
+        - name: scripts
+          configMap:
+            name: driver-standin-scripts
+            defaultMode: 0555
