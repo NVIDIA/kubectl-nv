@@ -29,8 +29,34 @@ import (
 // nobody made.
 const requestedUnknown = "?"
 
-// baseColumns are the columns of the default table, in order.
-var baseColumns = []string{"NODE", "PRODUCT", "GPUS", "DRIVER", "CUDA", "MODE", "MIG", "UPGRADE", "STATUS"}
+// baseColumns are the columns of the default table, in order, each with the
+// dotted JSON path it renders.
+//
+// The path is what --fields keeps a column by, so every column names one: a
+// column with an empty Field is dropped the moment --fields is given, with no
+// error anywhere to say it happened.
+//
+// Two of them render more than one path and name the one a reader would ask
+// for. GPUS shows requested, allocatable and capacity, and is kept by
+// "capacity"; STATUS shows the Ready condition and the cordon, and is kept by
+// "ready". A Column holds a single path, so "--fields requested" alone does
+// not keep the GPUS column; the machine readable formats are where a single
+// field is projected on its own.
+var baseColumns = []output.Column{
+	{Header: "NODE", Field: "metadata.name"},
+	{Header: "PRODUCT", Field: "product"},
+	{Header: "GPUS", Field: "capacity"},
+	{Header: "DRIVER", Field: "driverVersion"},
+	{Header: "CUDA", Field: "cudaVersion"},
+	{Header: "MODE", Field: "mode"},
+	{Header: "MIG", Field: "mig"},
+	{Header: "UPGRADE", Field: "upgradeState"},
+	{Header: "STATUS", Field: "ready"},
+}
+
+// cliqueColumn and the topology columns are the wide ones. Every topology
+// column renders one key of the same map, so they share its path.
+var cliqueColumn = output.Column{Header: "CLIQUE", Field: "clique"}
 
 // TableColumns implements output.TableRows.
 func (n *GPUNode) TableColumns(wide bool) []output.Column {
@@ -84,17 +110,14 @@ func (l *GPUNodeList) topologyKeys() []string {
 
 // columnsFor builds the header row.
 func columnsFor(wide bool, topologyKeys []string) []output.Column {
-	headers := baseColumns
-	if wide {
-		headers = append(append([]string{}, headers...), "CLIQUE")
-		for _, key := range topologyKeys {
-			headers = append(headers, strings.ToUpper(key))
-		}
+	out := append([]output.Column{}, baseColumns...)
+	if !wide {
+		return out
 	}
 
-	out := make([]output.Column, 0, len(headers))
-	for _, h := range headers {
-		out = append(out, output.Column{Header: h})
+	out = append(out, cliqueColumn)
+	for _, key := range topologyKeys {
+		out = append(out, output.Column{Header: strings.ToUpper(key), Field: "topology"})
 	}
 
 	return out

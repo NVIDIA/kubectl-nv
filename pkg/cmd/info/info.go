@@ -32,7 +32,14 @@ import (
 // options is what the flags fill in.
 type options struct {
 	fromBundle string
-	format     string
+	// out is -o, --fields and --limit, registered together by pkg/output so
+	// that every command and the MCP server agree on what they are called.
+	//
+	// --limit is registered and does nothing here: this command prints one
+	// object, never a list. It is taken anyway because a program driving
+	// kubectl-nv should be able to pass the same bounds to every read-only
+	// command without first learning which of them are list shaped.
+	out *output.OutputOptions
 }
 
 // NewCommand builds the info command.
@@ -56,15 +63,20 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 	flags := c.Flags()
 	flags.StringVar(&opts.fromBundle, "from-bundle", "",
 		"Read a must-gather directory instead of a cluster")
-	flags.StringVarP(&opts.format, "output", "o", "",
-		"Output format: table, wide, json, yaml or name")
+	opts.out = output.AddOutputFlags(c)
 
 	return c
 }
 
 // run builds the one node and prints it.
 func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
-	format, err := output.ParseFormat(opts.format)
+	// Validated against an empty node of the kind, before anything is read: a
+	// misspelled --fields found after the scan has cost the user the wait.
+	if err := opts.out.Validate(inventory.NewGPUNode("")); err != nil {
+		return err
+	}
+
+	format, err := output.ParseFormat(opts.out.Format)
 	if err != nil {
 		return err
 	}
@@ -111,12 +123,7 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 		return buildErr
 	}
 
-	printer, err := output.NewPrinter(opts.format)
-	if err != nil {
-		return err
-	}
-
-	if err := printer.PrintObj(node, o.Streams.Out); err != nil {
+	if err := opts.out.Print(o.Streams, node); err != nil {
 		return fmt.Errorf("printing the GPU node: %w", err)
 	}
 

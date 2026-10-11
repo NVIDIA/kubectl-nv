@@ -36,7 +36,9 @@ type options struct {
 	noPods        bool
 	includeHinted bool
 	fromBundle    string
-	format        string
+	// out is -o, --fields and --limit, registered together by pkg/output so
+	// that every command and the MCP server agree on what they are called.
+	out *output.OutputOptions
 }
 
 // NewCommand builds the list command.
@@ -70,16 +72,17 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 		"Also list the nodes that carry an NVIDIA label but advertise no GPUs")
 	flags.StringVar(&opts.fromBundle, "from-bundle", "",
 		"Read a must-gather directory instead of a cluster")
-	flags.StringVarP(&opts.format, "output", "o", "",
-		"Output format: table, wide, json, yaml or name")
+	opts.out = output.AddOutputFlags(c)
 
 	return c
 }
 
 // run builds the inventory and prints it.
 func run(c *cobra.Command, o *cmd.Options, opts *options) error {
-	printer, err := output.NewPrinter(opts.format)
-	if err != nil {
+	// Validated against an empty list of the kind, before anything is read. A
+	// misspelled --fields found after the scan has cost the user the wait for
+	// a scan nobody needed.
+	if err := opts.out.Validate(inventory.NewGPUNodeList()); err != nil {
 		return err
 	}
 
@@ -101,7 +104,7 @@ func run(c *cobra.Command, o *cmd.Options, opts *options) error {
 		return buildErr
 	}
 
-	if err := printer.PrintObj(list, o.Streams.Out); err != nil {
+	if err := opts.out.Print(o.Streams, list); err != nil {
 		return fmt.Errorf("printing the GPU nodes: %w", err)
 	}
 
