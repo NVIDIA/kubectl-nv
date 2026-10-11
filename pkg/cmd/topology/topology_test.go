@@ -685,41 +685,43 @@ func TestTopologyKeepsTheReportWhenThePodReadIsDenied(t *testing.T) {
 // one place, so that the MCP server and every command agree on what the
 // format flag is called.
 func TestTopologyTakesTheSharedOutputFlags(t *testing.T) {
-	raw, err := run(t, []string{"-o", "json", "--fields", "levels.name"},
+	raw, err := run(t, []string{"-o", "json", "--fields", "levels"},
 		gpuNode("node-a", "clique-a", 4),
 	)
 	if err != nil {
-		t.Fatalf("topology --fields levels.name: %v", err)
+		t.Fatalf("topology --fields levels: %v", err)
 	}
 
-	if !strings.Contains(raw, `"name"`) {
-		t.Errorf("the projection carries no level names:\n%s", raw)
+	if !strings.Contains(raw, `"levels"`) {
+		t.Errorf("the projection carries no levels:\n%s", raw)
 	}
-	if strings.Contains(raw, `"allocatable"`) {
-		t.Errorf("the projection carries a field nobody asked for:\n%s", raw)
+	if strings.Contains(raw, `"kueue"`) || strings.Contains(raw, `"status"`) {
+		t.Errorf("the projection carries a section nobody asked for:\n%s", raw)
 	}
 }
 
 // TestTopologyProjectsTheTableColumns: --fields on a table keeps the columns
-// the user named, which is the same vocabulary as -o json.
+// whose field the user named, out of the same vocabulary as -o json. Asking
+// for the fit keeps the column that answers about it and drops the rest.
 func TestTopologyProjectsTheTableColumns(t *testing.T) {
-	raw, err := run(t, []string{"--fields", "levels.groups.free"},
+	raw, err := run(t, []string{"--fields", "fit", "--for", "job/trainer"},
 		gpuNode("node-a", "clique-a", 4),
+		gpuJob("trainer", 1, 2),
 	)
 	if err != nil {
-		t.Fatalf("topology --fields levels.groups.free: %v", err)
+		t.Fatalf("topology --fields fit: %v", err)
 	}
 
 	header := strings.Fields(strings.Split(raw, "\n")[0])
-	if len(header) != 1 || header[0] != "FREE" {
-		t.Errorf("the header is %v, want just FREE:\n%s", header, raw)
+	if len(header) != 1 || header[0] != "FITS" {
+		t.Errorf("the header is %v, want just FITS:\n%s", header, raw)
 	}
 }
 
 // TestTopologyRefusesAnUnknownField keeps the field vocabulary closed, so a
 // typo is exit 2 rather than an empty projection.
 func TestTopologyRefusesAnUnknownField(t *testing.T) {
-	_, err := run(t, []string{"--fields", "levels.nonesuch"}, gpuNode("node-a", "clique-a", 4))
+	_, err := run(t, []string{"--fields", "nonesuch"}, gpuNode("node-a", "clique-a", 4))
 
 	var usage *output.UsageError
 	if !errors.As(err, &usage) {

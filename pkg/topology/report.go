@@ -123,20 +123,27 @@ func NewTopologyReport() *TopologyReport {
 // when a job was asked about, so that the ordinary table is not a column of
 // one repeated word.
 func (r *TopologyReport) TableColumns(wide bool) []output.Column {
+	// Every column that comes out of a level names "levels", and the fit
+	// column names "fit". Those are the paths output.FieldPaths offers for
+	// this kind: a level and a group each marshal themselves, which is how
+	// they guarantee no nulls, and a type that marshals itself is a leaf to
+	// the path walker. So --fields here selects whole sections of the report
+	// rather than single numbers, and a column naming a finer path would be
+	// one no user could ask for.
 	columns := []output.Column{
-		{Header: "LEVEL"},
-		{Header: "GROUP"},
-		{Header: "NODES"},
-		{Header: "ALLOCATABLE"},
-		{Header: "REQUESTED"},
-		{Header: "FREE"},
-		{Header: "LARGEST-FREE"},
+		{Header: "LEVEL", Field: "levels"},
+		{Header: "GROUP", Field: "levels"},
+		{Header: "NODES", Field: "levels"},
+		{Header: "ALLOCATABLE", Field: "levels"},
+		{Header: "REQUESTED", Field: "levels"},
+		{Header: "FREE", Field: "levels"},
+		{Header: "LARGEST-FREE", Field: "levels"},
 	}
 	if wide {
-		columns = append(columns, output.Column{Header: "NODE-NAMES"})
+		columns = append(columns, output.Column{Header: "NODE-NAMES", Field: "levels"})
 	}
 	if r.Fit != nil {
-		columns = append(columns, output.Column{Header: "FITS"})
+		columns = append(columns, output.Column{Header: "FITS", Field: "fit"})
 	}
 
 	return columns

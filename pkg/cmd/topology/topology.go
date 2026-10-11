@@ -35,12 +35,13 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/topology"
 )
 
-// reader is everything this command reads. It is an interface rather than
+// reader is everything this command reads: the inventory's own source, plus
+// the three reads Track G added to it. It is an interface rather than
 // *source.Live so that the tests drive the command over fakes, and so that a
-// must-gather bundle can be read through the same code once the Kueue
-// objects are collected into one.
+// must-gather bundle can be read through the same code once the Kueue objects
+// are collected into one.
 type reader interface {
-	topology.NodeReader
+	source.Source
 
 	Topologies(ctx context.Context) ([]unstructured.Unstructured, error)
 	ResourceFlavors(ctx context.Context) ([]unstructured.Unstructured, error)
@@ -49,7 +50,7 @@ type reader interface {
 
 // options is the state one run of the command carries.
 type options struct {
-	format string
+	out    *output.OutputOptions
 	forRef string
 }
 
@@ -71,8 +72,10 @@ func NewCommand(o *cmd.Options) *cobra.Command {
 		},
 	}
 
-	c.Flags().StringVarP(&opts.format, "output", "o", "",
-		"Output format: table, wide, json, yaml or name")
+	// -o, --fields and --limit come from one place, so that this command, the
+	// schema and the MCP server cannot disagree about what the format flag is
+	// called.
+	opts.out = output.AddOutputFlags(c)
 	c.Flags().StringVar(&opts.forRef, "for", "",
 		"Answer where one workload would fit, as job/<name> in the namespace -n names")
 
@@ -85,10 +88,10 @@ func run(ctx context.Context, o *cmd.Options, opts *options) error {
 		ctx = context.Background()
 	}
 
-	// The format is parsed before anything is read, so that a typo in -o
-	// costs nothing and is reported as the usage error it is.
-	printer, err := output.NewPrinter(opts.format)
-	if err != nil {
+	// The output flags are checked before anything is read, so that a typo in
+	// -o or --fields costs nothing and is reported as the usage error it is,
+	// rather than after a cluster-wide scan nobody needed.
+	if err := opts.out.Validate(topology.NewTopologyReport()); err != nil {
 		return err
 	}
 
@@ -97,9 +100,11 @@ func run(ctx context.Context, o *cmd.Options, opts *options) error {
 	// only be slower.
 	var jobName string
 	if opts.forRef != "" {
-		if jobName, err = topology.ParseForTarget(opts.forRef); err != nil {
+		name, err := topology.ParseForTarget(opts.forRef)
+		if err != nil {
 			return err
 		}
+		jobName = name
 	}
 
 	src, err := newSource(o)
@@ -112,7 +117,7 @@ func run(ctx context.Context, o *cmd.Options, opts *options) error {
 		return err
 	}
 
-	if err := printer.PrintObj(report, o.Streams.Out); err != nil {
+	if err := opts.out.Print(o.Streams, report); err != nil {
 		return fmt.Errorf("printing the topology report: %w", err)
 	}
 
@@ -127,12 +132,23 @@ func run(ctx context.Context, o *cmd.Options, opts *options) error {
 func build(ctx context.Context, src reader, o *cmd.Options, jobName string) (*topology.TopologyReport, error, error) {
 	var partial []error
 
-	nodes, err := topology.BuildNodes(ctx, src)
+	// The whole inventory, not a model of its own: the grouping reads the
+	// clique, the Topograph labels, the allocatable and the requested GPUs,
+	// and every one of those is a field pkg/inventory already fills from the
+	// same three reads. NoPods is deliberately left off: without the pod list
+	// there is no requested count, and a report that cannot say what is free
+	// cannot answer where anything fits.
+	list, err := inventory.Build(ctx, src, inventory.BuildOptions{})
 	if err != nil {
 		if !isPartial(err) {
 			return nil, nil, err
 		}
 		partial = append(partial, err)
+	}
+
+	var nodes []inventory.GPUNode
+	if list != nil {
+		nodes = list.Items
 	}
 
 	in := topology.Input{Nodes: nodes}

@@ -27,23 +27,29 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 )
 
-// The node labels this package groups by. The clique is the GPU operator's,
-// the fabric and accelerator labels are Topograph's, and the hostname is
-// Kubernetes' own.
+// The node labels this package groups by.
+//
+// The four that describe hardware are pkg/inventory's: it is the package that
+// reads them off a node and splits them into the model's fields, so a copy of
+// the strings here would be a second place to change and a silent way for the
+// two to disagree about what a clique is called.
 const (
 	// LabelClique is the NVLink or IMEX clique a node's GPUs belong to.
-	LabelClique = "nvidia.com/gpu.clique"
+	LabelClique = inventory.LabelClique
 	// LabelSubDomain is the accelerator sub-domain, an optional division
 	// inside an accelerator domain, so it is the narrower of the two.
-	LabelSubDomain = "accelerator.topograph.run/sub-domain"
+	LabelSubDomain = inventory.TopologyAcceleratorSubDomain
 	// LabelDomain is the accelerator domain, the NVLink domain a node is in.
-	LabelDomain = "accelerator.topograph.run/domain"
+	LabelDomain = inventory.TopologyAcceleratorDomain
 	// LabelTierPrefix prefixes one label per fabric tier, the number of the
 	// tier following it: fabric.topograph.run/tier-0, tier-1 and so on. Tier
 	// 0 is the one closest to the node and the numbers increase outwards.
-	LabelTierPrefix = "fabric.topograph.run/tier-"
+	LabelTierPrefix = inventory.TopologyFabricPrefix
 	// LabelHostname is the node's own name as a label. It is the node level,
 	// and the label a Kueue Topology names when it declares one.
+	//
+	// This one is Kubernetes' own and not part of the GPU model, so it is
+	// spelled here.
 	LabelHostname = "kubernetes.io/hostname"
 )
 

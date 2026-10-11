@@ -196,6 +196,6 @@ func TestReferencedTopologiesReportsAMalformedObjectAndKeepsTheRest(t *testing.T
 		t.Error("a malformed Topology was accepted without a word")
 	}
 	if len(got) != 1 || got[0].Name != "gpu" {
-		t.Errorf("resolved %+v, want only the gpu topology", got)
+		t.Errorf("resolved %+v, want only the Topology named gpu", got)
 	}
 }
