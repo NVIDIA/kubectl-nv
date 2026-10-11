@@ -66,9 +66,21 @@ GPU_OPERATOR_RELEASE="gpu-operator"
 GPU_OPERATOR_NAMESPACE="gpu-operator"
 
 # The operand DaemonSets whose rollout decides whether the lane is usable.
-# These are the two that put nvidia.com/gpu into node allocatable and the
-# nvidia.com/* labels onto the node; the validator and dcgm-exporter do not.
-MOKKA_OPERAND_DAEMONSETS="nvidia-device-plugin-daemonset gpu-feature-discovery"
+#
+# The first two put nvidia.com/gpu into node allocatable and the nvidia.com/*
+# labels onto the node. The exporter does neither, and it is here because of
+# what reads the lane next rather than because of what it writes: its readiness
+# probe carries a 45 second initialDelaySeconds, so for three quarters of a
+# minute after the other two are ready it is a GPU Operator operand that the
+# ClusterPolicy enables and that is not Ready. `kubectl nv health` reports that
+# as NV-DCGM-001 at warning, and the healthy gate that runs straight after this
+# script then fails on a lane that is merely still starting.
+#
+# A lane whose values file disabled the exporter would wait here for the whole
+# ready timeout and then fail, because an absent DaemonSet is read as "not
+# yet". That is deliberate: this list is the definition of a usable lane, and
+# hack/mokka/gpu-operator-values.yaml enables the exporter.
+MOKKA_OPERAND_DAEMONSETS="nvidia-device-plugin-daemonset gpu-feature-discovery nvidia-dcgm-exporter"
 
 # ---------------------------------------------------------------------------
 # Timings, all overridable for tests

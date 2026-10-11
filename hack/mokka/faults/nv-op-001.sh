@@ -69,7 +69,16 @@ recover() {
         return 0
     fi
 
-    faults::set_operand_version "${OPERAND}" "$(faults::load version)"
+    local saved
+    saved="$(faults::load version)"
+    faults::set_operand_version "${OPERAND}" "${saved}"
+
+    # The ClusterPolicy goes back to ready only once the operator has written
+    # the restored image into the DaemonSet it owns. Returning before that
+    # leaves the finding this script injected still in the next report, which
+    # is a recover that has not recovered anything yet.
+    faults::wait_for_template "nvidia-device-plugin-daemonset" absent "${FAULTS_ABSENT_VERSION}"
+
     faults::forget
     faults::note "NV-OP-001: spec.${OPERAND}.version restored, state is '$(faults::policy_state)'"
 }

@@ -50,6 +50,15 @@ inject() {
 
     local before
     before="$(faults::node_label "${FAULTS_NODE}" "${LABEL}")"
+
+    # Already off. Injecting here would save "false" as the value to restore,
+    # and recover would then leave the device plugin switched off for good on a
+    # lane the next case expects to be whole.
+    if faults::deploy_is_off "${before}"; then
+        faults::die "${FAULTS_RC_ALREADY}" \
+            "${LABEL} on ${FAULTS_NODE} is already '${before}'; the operand is not running to be stopped"
+    fi
+
     faults::save "label" "${before}"
 
     faults::note "NV-NODE-002: ${LABEL} was '${before:-<absent>}' on ${FAULTS_NODE}"
@@ -64,7 +73,9 @@ recover() {
         return 0
     fi
 
-    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "$(faults::load label)"
+    local saved
+    saved="$(faults::load label)"
+    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"
     faults::wait_for_operand_ready "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"
     faults::forget
     faults::note "NV-NODE-002: ${LABEL} restored on ${FAULTS_NODE}"

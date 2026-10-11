@@ -185,6 +185,33 @@ faults::init() {
             ;;
     esac
 
+    # The prefix on its own is not enough. What follows it has to be a lane
+    # somebody could have created: hack/mokka/lib.sh's mokka::valid_lane holds
+    # a lane to a DNS label of at most 32 characters, so a context carrying
+    # anything else was not written by up.sh, and the match is anchored against
+    # the WHOLE suffix because a line-oriented check accepts an embedded
+    # newline and reads only its first line.
+    local lane_suffix="${FAULTS_CONTEXT#kind-kubectl-nv-}"
+    if ! [[ ${lane_suffix} =~ ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]; then
+        faults::die "${FAULTS_RC_USAGE}" \
+            "lane '${lane_suffix}' in context ${FAULTS_CONTEXT} is not a DNS label; refusing to write to it"
+    fi
+
+    # And the cluster answers on the loopback address. A kind lane always
+    # does, because kind publishes its API server on 127.0.0.1; a context
+    # named like one of ours that answers somewhere else is either a mistake
+    # or somebody else's cluster wearing the name, and the name is the only
+    # thing the checks above can see.
+    local server
+    server="$(k config view --minify -o 'jsonpath={.clusters[0].cluster.server}' 2> /dev/null || true)"
+    case "${server}" in
+        https://127.0.0.1:*) ;;
+        *)
+            faults::die "${FAULTS_RC_USAGE}" \
+                "context ${FAULTS_CONTEXT} points at ${server:-<unreadable>}, which is not a local kind lane"
+            ;;
+    esac
+
     # The state is per lane as well as per code and node: two lanes up at once
     # must not recover each other's saved values.
     #
@@ -198,6 +225,18 @@ faults::init() {
 
     if ! faults::node_exists "${FAULTS_NODE}"; then
         faults::die "${FAULTS_RC_USAGE}" "no node named ${FAULTS_NODE} in ${FAULTS_CONTEXT}"
+    fi
+
+    # Which cluster this is, as against which cluster it is called. A lane torn
+    # down and brought up again has the same name, the same context and the
+    # same state directory, and none of the values saved against the old one
+    # mean anything against the new one. The kube-system namespace is created
+    # once per cluster and never recreated, so its UID is the cluster's
+    # identity; recover compares it and refuses rather than writing a stale
+    # image version or replica count into a cluster that never had it.
+    FAULTS_LANE_UID="$(k get namespace kube-system -o 'jsonpath={.metadata.uid}' 2> /dev/null || true)"
+    if [ -z "${FAULTS_LANE_UID}" ]; then
+        faults::die "${FAULTS_RC_USAGE}" "cannot read the kube-system UID of ${FAULTS_CONTEXT}"
     fi
 }
 
@@ -233,29 +272,66 @@ faults::refuse_double_inject() {
     fi
 }
 
+# faults::lane_stamp_file
+# Where the cluster identity of the saved state lives.
+faults::lane_stamp_file() {
+    printf '%s/.lane-uid' "${FAULTS_STATE}"
+}
+
 # faults::save <key> <value>
 # An empty value is written as the absent sentinel, so that recover can tell
 # "there was no such field" from "the field was there and empty".
+#
+# The write is atomic: a temporary file in the same directory, then a rename.
+# A half-written key is worse than no key at all, because recover would read
+# it and put the truncated value back; a rename either happened or did not.
 faults::save() {
-    local key="$1" value="$2"
+    local key="$1" value="$2" tmp
     mkdir -p "${FAULTS_STATE}"
     chmod 700 "${FAULTS_STATE}"
+
+    # The cluster this state belongs to, written once, with the first key.
+    if [ ! -f "$(faults::lane_stamp_file)" ]; then
+        printf '%s' "${FAULTS_LANE_UID}" > "$(faults::lane_stamp_file).tmp"
+        command mv -f "$(faults::lane_stamp_file).tmp" "$(faults::lane_stamp_file)"
+    fi
+
     if [ -z "${value}" ]; then
         value="${FAULTS_ABSENT_SENTINEL}"
     fi
-    printf '%s' "${value}" > "${FAULTS_STATE}/${key}"
+    tmp="${FAULTS_STATE}/.${key}.tmp"
+    printf '%s' "${value}" > "${tmp}"
+    command mv -f "${tmp}" "${FAULTS_STATE}/${key}"
 }
 
 # faults::load <key>
-# Prints the saved value, or the absent sentinel when nothing was saved under
-# that key. A caller compares against FAULTS_ABSENT_SENTINEL.
+# Prints the saved value. A key that was never saved is a failure rather than
+# an absent sentinel: "the field was absent when we looked" is a value inject
+# writes down explicitly, so a missing FILE means the state is incomplete, and
+# recovering from incomplete state is how a lane gets a value nobody chose.
 faults::load() {
     local file="${FAULTS_STATE}/$1"
     if [ ! -f "${file}" ]; then
-        printf '%s' "${FAULTS_ABSENT_SENTINEL}"
-        return
+        faults::die 1 "saved state for ${FAULTS_CODE} on ${FAULTS_NODE} has no '$1' key (looked in ${FAULTS_STATE})"
     fi
     cat "${file}"
+}
+
+# faults::check_lane_stamp
+# Refuses when the saved state belongs to another cluster. Called by
+# nothing_to_recover, so every recover goes through it.
+#
+# A stamp this code cannot read is treated as a mismatch. The alternative is to
+# accept it, and the whole point of the stamp is that state of unknown
+# provenance is not applied to a live cluster.
+faults::check_lane_stamp() {
+    local saved
+    saved="$(cat "$(faults::lane_stamp_file)" 2> /dev/null || true)"
+    if [ "${saved}" = "${FAULTS_LANE_UID}" ]; then
+        return 0
+    fi
+    faults::die "${FAULTS_RC_USAGE}" \
+        "saved state in ${FAULTS_STATE} belongs to cluster ${saved:-<unreadable>}, and ${FAULTS_CONTEXT} is ${FAULTS_LANE_UID}; delete that directory if the old lane is gone"
 }
 
 # faults::forget
@@ -270,6 +346,8 @@ faults::forget() {
 # whether there is no saved state, in which case the script says so and exits 0.
 faults::nothing_to_recover() {
     if faults::injected; then
+        faults::check_lane_stamp
+
         return 1
     fi
     faults::note "${FAULTS_CODE}: nothing to recover on ${FAULTS_NODE}"
@@ -344,13 +422,34 @@ faults::set_operand_version() {
 # ---------------------------------------------------------------------------
 
 # faults::pod_on_node <namespace> <selector> <node>
-# The name of the first pod matching the selector on that node, empty when
-# there is none. The node is a field selector rather than a grep over names:
-# a lane has one such pod per node and the names differ only by a suffix.
+# The name of a live pod matching the selector on that node, empty when there
+# is none.
+#
+# The node is a field selector rather than a grep over names: a lane has one
+# such pod per node and the names differ only by a suffix, so a name match
+# would pick the other worker's pod as readily as this one's.
+#
+# Two pods are skipped, and both of them have been waited on by mistake here.
+# A pod carrying a deletionTimestamp is terminating: it still matches the
+# selector and still answers Ready, so a recover that waited for it would
+# return while the replacement had not started. And the pod restart_operand
+# just deleted, by UID, which is the same trap one moment earlier, before the
+# API server has put the timestamp on it.
 faults::pod_on_node() {
-    k --namespace "$1" get pod -l "$2" \
-        --field-selector "spec.nodeName=$3" \
-        -o 'jsonpath={.items[0].metadata.name}' 2> /dev/null
+    local namespace="$1" selector="$2" node="$3" pods name uid deleted
+    pods="$(k --namespace "${namespace}" get pod -l "${selector}" \
+        --field-selector "spec.nodeName=${node}" \
+        -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.metadata.uid}{" "}{.metadata.deletionTimestamp}{"\n"}{end}' \
+        2> /dev/null || true)"
+
+    while IFS=' ' read -r name uid deleted; do
+        [ -n "${name}" ] || continue
+        [ -z "${deleted}" ] || continue
+        [ "${uid}" != "${FAULTS_DELETED_POD_UID:-}" ] || continue
+        printf '%s' "${name}"
+
+        return 0
+    done <<< "${pods}"
 }
 
 # ---------------------------------------------------------------------------
@@ -367,7 +466,7 @@ faults::pod_on_node() {
 #     to have its pod deleted, because the DaemonSet controller makes a pod for
 #     a node that has none from the CURRENT template, whatever the rollout is
 #     waiting on.
-#   - The device plugin reads the mock's Xid events when it opens its event
+#   - The device plugin reads nvml-mock's Xid events when it opens its event
 #     set, which it does once, at startup. A failure injected under a running
 #     plugin changes nothing; the same failure with the plugin restarted after
 #     it takes allocatable from 4 to 3 within ten seconds.
@@ -393,6 +492,13 @@ faults::restart_operand() {
 
         return 0
     fi
+
+    # Remembered before the delete, so that every later lookup in this run can
+    # skip it even in the window before the API server has given it a
+    # deletionTimestamp.
+    FAULTS_DELETED_POD_UID="$(k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get pod "${pod}" \
+        -o 'jsonpath={.metadata.uid}' 2> /dev/null || true)"
+
     k --namespace "${FAULTS_OPERATOR_NAMESPACE}" delete pod "${pod}" --wait=false > /dev/null
     faults::note "${FAULTS_CODE}: deleted ${app} pod ${pod} on ${node}"
 }
@@ -474,4 +580,16 @@ faults::wait_for_deployment_available() {
         fi
         sleep "${FAULTS_READY_POLL}"
     done
+}
+
+# faults::deploy_is_off <value>
+# Whether a nvidia.com/gpu.deploy.<operand> label value already says the
+# operand is not running. The same two shapes pkg/health/rules reads: "false",
+# and the "paused-for-..." family whose suffix changes between operator
+# versions.
+faults::deploy_is_off() {
+    case "$1" in
+        false | paused-*) return 0 ;;
+        *) return 1 ;;
+    esac
 }

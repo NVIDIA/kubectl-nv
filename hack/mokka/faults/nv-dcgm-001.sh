@@ -74,7 +74,9 @@ recover() {
         return 0
     fi
 
-    faults::set_operand_version "${OPERAND}" "$(faults::load version)"
+    local saved
+    saved="$(faults::load version)"
+    faults::set_operand_version "${OPERAND}" "${saved}"
 
     # The same two steps in reverse: wait for the operator to have written the
     # restored image into the template, then take the broken pod away so the

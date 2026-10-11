@@ -47,6 +47,14 @@ inject() {
 
     local before
     before="$(faults::node_label "${FAULTS_NODE}" "${LABEL}")"
+
+    # Already off, so there is nothing for this injection to turn off and the
+    # saved value would be the broken one. See nv-node-002.sh for the shape.
+    if faults::deploy_is_off "${before}"; then
+        faults::die "${FAULTS_RC_ALREADY}" \
+            "${LABEL} on ${FAULTS_NODE} is already '${before}'; the operand is not running to be stopped"
+    fi
+
     faults::save "label" "${before}"
 
     faults::note "NV-OP-002: ${LABEL} was '${before:-<absent>}' on ${FAULTS_NODE}"
@@ -60,7 +68,9 @@ recover() {
         return 0
     fi
 
-    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "$(faults::load label)"
+    local saved
+    saved="$(faults::load label)"
+    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"
     faults::wait_for_operand_ready "nvidia-dcgm-exporter" "${FAULTS_NODE}"
     faults::forget
     faults::note "NV-OP-002: ${LABEL} restored on ${FAULTS_NODE}"

@@ -75,6 +75,19 @@ inject() {
             "cannot read deploy/${DEPLOYMENT} in ${FAULTS_OPERATOR_NAMESPACE}"
     fi
 
+    # The operator is already down, or a stand-in from an earlier run is still
+    # there. Either way the saved replica count would be the broken one and
+    # recover would leave the lane with no operator at all.
+    if [ "${replicas}" = "0" ]; then
+        faults::die "${FAULTS_RC_ALREADY}" \
+            "deploy/${DEPLOYMENT} is already at 0 replicas; recover the earlier fault first"
+    fi
+    if [ -n "$(k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get pod "${STANDIN}" \
+        -o 'jsonpath={.metadata.name}' 2> /dev/null || true)" ]; then
+        faults::die "${FAULTS_RC_ALREADY}" \
+            "stand-in pod ${STANDIN} is already in ${FAULTS_OPERATOR_NAMESPACE}; recover the earlier fault first"
+    fi
+
     faults::save "replicas" "${replicas}"
     faults::save "label" "${before}"
     faults::note "NV-NODE-001: deploy/${DEPLOYMENT} at ${replicas} replicas, ${LABEL}='${before:-<absent>}' on ${FAULTS_NODE}"
@@ -97,13 +110,17 @@ recover() {
     # order leaves a window in which the operator is running and the label is
     # absent, which is the fault still being injected while the script claims
     # to have cleared it.
-    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "$(faults::load label)"
+    local saved_label saved_replicas
+    saved_label="$(faults::load label)"
+    saved_replicas="$(faults::load replicas)"
+
+    faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved_label}"
 
     k --namespace "${FAULTS_OPERATOR_NAMESPACE}" delete pod "${STANDIN}" \
         --ignore-not-found --wait=false > /dev/null
 
     k --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" \
-        --replicas="$(faults::load replicas)" > /dev/null
+        --replicas="${saved_replicas}" > /dev/null
     faults::wait_for_deployment_available "${DEPLOYMENT}"
 
     faults::forget

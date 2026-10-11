@@ -327,17 +327,52 @@ if [ "${assert_ok}" != true ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Record, do not gate
+# Wait for the operator's own verdict
 # ---------------------------------------------------------------------------
 #
-# ClusterPolicy state is recorded for the record only. It is not a gate yet:
-# the states this deployment reaches with the operands disabled by the values
-# file have not been characterised, so failing on it would be guesswork.
+# The ClusterPolicy state is a gate now, not only a record. It was a record
+# while the states this deployment reaches had not been characterised; they
+# have been, on every lane this repository has brought up, and the answer is
+# that it reaches "ready" and stays there.
+#
+# What makes it worth gating on is the reader. `kubectl nv health` reports
+# NV-OP-001 at error for a policy that is not ready, so a lane handed to the
+# suite before the operator has finished agreeing with itself fails the healthy
+# gate for a reason that has nothing to do with the change under test.
+#
+# It shares the deadline above rather than taking one of its own: what the
+# caller cares about is how long the lane takes to become usable, not how the
+# time divides between the operands and the policy. A policy that is
+# unreadable, because the CRD is not there at all, is not a failure: a lane
+# without the operator is a lane this gate has nothing to say about.
 
-cp_state="$(k get clusterpolicies.nvidia.com cluster-policy \
-    -o 'jsonpath={.status.state}' 2> /dev/null || true)"
+mokka::phase "wait for the ClusterPolicy"
+cp_state=""
+cp_ready=false
+cp_seen=false
+while :; do
+    if ! cp_state="$(k get clusterpolicies.nvidia.com cluster-policy \
+        -o 'jsonpath={.status.state}' 2> /dev/null)"; then
+        cp_state=""
+        break
+    fi
+    cp_seen=true
+    if [ "${cp_state}" = "ready" ]; then
+        cp_ready=true
+        break
+    fi
+    if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+        break
+    fi
+    sleep "${MOKKA_POLL_INTERVAL}"
+done
 
 mokka::phase
+
+if [ "${cp_seen}" = true ] && [ "${cp_ready}" != true ]; then
+    printf '%s\n' "up.sh: the ClusterPolicy did not reach ready within ${MOKKA_READY_TIMEOUT}s; its state is '${cp_state:-<empty>}'" >&2
+    exit 5
+fi
 
 printf '[mokka] ClusterPolicy state: %s\n' "${cp_state:-<unavailable>}"
 printf '\n'
