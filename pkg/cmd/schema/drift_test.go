@@ -132,16 +132,8 @@ func TestCheckDriftIgnoresNonSchemaFiles(t *testing.T) {
 	}
 }
 
-// The real one: whatever the commands have registered by the time the suite
-// runs has to match what is checked in under docs/schema.
-func TestCheckedInSchemasAreUpToDate(t *testing.T) {
-	t.Parallel()
-
-	dir := filepath.Join("..", "..", "..", "docs", "schema")
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("docs/schema is where the generated contract lives: %v", err)
-	}
-	if err := CheckDrift(output.DefaultSchemaRegistry(), dir); err != nil {
-		t.Fatal(err)
-	}
-}
+// The drift check against docs/schema itself lives in cmd/kubectl-nv, which is
+// the package that links the whole plugin and therefore the only place where
+// every kind another package registers is in the registry. Running it here
+// would compare docs/schema against the kinds this package happens to import,
+// which is none of them.
