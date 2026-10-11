@@ -293,3 +293,112 @@ func TestPodGPURequestCountsSharedReplicas(t *testing.T) {
 		t.Errorf("podGPURequest = %d, want 3", got)
 	}
 }
+
+// TestPodSpecGPURequest calls the exported rule with a PodSpec directly, which
+// is how a caller that has a pod template rather than a pod reaches it: a
+// Job's spec.template.spec is a PodSpec and no pod of it may exist yet.
+//
+// The whole point of exporting it is that a node's requested count and a job's
+// per-pod GPUs come out of one rule rather than two that agree today.
+func TestPodSpecGPURequest(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		spec corev1.PodSpec
+		want int64
+	}{
+		{
+			name: "an empty spec asks for nothing",
+			want: 0,
+		},
+		{
+			name: "the containers are summed",
+			spec: corev1.PodSpec{Containers: []corev1.Container{
+				gpuContainer("a", 2), gpuContainer("b", 1),
+			}},
+			want: 3,
+		},
+		{
+			name: "a sidecar is added and a plain init container maximised",
+			spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{sidecar("proxy", 1), gpuContainer("prepare", 4)},
+				Containers:     []corev1.Container{gpuContainer("app", 1)},
+			},
+			want: 5,
+		},
+		{
+			name: "the shared name counts",
+			spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						"nvidia.com/gpu.shared": *resource.NewQuantity(2, resource.DecimalSI),
+					},
+				},
+			}}},
+			want: 2,
+		},
+		{
+			name: "a limit with no request counts",
+			spec: corev1.PodSpec{Containers: []corev1.Container{{
+				Name: "app",
+				Resources: corev1.ResourceRequirements{
+					Limits: corev1.ResourceList{
+						"nvidia.com/gpu": *resource.NewQuantity(8, resource.DecimalSI),
+					},
+				},
+			}}},
+			want: 8,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := PodSpecGPURequest(&tt.spec); got != tt.want {
+				t.Errorf("PodSpecGPURequest = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPodSpecGPURequestIsTheRuleTheNodesUse pins that the two entry points are
+// one rule rather than two that happen to agree: the node path has to go
+// through the exported one, or a change to either drifts them apart silently.
+func TestPodSpecGPURequestIsTheRuleTheNodesUse(t *testing.T) {
+	t.Parallel()
+
+	pod := testPod("mixed", "n1", corev1.PodRunning,
+		[]corev1.Container{sidecar("proxy", 1), gpuContainer("prepare", 4)},
+		[]corev1.Container{gpuContainer("app", 2)})
+
+	fromPod := podGPURequest(&pod)
+	fromSpec := PodSpecGPURequest(&pod.Spec)
+
+	if fromPod != fromSpec {
+		t.Errorf("the pod rule says %d and the spec rule says %d", fromPod, fromSpec)
+	}
+
+	if fromSpec != 5 {
+		t.Errorf("PodSpecGPURequest = %d, want 5 (1 + 4 while prepare runs)", fromSpec)
+	}
+}
+
+// TestPodSpecGPURequestIgnoresThePhase pins the one thing the spec rule cannot
+// know. A PodSpec carries no status, so the caller decides whether the pod is
+// still holding its devices; the node path applies that filter itself.
+func TestPodSpecGPURequestIgnoresThePhase(t *testing.T) {
+	t.Parallel()
+
+	done := testPod("finished", "n1", corev1.PodSucceeded, nil, []corev1.Container{gpuContainer("app", 2)})
+
+	if got := PodSpecGPURequest(&done.Spec); got != 2 {
+		t.Errorf("PodSpecGPURequest = %d, want 2: a spec has no phase to filter on", got)
+	}
+
+	if got := requestedByNode([]corev1.Pod{done}); len(got) != 0 {
+		t.Errorf("requestedByNode = %#v, want nothing: the pod has given its devices back", got)
+	}
+}
