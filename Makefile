@@ -283,3 +283,66 @@ e2e-mig: build
 	    rc=$$?; \
 	fi; \
 	exit $$rc
+
+# The faults lane
+# ---------------------------------------------------------------------------
+#
+# A second Mokka lane, of its own name, that the fault suite breaks on purpose:
+# one injection per finding code, each recovered before the next. It is a lane
+# of its own and not a mode of e2e-mokka because the two make opposite
+# promises. e2e-mokka asserts that a lane nobody has touched reports nothing,
+# and a target that sometimes injected into it would be a gate that sometimes
+# tested the gate.
+#
+# The separation is carried by the build tags rather than by this file: the
+# fault tests are behind "e2e && faults" and the healthy gate behind "e2e"
+# alone, so `make e2e-mokka` cannot compile an injection even if it were
+# pointed at this lane by hand.
+#
+# The suite's own timeout is longer than e2e-mokka's. Sixteen injections, each
+# waiting for an operator reconcile or a kubelet status update to take hold and
+# again for it to clear, is a different order of wall clock from one gather.
+.PHONY: e2e-faults
+
+FAULTS_LANE ?= faults
+FAULTS_PROFILE ?= t4
+FAULTS_FLAGS ?= -tags e2e,faults -count=1 -timeout 90m
+FAULTS_CLUSTER := kubectl-nv-$(FAULTS_LANE)
+FAULTS_CONTEXT := kind-$(FAULTS_CLUSTER)
+FAULTS_KUBECONFIG := $(MOKKA_BIN_DIR)/kubeconfig-$(FAULTS_LANE)
+FAULTS_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(FAULTS_LANE)
+
+# The same shape as e2e-mokka, down to the exit 4 case: a lane of that name
+# that was already there belongs to somebody else and is neither dumped nor
+# deleted.
+e2e-faults: build
+	@set -u; \
+	export MOKKA_BIN_DIR="$(MOKKA_BIN_DIR)"; \
+	hack/mokka/up.sh $(FAULTS_LANE) $(FAULTS_PROFILE); up=$$?; \
+	if [ $$up -eq 4 ]; then \
+	    printf 'e2e-faults: %s already exists and was not created here; nothing touched\n' "$(FAULTS_CLUSTER)" >&2; \
+	    exit 4; \
+	fi; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	trap 'hack/mokka/down.sh $(FAULTS_LANE) || printf "e2e-faults: down.sh failed; cluster %s may still be up\n" "$(FAULTS_CLUSTER)" >&2' EXIT; \
+	rc=$$up; \
+	if [ $$rc -eq 0 ]; then \
+	    KUBECONFIG=$(FAULTS_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	        $(GO_CMD) test $(FAULTS_FLAGS) ./test/e2e/...; \
+	    rc=$$?; \
+	fi; \
+	if [ $$rc -ne 0 ]; then \
+	    mkdir -p $(FAULTS_DIAG_DIR); \
+	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
+	        get pods -A -o wide > $(FAULTS_DIAG_DIR)/pods.txt 2>&1 || true; \
+	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
+	        get nodes -o yaml > $(FAULTS_DIAG_DIR)/nodes.yaml 2>&1 || true; \
+	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
+	        get events -A --sort-by=.lastTimestamp > $(FAULTS_DIAG_DIR)/events.txt 2>&1 || true; \
+	    kind export logs $(FAULTS_DIAG_DIR)/kind --name $(FAULTS_CLUSTER) \
+	        > $(FAULTS_DIAG_DIR)/kind-export.txt 2>&1 || true; \
+	    printf 'e2e-faults: diagnostics in %s\n' "$(FAULTS_DIAG_DIR)" >&2; \
+	fi; \
+	exit $$rc
