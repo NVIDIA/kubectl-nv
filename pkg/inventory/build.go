@@ -164,7 +164,46 @@ func BuildWithHinted(
 	// between its neighbours, not in an appendix.
 	sort.Slice(out.Items, func(i, j int) bool { return out.Items[i].Name < out.Items[j].Name })
 
-	return out, excluded, errors.Join(partials...)
+	return out, excluded, joinPartials(partials)
+}
+
+// joinPartials combines the partial reads into one error, naming each lost
+// resource once.
+//
+// Two reads can lose the same resource: the node classification needs the
+// ResourceSlices to decide membership and the builder needs them again by
+// node, so a denial on that collection arrives twice. The user reads this
+// string, and "could not read resourceslices: forbidden; could not read
+// resourceslices: forbidden" reads as two problems and invites a search for a
+// second cause that does not exist.
+//
+// Only the first cause per resource is kept, and it is kept whole, so
+// errors.As and errors.Is still reach a real *PartialError.
+func joinPartials(partials []error) error {
+	if len(partials) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(partials))
+	kept := make([]error, 0, len(partials))
+
+	for _, err := range partials {
+		var partial *source.PartialError
+		if !errors.As(err, &partial) {
+			kept = append(kept, err)
+
+			continue
+		}
+
+		if _, dup := seen[partial.Resource]; dup {
+			continue
+		}
+
+		seen[partial.Resource] = struct{}{}
+		kept = append(kept, err)
+	}
+
+	return errors.Join(kept...)
 }
 
 // clusterFacts is what the three reads said, indexed by node.

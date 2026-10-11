@@ -18,7 +18,9 @@ package source
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
@@ -44,9 +46,35 @@ var clusterPolicyGVR = schema.GroupVersionResource{
 
 // Live reads a running cluster. Both clients are injected so that tests can
 // hand it a fake.
+//
+// One read is memoised for the life of the value: the ResourceSlice list. It
+// is the only read two different questions need, because the node
+// classification decides membership from it and the caller then asks which
+// slices belong to which node. Without the memo that is two lists of the same
+// collection on every run, and worse, two answers describing two moments: a
+// slice published between them makes a node a GPU node in one answer and not
+// in the other, which is the kind of inconsistency nobody reading the output
+// can diagnose.
+//
+// The memo is per value, not per process. A caller that wants a fresh look at
+// the cluster builds a new Live, which is what makes "nothing is cached
+// between calls" still true of the Source as a whole.
 type Live struct {
 	clientset kubernetes.Interface
 	dynamic   dynamic.Interface
+
+	// mu guards the memo below. A Source is not documented as safe for
+	// concurrent use, but the cost of being wrong about that is a duplicated
+	// list and a data race, so the lock is cheaper than the assumption.
+	mu sync.Mutex
+	// slices is every ResourceSlice in the cluster, whatever driver published
+	// it, as read once. sliceErr is what that read returned, including a
+	// denial: a denial is a result too, and retrying it would be a second
+	// rejection, a second audit log entry and a second identical cause in the
+	// error the user reads.
+	slices    []resourcev1.ResourceSlice
+	sliceErr  error
+	sliceRead bool
 }
 
 // NewLive returns a Source backed by the given clients.
@@ -166,6 +194,28 @@ func asPartial(err error, target **PartialError) bool {
 // turned on) are not covered: this package asks for v1 and will read them as
 // having no slices at all.
 func (l *Live) listResourceSlices(ctx context.Context) ([]resourcev1.ResourceSlice, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.sliceRead {
+		return l.slices, l.sliceErr
+	}
+
+	slices, err := l.readResourceSlices(ctx)
+
+	// A dead context is not an answer about the cluster, so it is not
+	// remembered as one: the next call, under a live context, has to be able
+	// to read.
+	if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		l.slices, l.sliceErr, l.sliceRead = slices, err, true
+	}
+
+	return slices, err
+}
+
+// readResourceSlices is the read itself, without the memo. The caller holds
+// l.mu.
+func (l *Live) readResourceSlices(ctx context.Context) ([]resourcev1.ResourceSlice, error) {
 	all, err := listAll[resourcev1.ResourceSlice](ctx, "", func(ctx context.Context, opts metav1.ListOptions) (runtime.Object, error) {
 		return l.clientset.ResourceV1().ResourceSlices().List(ctx, opts)
 	})
