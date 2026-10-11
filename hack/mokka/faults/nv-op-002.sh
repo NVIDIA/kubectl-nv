@@ -61,6 +61,7 @@ recover() {
     fi
 
     faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "$(faults::load label)"
+    faults::wait_for_operand_ready "nvidia-dcgm-exporter" "${FAULTS_NODE}"
     faults::forget
     faults::note "NV-OP-002: ${LABEL} restored on ${FAULTS_NODE}"
 }

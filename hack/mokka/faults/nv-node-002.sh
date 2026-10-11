@@ -65,6 +65,7 @@ recover() {
     fi
 
     faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "$(faults::load label)"
+    faults::wait_for_operand_ready "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"
     faults::forget
     faults::note "NV-NODE-002: ${LABEL} restored on ${FAULTS_NODE}"
 }

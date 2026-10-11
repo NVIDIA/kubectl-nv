@@ -57,6 +57,16 @@ inject() {
 
     faults::set_operand_version "${OPERAND}" "${FAULTS_ABSENT_VERSION}"
     faults::note "NV-DCGM-001: spec.${OPERAND}.version=${FAULTS_ABSENT_VERSION}"
+
+    # The patch alone breaks whichever node the rolling update reaches first,
+    # and stops there: the first replacement never becomes ready, so the
+    # update never moves on. On the first live run that was worker2 while the
+    # node under test kept its healthy pod for the whole six minutes. Deleting
+    # the pod on the node under test is what puts the fault where this script
+    # was asked to put it, because a node with no pod gets one from the
+    # template as it stands now rather than from the rollout's position.
+    faults::wait_for_template "nvidia-dcgm-exporter" present "${FAULTS_ABSENT_VERSION}"
+    faults::restart_operand "nvidia-dcgm-exporter" "${FAULTS_NODE}"
 }
 
 recover() {
@@ -65,6 +75,14 @@ recover() {
     fi
 
     faults::set_operand_version "${OPERAND}" "$(faults::load version)"
+
+    # The same two steps in reverse: wait for the operator to have written the
+    # restored image into the template, then take the broken pod away so the
+    # node gets one built from it.
+    faults::wait_for_template "nvidia-dcgm-exporter" absent "${FAULTS_ABSENT_VERSION}"
+    faults::restart_operand "nvidia-dcgm-exporter" "${FAULTS_NODE}"
+    faults::wait_for_operand_ready "nvidia-dcgm-exporter" "${FAULTS_NODE}"
+
     faults::forget
     faults::note "NV-DCGM-001: spec.${OPERAND}.version restored"
 }

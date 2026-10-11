@@ -282,12 +282,16 @@ faults::nothing_to_recover() {
 # ---------------------------------------------------------------------------
 
 # faults::node_label <node> <label>
-# Prints the label's value, empty when it is absent. The label name is escaped
-# for a jsonpath, where a dot and a slash are both path syntax.
+# Prints the label's value, empty when it is absent.
+#
+# Only the dots are escaped. A dot separates path components in a jsonpath and
+# a slash does not, so hack/mokka/up.sh reads these same labels as
+# nvidia\.com/gpu\.product with the slash left alone; escaping it as well
+# produces a key no label matches and an empty answer for every label, which
+# recover would then write back as "the label was absent".
 faults::node_label() {
     local node="$1" label="$2" escaped
     escaped="${label//./\\.}"
-    escaped="${escaped//\//\\/}"
     k get node "${node}" -o "jsonpath={.metadata.labels.${escaped}}"
 }
 
@@ -347,4 +351,127 @@ faults::pod_on_node() {
     k --namespace "$1" get pod -l "$2" \
         --field-selector "spec.nodeName=$3" \
         -o 'jsonpath={.items[0].metadata.name}' 2> /dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Operand pods
+# ---------------------------------------------------------------------------
+#
+# Two observations from the first live run against a t4 lane, both of which
+# turn a reproduction that "should work" into one that does:
+#
+#   - A DaemonSet rolling update takes one node at a time and stops at the
+#     first replacement that never becomes ready. Patching the ClusterPolicy at
+#     an image that cannot be pulled therefore breaks exactly one node, and
+#     which one is whichever the controller reached first. The target node has
+#     to have its pod deleted, because the DaemonSet controller makes a pod for
+#     a node that has none from the CURRENT template, whatever the rollout is
+#     waiting on.
+#   - The device plugin reads the mock's Xid events when it opens its event
+#     set, which it does once, at startup. A failure injected under a running
+#     plugin changes nothing; the same failure with the plugin restarted after
+#     it takes allocatable from 4 to 3 within ten seconds.
+#
+# Both come down to the same call, so it is written once.
+
+# How long to wait for a DaemonSet's pod template to carry a change, and how
+# often to look.
+FAULTS_TEMPLATE_TIMEOUT="${FAULTS_TEMPLATE_TIMEOUT:-180}"
+FAULTS_TEMPLATE_POLL="${FAULTS_TEMPLATE_POLL:-2}"
+
+# faults::restart_operand <app> <node>
+# Deletes the operand pod of that app label on the node, if there is one. The
+# DaemonSet controller replaces it from the template as it stands now.
+#
+# An absent pod is not an error: the DaemonSet may have taken it away already,
+# and the point of the call is the state afterwards rather than the deletion.
+faults::restart_operand() {
+    local app="$1" node="$2" pod
+    pod="$(faults::pod_on_node "${FAULTS_OPERATOR_NAMESPACE}" "app=${app}" "${node}")"
+    if [ -z "${pod}" ]; then
+        faults::note "${FAULTS_CODE}: no ${app} pod on ${node} to restart"
+
+        return 0
+    fi
+    k --namespace "${FAULTS_OPERATOR_NAMESPACE}" delete pod "${pod}" --wait=false > /dev/null
+    faults::note "${FAULTS_CODE}: deleted ${app} pod ${pod} on ${node}"
+}
+
+# faults::wait_for_template <daemonset> present|absent <needle>
+# Waits until the DaemonSet's pod template images do, or do not, contain the
+# needle. The operator writes the template, so this is the wait for the
+# operator to have acted on the ClusterPolicy patch; deleting the pod before it
+# has would replace the pod from the old template and inject nothing.
+faults::wait_for_template() {
+    local name="$1" want="$2" needle="$3" deadline images
+    deadline=$(($(date +%s) + FAULTS_TEMPLATE_TIMEOUT))
+    while :; do
+        images="$(k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get daemonset "${name}" \
+            -o 'jsonpath={.spec.template.spec.containers[*].image}{" "}{.spec.template.spec.initContainers[*].image}' \
+            2> /dev/null || true)"
+        case "${want}:${images}" in
+            present:*"${needle}"*) return 0 ;;
+            absent:*"${needle}"*) ;;
+            absent:*) return 0 ;;
+        esac
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            faults::die 1 "daemonset ${name} template did not have ${needle} ${want} within ${FAULTS_TEMPLATE_TIMEOUT}s (images: ${images:-<none>})"
+        fi
+        sleep "${FAULTS_TEMPLATE_POLL}"
+    done
+}
+
+# How long to wait for an operand to be Ready again after a recover.
+FAULTS_READY_TIMEOUT="${FAULTS_READY_TIMEOUT:-300}"
+FAULTS_READY_POLL="${FAULTS_READY_POLL:-3}"
+
+# faults::wait_for_operand_ready <app> <node>
+# Waits until the operand pod of that app label on the node is Ready.
+#
+# Every recover that disturbed an operand ends here, and the reason is a
+# failure the final live run produced: nv-op-002.sh put the deploy label back
+# and returned while the exporter pod was still being recreated, so the healthy
+# gate that runs after the fault suite saw NV-DCGM-001 on a lane whose faults
+# had all been "recovered". Putting the label back is not the same thing as the
+# lane being well again, and only the second one is what recover promises.
+faults::wait_for_operand_ready() {
+    local app="$1" node="$2" deadline ready pod
+    deadline=$(($(date +%s) + FAULTS_READY_TIMEOUT))
+    while :; do
+        pod="$(faults::pod_on_node "${FAULTS_OPERATOR_NAMESPACE}" "app=${app}" "${node}")"
+        if [ -n "${pod}" ]; then
+            ready="$(k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get pod "${pod}" \
+                -o 'jsonpath={.status.conditions[?(@.type=="Ready")].status}' 2> /dev/null || true)"
+            if [ "${ready}" = "True" ]; then
+                faults::note "${FAULTS_CODE}: ${app} pod ${pod} is Ready again on ${node}"
+
+                return 0
+            fi
+        fi
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            faults::die 1 "no Ready ${app} pod on ${node} within ${FAULTS_READY_TIMEOUT}s (pod: ${pod:-<none>})"
+        fi
+        sleep "${FAULTS_READY_POLL}"
+    done
+}
+
+# faults::wait_for_deployment_available <name>
+# The same promise for a Deployment: nv-node-001.sh scales the operator down,
+# so its recover is not done until the operator is back and reconciling.
+faults::wait_for_deployment_available() {
+    local name="$1" deadline ready
+    deadline=$(($(date +%s) + FAULTS_READY_TIMEOUT))
+    while :; do
+        ready="$(k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get deploy "${name}" \
+            -o 'jsonpath={.status.readyReplicas}' 2> /dev/null || true)"
+        if [ -n "${ready}" ] && [ "${ready}" -ge 1 ] 2> /dev/null; then
+            faults::note "${FAULTS_CODE}: deploy/${name} has ${ready} ready replica(s)"
+
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "${deadline}" ]; then
+            faults::die 1 "deploy/${name} had no ready replica within ${FAULTS_READY_TIMEOUT}s"
+        fi
+        sleep "${FAULTS_READY_POLL}"
+    done
 }

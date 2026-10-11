@@ -56,6 +56,14 @@ inject() {
 
     faults::mock_ctl "${pod}" ecc_uncorrectable
     faults::note "NV-NODE-003: GPU ${GPU_INDEX} failed on ${FAULTS_NODE}"
+
+    # The failure alone changes nothing. The device plugin opens its NVML event
+    # set once, at startup, so a failure injected under a running plugin is
+    # never read: six minutes of polling on the first live run showed 4/4
+    # throughout. Restarted after the injection, the same plugin logs
+    # "XidCriticalError: Xid=79 ... marking device as unhealthy" and the node
+    # goes to 4/3 within ten seconds.
+    faults::restart_operand "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"
 }
 
 recover() {
@@ -71,6 +79,11 @@ recover() {
     pod="$(faults::mock_pod)"
 
     faults::mock_ctl "${pod}" healthy
+    # Restarted for the same reason as the injection: the plugin reads the
+    # device's state when it opens its event set, so the device is healthy
+    # again only from the next plugin's point of view.
+    faults::restart_operand "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"
+    faults::wait_for_operand_ready "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"
     faults::forget
     faults::note "NV-NODE-003: GPU ${GPU_INDEX} healthy again on ${FAULTS_NODE}, counts $(faults::counts)"
 }

@@ -104,6 +104,7 @@ recover() {
 
     k --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" \
         --replicas="$(faults::load replicas)" > /dev/null
+    faults::wait_for_deployment_available "${DEPLOYMENT}"
 
     faults::forget
     faults::note "NV-NODE-001: ${LABEL} restored and deploy/${DEPLOYMENT} scaled back"
