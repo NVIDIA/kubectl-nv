@@ -28,6 +28,7 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/adm"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/schema"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
@@ -126,6 +127,14 @@ func NewCommand(version string, d Deps) *cobra.Command {
 	root.AddCommand(newVersionCommand(version))
 	root.AddCommand(adm.NewCommand(o, runMustGather))
 	root.AddCommand(schema.NewCommand(o))
+	// The server runs one fresh tree per tool call: cobra keeps the flags a run
+	// set, so a reused tree would carry one call's --limit into the next.
+	root.AddCommand(mcp.NewCommand(o, func(s genericiooptions.IOStreams) *cobra.Command {
+		call := d
+		call.Streams = s
+		call.Options = nil
+		return NewCommand(version, call)
+	}))
 
 	return root
 }
