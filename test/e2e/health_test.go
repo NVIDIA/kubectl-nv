@@ -146,102 +146,209 @@ func healthJSON(t *testing.T, args ...string) (healthReport, int) {
 
 	res := run(t, append([]string{"health", "-o", "json"}, args...)...)
 
-	var report healthReport
-	if err := json.Unmarshal([]byte(res.stdout), &report); err != nil {
-		t.Fatalf("decoding the health report: %v\nexit code %d\nstdout:\n%s\nstderr:\n%s",
+	report, err := decodeHealthReport(res.stdout)
+	if err != nil {
+		t.Fatalf("%v\nexit code %d\nstdout:\n%s\nstderr:\n%s",
 			err, res.code, res.stdout, res.stderr)
 	}
 
 	return report, res.code
 }
 
-// TestHealthReportsAHealthyLaneClean is the gate. A Mokka lane that nothing has
-// been injected into has to come back with nothing at warning or above, and
-// with numbers that match the cluster.
-func TestHealthReportsAHealthyLaneClean(t *testing.T) {
-	report, code := healthJSON(t, "--fail-on", "warning")
+// decodeHealthReport turns what the binary printed into a report.
+//
+// Separate from healthJSON so that the failure has somewhere to be tested. A
+// command that printed a usage message, or nothing at all, on the stream a
+// consumer parses is a real failure mode and not one a live lane can be asked
+// to produce on demand.
+func decodeHealthReport(stdout string) (healthReport, error) {
+	var report healthReport
+	if err := json.Unmarshal([]byte(stdout), &report); err != nil {
+		return healthReport{}, fmt.Errorf("decoding the health report: %w", err)
+	}
 
-	if found := report.atOrAbove(warningRank); len(found) > 0 {
-		for _, f := range found {
-			t.Errorf("finding on a lane that should be clean: %s", f)
+	return report, nil
+}
+
+// gateProblems is the healthy gate's whole judgement, as a function of a
+// report rather than of a *testing.T.
+//
+// Pure on purpose. The live gate calls it against a lane, and
+// faults_offline_test.go calls it against scripted reports that no lane could
+// be made to produce on demand: a partial read, an unknown severity, a report
+// that carries a warning and exits 0 anyway. A judgement that lived inside the
+// assertions could only ever be tested by breaking a cluster into the right
+// shape, which for half of these shapes is not possible at all.
+func gateProblems(report healthReport, code int) []string {
+	var problems []string
+
+	for _, f := range report.atOrAbove(warningRank) {
+		problems = append(problems, "finding on a lane that should be clean: "+f.String())
+	}
+
+	// A severity the report carries that this suite does not know how to rank
+	// is not a clean report. severityRank answers 0 for one, so atOrAbove
+	// above silently passes it: the gate would then be blind to exactly the
+	// finding a new severity was added for.
+	for _, f := range report.Findings {
+		if _, known := severityRank[f.Severity]; !known {
+			problems = append(problems,
+				fmt.Sprintf("finding %s carries severity %q, which this suite cannot rank", f.Code, f.Severity))
 		}
 	}
 
-	// The exit code is asserted on its own and after the findings, so that a
-	// failure says what was found rather than only that something was.
 	if code != 0 {
-		t.Errorf("exit code = %d, want 0 with --fail-on warning on a clean lane; the report says %s",
-			code, report.Summary)
+		problems = append(problems,
+			fmt.Sprintf("exit code = %d, want 0 with --fail-on warning on a clean lane; the report says %s",
+				code, report.Summary))
 	}
 
 	if report.Partial {
-		t.Errorf("the report is partial, with %v unreachable; a lane the suite brought up is fully readable",
-			report.Unreachable)
+		problems = append(problems,
+			fmt.Sprintf("the report is partial, with %v unreachable; a lane the suite brought up is fully readable",
+				report.Unreachable))
 	}
 
 	if report.Summary.Errors != 0 || report.Summary.Warnings != 0 {
-		t.Errorf("summary counts %d errors and %d warnings, want 0 and 0",
-			report.Summary.Errors, report.Summary.Warnings)
+		problems = append(problems,
+			fmt.Sprintf("summary counts %d errors and %d warnings, want 0 and 0",
+				report.Summary.Errors, report.Summary.Warnings))
+	}
+
+	return problems
+}
+
+// laneFacts is what the cluster says about itself, read through client-go and
+// out of hack/mokka/lib.sh rather than out of another kubectl-nv command.
+type laneFacts struct {
+	// gpuNodes advertise nvidia.com/gpu capacity.
+	gpuNodes int
+	// hinted carry a GPU hint label and no capacity. The control plane of a
+	// Mokka lane is one: the simulated-GPU DaemonSet tolerates every taint, so
+	// it labels a node no operand will ever land on.
+	hinted int
+	// capacity and allocatable are the whole-GPU numbers summed over the
+	// nodes, as the API server reports them.
+	capacity    int64
+	allocatable int64
+	// fromProfile is the capacity the lane script's own profile table says
+	// this lane should have: workers times the profile's device count.
+	fromProfile int64
+}
+
+// summaryProblems compares the report's arithmetic against the cluster's.
+func summaryProblems(report healthReport, facts laneFacts) []string {
+	var problems []string
+
+	if report.Summary.GPUCapacity != facts.capacity {
+		problems = append(problems, fmt.Sprintf("summary gpuCapacity = %d, the API server says %d",
+			report.Summary.GPUCapacity, facts.capacity))
+	}
+	if report.Summary.GPUAllocatable != facts.allocatable {
+		problems = append(problems, fmt.Sprintf("summary gpuAllocatable = %d, the API server says %d",
+			report.Summary.GPUAllocatable, facts.allocatable))
+	}
+	if facts.capacity != facts.fromProfile {
+		problems = append(problems, fmt.Sprintf(
+			"the cluster advertises %d GPUs and hack/mokka/lib.sh says this profile puts %d on the lane",
+			facts.capacity, facts.fromProfile))
+	}
+	// Equal on a healthy lane, and the first number a reader looks at: a gap
+	// between them is a device the scheduler cannot place.
+	if facts.allocatable != facts.capacity {
+		problems = append(problems, fmt.Sprintf(
+			"the cluster has %d GPUs of capacity and %d allocatable; the lane is not healthy",
+			facts.capacity, facts.allocatable))
+	}
+	if want := facts.gpuNodes + facts.hinted; report.Summary.NodesChecked != want {
+		problems = append(problems, fmt.Sprintf(
+			"summary nodesChecked = %d, want %d (%d with GPU capacity, %d hinted by label)",
+			report.Summary.NodesChecked, want, facts.gpuNodes, facts.hinted))
+	}
+	// The lane runs no GPU workload, so nothing is requested. Reported as
+	// unknown instead would mean the pods were never listed, which is a
+	// different answer and a worse one: a report that cannot see the pods
+	// cannot see the operands either.
+	if !report.Summary.GPURequestedKnown {
+		problems = append(problems, "the summary says the GPU requests are unknown; the pods were not listed")
+	} else if report.Summary.GPURequested != 0 {
+		problems = append(problems, fmt.Sprintf(
+			"summary gpuRequested = %d; nothing on this lane asks for a GPU", report.Summary.GPURequested))
+	}
+
+	return problems
+}
+
+// readLaneFacts gathers the cluster's own account of itself.
+func readLaneFacts(t *testing.T) laneFacts {
+	t.Helper()
+
+	var facts laneFacts
+	for _, node := range clusterNodes(t) {
+		capacity := node.Status.Capacity[gpuResource]
+		allocatable := node.Status.Allocatable[gpuResource]
+		facts.capacity += capacity.Value()
+		facts.allocatable += allocatable.Value()
+
+		switch {
+		case capacity.Value() > 0:
+			facts.gpuNodes++
+		case node.Labels[pciVendorLabel] == "true" || node.Labels[gpuPresentLabel] == "true":
+			facts.hinted++
+		}
+	}
+
+	facts.fromProfile = int64(len(workerNodeNames(t))) * profileGPUCount(t, laneProfile())
+
+	return facts
+}
+
+// TestHealthReportsAHealthyLaneClean is the gate. A Mokka lane that nothing
+// has been injected into has to come back with nothing at warning or above.
+//
+// Under "e2e,faults" this file sorts after faults_test.go, so the Go runner
+// reaches it once every injected fault has been recovered. That ordering is
+// what makes it the second half of the fault suite as well as the gate for
+// e2e-mokka: a recover that quietly did nothing shows up here as a warning on
+// a lane that is supposed to be clean. The ordering is a property of the file
+// names and is written down because nothing enforces it; a file renamed to
+// sort before faults_test.go would still pass, having tested a lane nobody had
+// touched yet.
+func TestHealthReportsAHealthyLaneClean(t *testing.T) {
+	settleLane(t)
+
+	report, code := healthJSON(t, "--fail-on", "warning")
+
+	for _, problem := range gateProblems(report, code) {
+		t.Error(problem)
 	}
 }
 
 // TestHealthSummaryMatchesTheCluster compares the report's arithmetic against
-// the API server's own numbers.
+// the API server's own numbers and against the lane script's profile table.
 //
-// The expected values are read through client-go rather than taken from
-// another kubectl-nv command: a summary checked against `kubectl nv list`
-// would agree with it whenever both were wrong in the same way.
+// Three witnesses and not two. A summary checked against `kubectl nv list`
+// would agree with it whenever both were wrong in the same way, and a capacity
+// checked only against the API server agrees with it whenever the device
+// plugin advertises the wrong number, which is a fault this suite injects on
+// purpose.
 func TestHealthSummaryMatchesTheCluster(t *testing.T) {
+	settleLane(t)
+
 	report, _ := healthJSON(t)
+	facts := readLaneFacts(t)
 
-	nodes := clusterNodes(t)
-
-	var wantCapacity, wantAllocatable int64
-	gpuNodes := 0
-	hinted := 0
-	for i := range nodes {
-		capacity := nodes[i].Status.Capacity[gpuResource]
-		allocatable := nodes[i].Status.Allocatable[gpuResource]
-		wantCapacity += capacity.Value()
-		wantAllocatable += allocatable.Value()
-
-		switch {
-		case capacity.Value() > 0:
-			gpuNodes++
-		case nodes[i].Labels[pciVendorLabel] == "true" || nodes[i].Labels[gpuPresentLabel] == "true":
-			// A node that carries a GPU hint label and advertises nothing is
-			// what the report calls hinted, and it is checked too: that pair
-			// is the most common thing the command is run to find.
-			hinted++
-		}
-	}
-
-	if gpuNodes != len(workerNodeNames(t)) {
+	if facts.gpuNodes != len(workerNodeNames(t)) {
 		t.Errorf("%d node(s) advertise GPUs, want one per worker (%d); the lane did not come up as expected",
-			gpuNodes, len(workerNodeNames(t)))
+			facts.gpuNodes, len(workerNodeNames(t)))
 	}
-	if wantCapacity <= 0 {
-		t.Fatalf("the cluster advertises %d GPUs in total; there is nothing here to check a report against", wantCapacity)
-	}
-
-	if report.Summary.GPUCapacity != wantCapacity {
-		t.Errorf("summary gpuCapacity = %d, the API server says %d",
-			report.Summary.GPUCapacity, wantCapacity)
-	}
-	if report.Summary.GPUAllocatable != wantAllocatable {
-		t.Errorf("summary gpuAllocatable = %d, the API server says %d",
-			report.Summary.GPUAllocatable, wantAllocatable)
-	}
-	// Equal on a healthy lane, and the one number a reader looks at first: a
-	// gap between them is a device the scheduler cannot place.
-	if wantAllocatable != wantCapacity {
-		t.Errorf("the cluster has %d GPUs of capacity and %d allocatable; the lane is not healthy",
-			wantCapacity, wantAllocatable)
+	if facts.capacity <= 0 {
+		t.Fatalf("the cluster advertises %d GPUs in total; there is nothing here to check a report against",
+			facts.capacity)
 	}
 
-	if want := gpuNodes + hinted; report.Summary.NodesChecked != want {
-		t.Errorf("summary nodesChecked = %d, want %d (%d with GPU capacity, %d hinted by label)",
-			report.Summary.NodesChecked, want, gpuNodes, hinted)
+	for _, problem := range summaryProblems(report, facts) {
+		t.Error(problem)
 	}
 }
 

@@ -200,6 +200,7 @@ case "${args}" in
         case "${args}" in
             *nvidia-device-plugin-daemonset*) key=DEVICE_PLUGIN ;;
             *gpu-feature-discovery*) key=GFD ;;
+            *nvidia-dcgm-exporter*) key=DCGM_EXPORTER ;;
             *)
                 echo 'Error from server (NotFound): daemonsets.apps not found' >&2
                 exit 1
@@ -699,21 +700,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# ClusterPolicy is recorded, never gated on
+# The ClusterPolicy is a gate
 # ---------------------------------------------------------------------------
+#
+# It was a record until 2026-10-11, when the healthy gate that runs straight
+# after this script started failing on lanes whose operator had not finished
+# agreeing with itself: kubectl nv health reports a policy that is not ready as
+# NV-OP-001 at error.
 
+expect_timeout
 export FAKE_CLUSTERPOLICY_STATE="notReady"
 run_subject "${UP}" mokka t4
-assert_rc 0 "a ClusterPolicy that is not ready does not fail the run"
-assert_says "ClusterPolicy state: notReady" "the notReady ClusterPolicy state is still printed"
+assert_rc 5 "a ClusterPolicy that never reaches ready fails the run"
+assert_says "the ClusterPolicy did not reach ready" "the failure says which wait ran out"
+assert_says "notReady" "the failure names the state it was left in"
 unset FAKE_CLUSTERPOLICY_STATE
+expect_converge
 
-# An absent ClusterPolicy CRD makes the query fail; that is not a lane failure.
+# An absent ClusterPolicy CRD makes the query fail. That is not a lane failure:
+# a cluster without the GPU Operator is not a cluster this gate has anything to
+# say about, and reading an unreadable policy as "not ready" would fail every
+# such lane.
 export FAKE_CLUSTERPOLICY_STATE=""
 run_subject "${UP}" mokka t4
 assert_rc 0 "an unavailable ClusterPolicy does not fail the run"
 assert_says "ClusterPolicy state: <unavailable>" "an unavailable ClusterPolicy is reported as such"
 unset FAKE_CLUSTERPOLICY_STATE
+
+# The exporter is one of the DaemonSets the lane waits for, because its
+# readiness probe has a 45 second initial delay and the healthy gate reads the
+# lane as soon as this script returns.
+run_subject "${UP}" mokka t4
+assert_rc 0 "up.sh succeeds when every DaemonSet answers"
+assert_logged "get daemonset nvidia-dcgm-exporter" "up.sh waits for the exporter DaemonSet too"
 
 # ---------------------------------------------------------------------------
 # A failing tool is exit 1, and only a created cluster is reported as partial

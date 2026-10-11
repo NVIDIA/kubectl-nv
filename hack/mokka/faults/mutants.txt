@@ -1,0 +1,55 @@
+# Mutants for hack/mokka/faults, one per line:
+#
+#   <id> <TAB> <file> <TAB> <search> <TAB> <replace>
+#
+# The ids M01 to M37 are QA's, from the 2026-10-11 review; the ones after them
+# are the guards this round added, so that each arrives with the mutant that
+# proves it discriminates. A mutant is KILLED when faults_test.sh fails against
+# it and SURVIVED when it does not, and a survivor is a hole in the harness
+# rather than a note for later: these scripts write to live clusters.
+#
+# hack/mokka/faults/mutate.sh runs them, against a COPY of the directory. The
+# tree is never edited.
+M01	nv-node-002.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "true"
+M02	nv-dp-001.sh	faults::set_operand_version "${OPERAND}" "${saved}"	faults::set_operand_version "${OPERAND}" "v0.17.0"
+M03	nv-dcgm-001.sh	faults::set_operand_version "${OPERAND}" "${saved}"	faults::set_operand_version "${OPERAND}" "4.2.3-4.1.3-ubuntu22.04"
+M04	nv-op-001.sh	faults::set_operand_version "${OPERAND}" "${saved}"	faults::set_operand_version "${OPERAND}" "v0.17.0"
+M05	nv-node-001.sh	--replicas="${saved_replicas}" > /dev/null	--replicas=1 > /dev/null
+M06	nv-node-001.sh	k --namespace "${FAULTS_OPERATOR_NAMESPACE}" delete pod "${STANDIN}" \	: stand-in left behind; false \
+M07	nv-node-004.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${now}"
+M08	nv-node-001.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved_label}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "true"
+M09	nv-dp-001.sh	faults::save "version" "${before}"	: not saved
+M11	nv-node-004.sh	faults::save "label" "${before}"	: not saved
+M13	nv-node-003.sh	faults::forget	: not forgotten
+M14	nv-node-001.sh	faults::forget	: not forgotten
+M15	lib.sh	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}/${FAULTS_NODE}"	FAULTS_STATE="${state_root}/${FAULTS_CODE}/${FAULTS_NODE}"
+M16	lib.sh	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}/${FAULTS_NODE}"	FAULTS_STATE="${state_root}/${lane}/${FAULTS_NODE}"
+M18	lib.sh	--field-selector "spec.nodeName=${node}" \	\
+M19	nv-dp-001.sh	faults::wait_for_template "nvidia-device-plugin-daemonset" present "${FAULTS_ABSENT_VERSION}"\n    faults::restart_operand "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"	faults::wait_for_template "nvidia-device-plugin-daemonset" present "${FAULTS_ABSENT_VERSION}"\n    faults::restart_operand "nvidia-device-plugin-daemonset" "kubectl-nv-faults-worker2"
+M20	nv-node-003.sh	pod="$(faults::pod_on_node "${FAULTS_MOKKA_NAMESPACE}" "${FAULTS_MOKKA_SELECTOR}" "${FAULTS_NODE}")"	pod="$(k --namespace "${FAULTS_MOKKA_NAMESPACE}" get pod -l "${FAULTS_MOKKA_SELECTOR}" -o "jsonpath={.items[0].metadata.name}")"
+M21	lib.sh	if [ "$(date +%s)" -ge "${deadline}" ]; then\n            faults::die 1 "daemonset	if false; then\n            faults::die 1 "daemonset
+M22	lib.sh	if [ "$(date +%s)" -ge "${deadline}" ]; then\n            faults::die 1 "deploy/	if false; then\n            faults::die 1 "deploy/
+M23	lib.sh	k get node "${node}" -o "jsonpath={.metadata.labels.${escaped}}"	kubectl get node "${node}" -o "jsonpath={.metadata.labels.${escaped}}"
+M24	nv-node-004.sh	value="$(k get node "${FAULTS_NODE}" -o 'jsonpath={.status.capacity.nvidia\.com/gpu}')"	value="$(kubectl get node "${FAULTS_NODE}" -o 'jsonpath={.status.capacity.nvidia\.com/gpu}')"
+M25	lib.sh	kubectl --kubeconfig "${FAULTS_KUBECONFIG}" --context "${FAULTS_CONTEXT}" "$@"	kubectl --kubeconfig "${FAULTS_KUBECONFIG}" "$@"
+M26	lib.sh	FAULTS_KUBECONFIG="${MOKKA_KUBECONFIG:-}"	FAULTS_KUBECONFIG="${MOKKA_KUBECONFIG:-${KUBECONFIG:-}}"
+M27	nv-node-003.sh	faults::mock_ctl "${pod}" healthy	faults::mock_ctl "${pod}" ecc_uncorrectable
+M28	nv-node-003.sh	nvml-mock-ctl fail --gpu "${GPU_INDEX}" --mode "${mode}" --xid 79	nvml-mock-ctl fail --gpu "${GPU_INDEX}" --mode "${mode}"
+M29	nv-dcgm-001.sh	if [ "${before}" = "${FAULTS_ABSENT_VERSION}" ]; then	if false; then
+M30	nv-node-001.sh	faults::plant_standin "${image}"	: no stand-in
+M31	lib.sh	absent:*"${needle}"*) ;;	# no absent-with-needle branch
+M34	nv-op-001.sh	faults::forget	: not forgotten
+M35	nv-dcgm-001.sh	faults::wait_for_operand_ready "nvidia-dcgm-exporter" "${FAULTS_NODE}"\n\n    faults::forget	faults::forget
+M36	lib.sh	k label node "${node}" "${label}=${value}" --overwrite > /dev/null	kubectl label node "${node}" "${label}=${value}" --overwrite > /dev/null
+M37	nv-node-001.sh	k --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" --replicas=0 > /dev/null	kubectl --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" --replicas=0 > /dev/null
+M38	lib.sh	faults::check_lane_stamp	: no stamp check
+M39	lib.sh	faults::die 1 "saved state for ${FAULTS_CODE} on ${FAULTS_NODE} has no '$1' key (looked in ${FAULTS_STATE})"	printf '%s' "${FAULTS_ABSENT_SENTINEL}"; return
+M40	lib.sh	if ! [[ ${lane_suffix} =~ ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]; then	if false; then
+M41	lib.sh	https://127.0.0.1:*) ;;	*) ;;
+M42	nv-node-002.sh	if faults::deploy_is_off "${before}"; then	if false; then
+M43	nv-op-002.sh	if faults::deploy_is_off "${before}"; then	if false; then
+M44	nv-node-001.sh	if [ "${replicas}" = "0" ]; then	if false; then
+M45	nv-node-001.sh	-o 'jsonpath={.metadata.name}' 2> /dev/null || true)" ]; then	-o 'jsonpath={.metadata.name}' 2> /dev/null || true)" ] && false; then
+M46	lib.sh	[ -z "${deleted}" ] || continue	:
+M47	lib.sh	[ "${uid}" != "${FAULTS_DELETED_POD_UID:-}" ] || continue	:
+M48	nv-op-001.sh	faults::wait_for_template "nvidia-device-plugin-daemonset" absent "${FAULTS_ABSENT_VERSION}"	: no template wait

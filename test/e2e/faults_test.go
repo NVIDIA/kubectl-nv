@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,21 @@ const faultsDir = "../../hack/mokka/faults"
 // the binary.
 const pollInterval = 2 * time.Second
 
+// faultAppear and faultClear bound the polls.
+//
+// They are the measured times with a wide margin rather than a round number
+// pulled out of the air. On a t4 lane on 2026-10-11 the slowest finding
+// appeared 11 seconds after its injection and the slowest cleared 58 seconds
+// after its recovery, that last one being an image pull. Two and three minutes
+// leave a loaded CI runner roughly ten times the room it needs, and keep the
+// whole suite inside a job timeout: eight codes each able to burn six minutes
+// twice over is an hour and a half of wall clock for a suite that takes four
+// minutes when it works.
+const (
+	faultAppear = 2 * time.Minute
+	faultClear  = 3 * time.Minute
+)
+
 // scriptTimeout bounds one inject or recover. The slowest of them scales a
 // Deployment down and waits for its pods, which is seconds on a lane and is
 // given minutes here so that a loaded runner is not called a failure.
@@ -90,6 +106,14 @@ type faultCase struct {
 	// than about the rule.
 	evidenceKeys []string
 
+	// exact pins evidence VALUES, given the node's whole-GPU capacity as the
+	// API server reports it. Nil where the case pins none.
+	//
+	// A function and not a map, because the interesting values are derived
+	// from the lane rather than fixed: NV-NODE-004's injected count is one
+	// more than the capacity, whatever the profile puts on a worker.
+	exact func(capacity int64) map[string]string
+
 	// appear and clear bound the polls. They come from the live run recorded
 	// in NOTES.md, with margin: the measured times are a fraction of these,
 	// and the margin is what keeps a loaded CI runner from failing a run that
@@ -111,8 +135,11 @@ var faultCases = []faultCase{
 		severity:     "warning",
 		component:    "nvidia-dcgm-exporter",
 		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter", "operands", "pod", "phase", "ready", "restarts"},
-		appear:       6 * time.Minute,
-		clear:        6 * time.Minute,
+		exact: func(int64) map[string]string {
+			return map[string]string{"nvidia.com/gpu.deploy.dcgm-exporter": "true", "ready": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-DP-001",
@@ -120,8 +147,14 @@ var faultCases = []faultCase{
 		severity:     "error",
 		component:    "nvidia-device-plugin-daemonset",
 		evidenceKeys: []string{"nvidia.com/gpu.deploy.device-plugin", "operands", "pod", "phase", "ready", "restarts"},
-		appear:       6 * time.Minute,
-		clear:        6 * time.Minute,
+		exact: func(int64) map[string]string {
+			// The deploy label still says the operand belongs on the node,
+			// and the pod is not ready. Both halves matter: with the label
+			// false this would be NV-OP-002 instead.
+			return map[string]string{"nvidia.com/gpu.deploy.device-plugin": "true", "ready": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-NODE-001",
@@ -129,8 +162,14 @@ var faultCases = []faultCase{
 		severity:     "warning",
 		component:    "node",
 		evidenceKeys: []string{"feature.node.kubernetes.io/pci-10de.present", "operands"},
-		appear:       4 * time.Minute,
-		clear:        4 * time.Minute,
+		exact: func(int64) map[string]string {
+			// The hint label that fired. The operator's own label is absent,
+			// which is what the finding is about and therefore not something
+			// the evidence can carry.
+			return map[string]string{"feature.node.kubernetes.io/pci-10de.present": "true"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-NODE-002",
@@ -138,8 +177,19 @@ var faultCases = []faultCase{
 		severity:     "error",
 		component:    "node",
 		evidenceKeys: []string{"nvidia.com/gpu.present", "capacity", "allocatable", "hinted", "operands"},
-		appear:       6 * time.Minute,
-		clear:        6 * time.Minute,
+		exact: func(capacity int64) map[string]string {
+			// The node still has its devices and can place none of them,
+			// which is the whole finding: a capacity that fell to zero with
+			// them would be a node that had simply lost its GPUs.
+			return map[string]string{
+				"allocatable":            "0",
+				"capacity":               strconv.FormatInt(capacity, 10),
+				"nvidia.com/gpu.present": "true",
+				"hinted":                 "false",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-NODE-003",
@@ -147,8 +197,18 @@ var faultCases = []faultCase{
 		severity:     "warning",
 		component:    "node",
 		evidenceKeys: []string{"capacity", "allocatable", "missing"},
-		appear:       6 * time.Minute,
-		clear:        6 * time.Minute,
+		exact: func(capacity int64) map[string]string {
+			// One device failed, so exactly one is missing. "some are
+			// missing" would pass with every device gone, which is
+			// NV-NODE-002's finding rather than this one's.
+			return map[string]string{
+				"capacity":    strconv.FormatInt(capacity, 10),
+				"allocatable": strconv.FormatInt(capacity-1, 10),
+				"missing":     "1",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-NODE-004",
@@ -156,8 +216,17 @@ var faultCases = []faultCase{
 		severity:     "warning",
 		component:    "node",
 		evidenceKeys: []string{"nvidia.com/gpu.count", "capacity", "expectedCapacity"},
-		appear:       4 * time.Minute,
-		clear:        4 * time.Minute,
+		exact: func(capacity int64) map[string]string {
+			// The script writes one more than the count it read, and the
+			// count it read is the capacity on a healthy lane.
+			return map[string]string{
+				"nvidia.com/gpu.count": strconv.FormatInt(capacity+1, 10),
+				"capacity":             strconv.FormatInt(capacity, 10),
+				"expectedCapacity":     strconv.FormatInt(capacity+1, 10),
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:          "NV-OP-001",
@@ -166,8 +235,15 @@ var faultCases = []faultCase{
 		component:     "gpu-operator",
 		clusterScoped: true,
 		evidenceKeys:  []string{"name", "status.state"},
-		appear:        6 * time.Minute,
-		clear:         6 * time.Minute,
+		exact: func(int64) map[string]string {
+			// The operator's own verdict, in its own words. "not ready" is
+			// not the string it writes, and a test that accepted any
+			// non-ready state would pass against a policy the operator had
+			// never reconciled at all.
+			return map[string]string{"name": "cluster-policy", "status.state": "notReady"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 	{
 		code:         "NV-OP-002",
@@ -175,8 +251,11 @@ var faultCases = []faultCase{
 		severity:     "info",
 		component:    "nvidia-dcgm-exporter",
 		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter"},
-		appear:       4 * time.Minute,
-		clear:        4 * time.Minute,
+		exact: func(int64) map[string]string {
+			return map[string]string{"nvidia.com/gpu.deploy.dcgm-exporter": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
 	},
 }
 
@@ -203,6 +282,12 @@ func TestFaultsAreReportedAndRecover(t *testing.T) {
 			t.Fatalf("%s is not executable (mode %04o)", tc.script, info.Mode().Perm())
 		}
 	}
+
+	// The lane has to have finished starting before "it is clean" means
+	// anything: dcgm-exporter's readiness probe has a 45 second initial delay,
+	// and a report taken inside it carries NV-DCGM-001 for a lane that is
+	// merely young.
+	settleLane(t)
 
 	node := faultNode(t)
 	t.Logf("injecting into %s", node)
@@ -237,7 +322,7 @@ func runFaultCase(t *testing.T, tc faultCase, node string) {
 	injectedAt := time.Now()
 	runFaultScript(t, tc.script, "inject", node)
 
-	found := waitForFinding(t, tc, node, injectedAt)
+	found := waitForFinding(t, tc, node, tc.exactEvidence(t, node), injectedAt)
 	t.Logf("%s appeared %s after inject: %s", tc.code, time.Since(injectedAt).Round(time.Second), found)
 
 	recoveredAt := time.Now()
@@ -256,7 +341,7 @@ func runFaultCase(t *testing.T, tc faultCase, node string) {
 // a check that ran at the instant the code first appeared would be a check on
 // timing; waiting for the whole shape is the same assertion with the race
 // removed.
-func waitForFinding(t *testing.T, tc faultCase, node string, since time.Time) finding {
+func waitForFinding(t *testing.T, tc faultCase, node string, exact map[string]string, since time.Time) finding {
 	t.Helper()
 
 	deadline := time.Now().Add(tc.appear)
@@ -265,7 +350,7 @@ func waitForFinding(t *testing.T, tc faultCase, node string, since time.Time) fi
 	for {
 		report, _ := healthJSON(t, "--fail-on", "info")
 
-		match, why := matchFinding(report, tc, node)
+		match, why := matchFinding(report, tc, node, exact)
 		if why == "" {
 			return match
 		}
@@ -282,7 +367,7 @@ func waitForFinding(t *testing.T, tc faultCase, node string, since time.Time) fi
 // matchFinding returns the finding the case is about, or the reason there is
 // not one yet. The reason is a sentence rather than a boolean so that a
 // timeout says which half of the expectation was not met.
-func matchFinding(report healthReport, tc faultCase, node string) (finding, string) {
+func matchFinding(report healthReport, tc faultCase, node string, exact map[string]string) (finding, string) {
 	var candidates []finding
 	for _, f := range report.Findings {
 		if f.Code != tc.code {
@@ -306,27 +391,53 @@ func matchFinding(report healthReport, tc faultCase, node string) (finding, stri
 		return finding{}, fmt.Sprintf("no %s finding for %s", tc.code, node)
 	}
 
+	// Every candidate, and the reason the last one failed. A rule may emit
+	// more than one finding of a code for a node, and returning on the first
+	// one's first mismatch would report "wrong severity" for a report that
+	// also held the right finding two entries later.
+	var reasons []string
 	for _, f := range candidates {
-		if f.Severity != tc.severity {
-			return finding{}, fmt.Sprintf("%s is at severity %q, want %q", tc.code, f.Severity, tc.severity)
-		}
-		if f.Component != tc.component {
-			return finding{}, fmt.Sprintf("%s names component %q, want %q", tc.code, f.Component, tc.component)
-		}
-		if missing := missingKeys(f.Evidence, tc.evidenceKeys); len(missing) > 0 {
-			return finding{}, fmt.Sprintf("%s is missing evidence %s (it carries %s)",
-				tc.code, strings.Join(missing, ", "), strings.Join(evidenceKeys(f.Evidence), ", "))
-		}
-		// Every finding links to its own catalogue entry, which is the one
-		// thing a reader does next and the one field a rule can forget.
-		if want := "docs/findings/" + tc.code + ".md"; f.Docs != want {
-			return finding{}, fmt.Sprintf("%s links to %q, want %q", tc.code, f.Docs, want)
+		if why := candidateProblem(f, tc, exact); why != "" {
+			reasons = append(reasons, why)
+
+			continue
 		}
 
 		return f, ""
 	}
 
-	return finding{}, fmt.Sprintf("no usable %s finding", tc.code)
+	return finding{}, strings.Join(reasons, "; ")
+}
+
+// candidateProblem is why one finding is not the one the case is waiting for,
+// or an empty string when it is.
+func candidateProblem(f finding, tc faultCase, exact map[string]string) string {
+	if f.Severity != tc.severity {
+		return fmt.Sprintf("%s is at severity %q, want %q", tc.code, f.Severity, tc.severity)
+	}
+	if f.Component != tc.component {
+		return fmt.Sprintf("%s names component %q, want %q", tc.code, f.Component, tc.component)
+	}
+	if missing := missingKeys(f.Evidence, tc.evidenceKeys); len(missing) > 0 {
+		return fmt.Sprintf("%s is missing evidence %s (it carries %s)",
+			tc.code, strings.Join(missing, ", "), strings.Join(evidenceKeys(f.Evidence), ", "))
+	}
+	// The values, where the case pins them. A finding that carried the right
+	// keys with empty values would satisfy the check above and tell a reader
+	// nothing, and the numbers are the whole substance of several of these
+	// codes: NV-NODE-003 is about the size of the shortfall.
+	for key, want := range exact {
+		if got := f.Evidence[key]; got != want {
+			return fmt.Sprintf("%s evidence %s = %q, want %q", tc.code, key, got, want)
+		}
+	}
+	// Every finding links to its own catalogue entry, which is the one thing a
+	// reader does next and the one field a rule can forget.
+	if want := "docs/findings/" + tc.code + ".md"; f.Docs != want {
+		return fmt.Sprintf("%s links to %q, want %q", tc.code, f.Docs, want)
+	}
+
+	return ""
 }
 
 // waitForClean polls until the case's code is gone from the whole report and
@@ -431,6 +542,37 @@ func runFaultScript(t *testing.T, script, action, node string) {
 	if err != nil {
 		t.Fatalf("%s %s %s: %v\nstderr:\n%s", script, action, node, err, stderr.String())
 	}
+}
+
+// exactEvidence is the case's pinned evidence values, resolved against the
+// node's real capacity.
+func (tc faultCase) exactEvidence(t *testing.T, node string) map[string]string {
+	t.Helper()
+
+	if tc.exact == nil {
+		return nil
+	}
+
+	return tc.exact(nodeGPUCapacity(t, node))
+}
+
+// nodeGPUCapacity is the node's whole-GPU capacity as the API server reports
+// it, which is the number the injections are relative to.
+func nodeGPUCapacity(t *testing.T, node string) int64 {
+	t.Helper()
+
+	for _, n := range clusterNodes(t) {
+		if n.Name != node {
+			continue
+		}
+		capacity := n.Status.Capacity[gpuResource]
+
+		return capacity.Value()
+	}
+
+	t.Fatalf("node %s is not in the cluster", node)
+
+	return 0
 }
 
 // faultNode is the worker every case injects into. The first in name order, so
