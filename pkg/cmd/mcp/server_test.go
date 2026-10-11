@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -518,32 +517,6 @@ func TestAPanicComesBackAsAToolErrorRatherThanKillingTheServer(t *testing.T) {
 	// The session is still usable, which is the point of recovering.
 	if kind := structured(t, call(t, session, "list", map[string]any{}))["kind"]; kind != "GPUNodeList" {
 		t.Errorf("the server did not survive the panic: %v", kind)
-	}
-}
-
-// stdout belongs to the transport. A command that writes to the process stdout
-// instead of its own stream would inject bytes into the JSON-RPC frame.
-func TestNothingAToolPrintsReachesTheProcessStdout(t *testing.T) {
-	read, write, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("making a pipe: %v", err)
-	}
-	realStdout := os.Stdout
-	os.Stdout = write
-	t.Cleanup(func() { os.Stdout = realStdout })
-
-	session := connect(t, testTree)
-	call(t, session, "loud", map[string]any{})
-
-	if err := write.Close(); err != nil {
-		t.Fatalf("closing the pipe: %v", err)
-	}
-	leaked, err := io.ReadAll(read)
-	if err != nil {
-		t.Fatalf("reading the pipe: %v", err)
-	}
-	if len(leaked) != 0 {
-		t.Errorf("a tool call wrote %q to the process stdout, which is the transport", leaked)
 	}
 }
 

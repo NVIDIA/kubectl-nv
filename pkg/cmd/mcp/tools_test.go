@@ -19,7 +19,6 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -161,17 +160,6 @@ func testTree(deps CallDeps) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(*cobra.Command, []string) error {
 			panic("a nil map write somewhere deep")
-		},
-	})
-
-	root.AddCommand(&cobra.Command{
-		Use:   "loud",
-		Short: "Write to the process stdout",
-		Args:  cobra.NoArgs,
-		RunE: func(*cobra.Command, []string) error {
-			fmt.Fprintln(os.Stdout, "this must never reach the transport")
-
-			return nil
 		},
 	})
 

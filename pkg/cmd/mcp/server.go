@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -118,10 +117,6 @@ func newServer(newRoot NewRootFunc, version string) (*Server, error) {
 
 	built := &Server{newRoot: newRoot}
 
-	// Done here rather than in Serve so that it holds for every transport,
-	// including the in-memory one a test drives.
-	guardProcessStdout()
-
 	tools := Tools(newRoot(CallDeps{Streams: discardStreams()}))
 	if len(tools) == 0 {
 		return nil, fmt.Errorf("the command tree has no read-only leaf to offer as a tool")
@@ -189,49 +184,12 @@ func Serve(ctx context.Context, newRoot NewRootFunc, version string, connection 
 	}
 	SetConnection(built.server, connection)
 
-	// The transport is given the real stdout explicitly: os.Stdout has been
-	// pointed at stderr by now, and StdioTransport would read it from there.
-	transport := &sdk.IOTransport{Reader: os.Stdin, Writer: nopCloser{realStdout}}
-	if err := built.server.Run(ctx, transport); err != nil {
+	if err := built.server.Run(ctx, &sdk.StdioTransport{}); err != nil {
 		return fmt.Errorf("serving MCP over stdio: %w", err)
 	}
 
 	return nil
 }
-
-var (
-	// stdoutGuard serialises the one write to os.Stdout, which happens when a
-	// server is built and never while calls are being served.
-	stdoutGuard sync.Mutex
-	// realStdout is the process stdout as it was before any server moved it.
-	// The transport writes here; nothing else can reach it.
-	realStdout = os.Stdout
-)
-
-// guardProcessStdout makes the process stdout unreachable to a command.
-//
-// stdout belongs to the JSON-RPC transport: a command that wrote to it rather
-// than to its own stream would put bytes inside a frame and break the session
-// for every later call. Pointing os.Stdout at stderr sends any such write
-// somewhere a person can still read it, rather than into the frame or into a
-// hole.
-//
-// It runs when a server is built, not per call: the server answers calls
-// concurrently, and a per call swap of a package variable would be a data race
-// with every other call in flight.
-func guardProcessStdout() {
-	stdoutGuard.Lock()
-	defer stdoutGuard.Unlock()
-
-	os.Stdout = os.Stderr
-}
-
-// nopCloser lets the transport write to the real stdout without being able to
-// close it.
-type nopCloser struct{ io.Writer }
-
-// Close implements io.WriteCloser.
-func (nopCloser) Close() error { return nil }
 
 // discardStreams is where the tree writes when it is built only to be walked.
 func discardStreams() genericiooptions.IOStreams {
@@ -431,10 +389,15 @@ func flagValue(value any) (string, error) {
 // execute runs the command tree in process and turns what it printed into a
 // tool result.
 //
-// Nothing is written to the process stdout: that belongs to the JSON-RPC
+// Nothing may be written to the process stdout: that belongs to the JSON-RPC
 // transport, and a byte of command output landing there would corrupt the
-// frame. The command's own stream is a buffer, and it is the buffer that
-// becomes the text and the structured content.
+// frame. The tree is given a buffer for both its streams, and it is the buffer
+// that becomes the text and the structured content.
+//
+// This cannot be enforced here. cobra reads os.Stdout on every execution, so a
+// library that reassigned it would be racing every command in the process; the
+// guarantee is a property of the commands instead, and
+// cmd/kubectl-nv asserts it over the whole tree.
 func (s *Server) execute(ctx context.Context, argv []string, pinned map[string]string) *sdk.CallToolResult {
 	var out, errOut bytes.Buffer
 

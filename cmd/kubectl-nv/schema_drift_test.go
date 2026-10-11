@@ -33,8 +33,6 @@ import (
 // kind registered by a command package would have been missing from
 // docs/schema with nothing to say so.
 func TestCheckedInSchemasMatchEveryRegisteredKind(t *testing.T) {
-	t.Parallel()
-
 	dir := filepath.Join("..", "..", "docs", "schema")
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("docs/schema is where the generated contract lives: %v", err)
@@ -49,8 +47,6 @@ func TestCheckedInSchemasMatchEveryRegisteredKind(t *testing.T) {
 // cannot catch a Go type that marshals a field as null where the schema says
 // array; only running a sample through the published schema can.
 func TestEveryRegisteredKindIsPublishedWithASchema(t *testing.T) {
-	t.Parallel()
-
 	kinds := output.RegisteredKinds()
 	for _, kind := range kinds {
 		if _, err := output.SchemaFor(kind); err != nil {
