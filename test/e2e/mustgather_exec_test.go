@@ -91,13 +91,14 @@ func TestMustGatherExecAgainstTheLane(t *testing.T) {
 
 		for _, worker := range workers {
 			name := "nvidia-bug-report_" + worker + ".log.gz"
-			// The report is a gzip of a line naming the node it came from. A
-			// collector that copied one node's report into every file writes
-			// the right number of files with the wrong contents, and only the
-			// contents can tell the two apart.
+			// The report is a gzip of one line naming the node it came from,
+			// compared exactly. A substring check passes when every file holds
+			// the same node's report, because one worker's name is a prefix of
+			// the other's: kubectl-nv-mokka-worker is inside
+			// kubectl-nv-mokka-worker2.
 			got := readGzip(t, filepath.Join(dir, name))
-			if !strings.Contains(got, worker) {
-				t.Errorf("%s holds %q, want it to name %s", name, got, worker)
+			if want := bugReportLine(worker); got != want {
+				t.Errorf("%s holds %q, want exactly %q", name, got, want)
 			}
 		}
 
@@ -152,8 +153,41 @@ func TestMustGatherExecAgainstTheLane(t *testing.T) {
 		if len(reports) != 1 || reports[0] != want {
 			t.Fatalf("bundle holds reports %v, want exactly [%s]", reports, want)
 		}
-		if got := readGzip(t, filepath.Join(dir, want)); !strings.Contains(got, worker) {
-			t.Errorf("%s holds %q, want it to name %s", want, got, worker)
+		if got, wantLine := readGzip(t, filepath.Join(dir, want)), bugReportLine(worker); got != wantLine {
+			t.Errorf("%s holds %q, want exactly %q", want, got, wantLine)
+		}
+	})
+
+	t.Run("the copied report is no more readable than the rest", func(t *testing.T) {
+		// The bug report is copied out of a pod rather than written here, so
+		// it took its mode from the copy rather than from the bundle. It holds
+		// the most sensitive thing in the bundle and the default home for all
+		// of this is /tmp, where every account on the machine can look.
+		dir := gatherInto(t, 0)
+
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("reading the bundle: %v", err)
+		}
+		reports := 0
+		for _, e := range entries {
+			info, ierr := e.Info()
+			if ierr != nil {
+				t.Fatalf("stat %s: %v", e.Name(), ierr)
+			}
+			if !info.Mode().IsRegular() {
+				t.Errorf("%s is not a regular file (mode %v)", e.Name(), info.Mode())
+				continue
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Errorf("%s mode = %04o, want 0600", e.Name(), got)
+			}
+			if strings.HasPrefix(e.Name(), "nvidia-bug-report_") {
+				reports++
+			}
+		}
+		if reports == 0 {
+			t.Fatal("the bundle holds no bug report, so the copied mode was never checked")
 		}
 	})
 }
@@ -326,4 +360,10 @@ func waitForStandIn(t *testing.T, workers int) {
 func sha256Hex(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// bugReportLine is exactly what the stand-in writes into the report it leaves
+// for the collector to copy out.
+func bugReportLine(node string) string {
+	return fmt.Sprintf("nvidia-bug-report from node %s\n", node)
 }
