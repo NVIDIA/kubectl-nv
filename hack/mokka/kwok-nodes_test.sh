@@ -113,17 +113,21 @@ echo "curl $*" >> "${MOKKA_CALL_LOG}"
 # Honour -o <path> and take the last argument as the URL, as the subject
 # calls it.
 out=""
-prev=""
+want_out=false
 url=""
 for a in "$@"; do
-    if [ "${prev}" = "-o" ]; then
+    if [ "${want_out}" = true ]; then
         out="${a}"
+        want_out=false
+        continue
     fi
     case "${a}" in
+        # -o, and the bundled short flags the subject actually uses, such as
+        # -fsSLo: the output path is the argument after any flag ending in o.
+        -*o) want_out=true ;;
         -*) ;;
         *) url="${a}" ;;
     esac
-    prev="${a}"
 done
 name="${url##*/}"
 
@@ -370,21 +374,6 @@ assert_not_logged "delete" "a refused --delete deletes nothing"
 # The pinned KWOK release
 # ---------------------------------------------------------------------------
 
-reset_fixtures
-export FAKE_KWOK_INSTALLED=0
-export FAKE_CORRUPT_MANIFEST="kwok.yaml"
-run_subject 5
-assert_rc 6 "a manifest that does not match its pinned sha256"
-assert_says "kwok.yaml does not match its pinned sha256" "the refusal names the manifest"
-assert_not_logged "apply -f" "a bad checksum applies nothing"
-
-reset_fixtures
-export FAKE_KWOK_INSTALLED=0
-export FAKE_CORRUPT_MANIFEST="stage-fast.yaml"
-run_subject 5
-assert_rc 6 "the second manifest is checked too"
-assert_says "stage-fast.yaml does not match its pinned sha256" "the second refusal names the manifest"
-
 # The good install path needs the real manifests, because the pins are in the
 # subject and nothing here can forge them. They are fetched once; with no
 # network the install assertions are skipped rather than reported as passes.
@@ -403,7 +392,25 @@ else
     have_manifests=false
 fi
 
+reset_fixtures
+export FAKE_KWOK_INSTALLED=0
+export FAKE_CORRUPT_MANIFEST="kwok.yaml"
+run_subject 5
+assert_rc 6 "a manifest that does not match its pinned sha256"
+assert_says "kwok.yaml does not match its pinned sha256" "the refusal names the manifest"
+assert_not_logged "apply -f" "a bad checksum applies nothing"
+
 if [ "${have_manifests}" = true ]; then
+    # Only reachable with the real kwok.yaml in the cache: the first manifest
+    # has to pass its pin before the second one is ever looked at.
+    reset_fixtures
+    export FAKE_KWOK_INSTALLED=0
+    export FAKE_CORRUPT_MANIFEST="stage-fast.yaml"
+    run_subject 5
+    assert_rc 6 "the second manifest is checked too"
+    assert_says "stage-fast.yaml does not match its pinned sha256" "the second refusal names the manifest"
+    assert_not_logged "apply -f" "a bad checksum in the second manifest applies neither"
+
     reset_fixtures
     export FAKE_KWOK_INSTALLED=0
     export FAKE_READY_COUNT=5
@@ -454,6 +461,7 @@ assert_applied "${OWNER_LABEL}: \"true\"" "every node is labelled as this script
 # would make the health rules fire for a reason this lane did not intend.
 reset_fixtures
 export FAKE_READY_COUNT=1
+export FAKE_NODE_LINE="4 True"
 KWOK_GPU_COUNT=4 run_subject 1
 assert_rc 0 "an overridden GPU count"
 assert_applied "nvidia.com/gpu.count: \"4\"" "the overridden count reaches the label"
