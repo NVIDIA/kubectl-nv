@@ -162,7 +162,7 @@ func TestSummaryBoundsTheOperandList(t *testing.T) {
 	for _, want := range []string{
 		"  kubectl nv health --node worker-1",
 		"  kubectl nv health --from-bundle /tmp/bundle",
-		"more, see -o json",
+		"more operands, see -o json",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the summary does not carry %q:\n%s", want, text)

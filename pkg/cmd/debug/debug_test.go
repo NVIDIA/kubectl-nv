@@ -740,13 +740,13 @@ func TestDebugSummaryIsExactly(t *testing.T) {
 		t.Fatalf("there are %d lines between the collectors and the next commands, want 1:\n%s",
 			len(middle), strings.Join(middle, "\n"))
 	}
-	if !strings.HasPrefix(middle[0], "  skipped (nothing to collect): ") {
-		t.Errorf("the folded line is %q, want it to name what there was nothing to collect for", middle[0])
-	}
-	for _, collector := range []string{"bug-report", "device-usage"} {
-		if !strings.Contains(middle[0], collector) {
-			t.Errorf("the folded line does not name %s: %q", collector, middle[0])
-		}
+	// The folded line names as many collectors as fit and counts the rest.
+	// Every one of them is in -o json, which TestDebugReportShape checks
+	// against the manifest; what is pinned here is that the screen says how
+	// many it did not have room for rather than ending mid-name.
+	wantFolded := "  skipped (nothing to collect): openshift-version, gpu-cluster, hyperconverged (+5 more)"
+	if middle[0] != wantFolded {
+		t.Errorf("the folded line is\n  %q\nwant\n  %q", middle[0], wantFolded)
 	}
 }
 
@@ -778,12 +778,26 @@ func TestDebugSummarySaysWhenItIsIncomplete(t *testing.T) {
 			wantStatus, r.out.String())
 	}
 
-	wantSkipped := "  skipped bug-report: forbidden: nvidia-bug-report from pod " +
-		"nvidia-driver-daemonset-on-worker-1: unable to upgrade connection: pods " +
-		"\"nvidia-driver-da..."
-	if !containsLine(lines, wantSkipped) {
-		t.Errorf("the refused collector is not named on a line of its own:\nwant %q\ngot\n%s",
-			wantSkipped, r.out.String())
+	// The two collectors the exec was needed for, each on a line of its own
+	// with the refusal named, cut to the width of the screen. These are the
+	// gatherer's own words: what this command owes a reader is that they
+	// arrive whole as far as the line goes, and are not folded in with the
+	// collectors that simply had nothing to collect.
+	for _, want := range []string{
+		"  skipped bug-report: forbidden: collecting bug report (label app=nvidia-driver...",
+		"  skipped device-usage: forbidden: device usage from pod nvidia-driver-daemonset-...",
+	} {
+		if !containsLine(lines, want) {
+			t.Errorf("the refused collector is not named on a line of its own:\nwant %q\ngot\n%s",
+				want, r.out.String())
+		}
+	}
+
+	// The absences are still folded, so a refusal never costs its line to a
+	// resource nobody installed.
+	if !containsLine(lines,
+		"  skipped (nothing to collect): openshift-version, gpu-cluster, hyperconverged (+3 more)") {
+		t.Errorf("the folded line is not what was expected:\n%s", r.out.String())
 	}
 }
 
@@ -1165,29 +1179,6 @@ func TestDebugGatherFlagsMatchMustGather(t *testing.T) {
 		}
 	})
 
-	// Not parallel: it sets the environment, which the whole process shares.
-	// The default of --artifacts-dir is read at registration, so a command
-	// that captured it any earlier would ignore ARTIFACT_DIR altogether.
-	t.Run("both read ARTIFACT_DIR for the default directory", func(t *testing.T) {
-		const dir = "/tmp/artifact-dir-from-the-environment"
-		t.Setenv("ARTIFACT_DIR", dir)
-
-		debugFlags, admFlags := bothCommands(t)
-
-		for command, set := range map[string]*pflag.FlagSet{"debug": debugFlags, "adm must-gather": admFlags} {
-			f := set.Lookup("artifacts-dir")
-			if f == nil {
-				t.Errorf("%s has no --artifacts-dir", command)
-
-				continue
-			}
-			if f.DefValue != dir {
-				t.Errorf("%s --artifacts-dir defaults to %q, want the environment's %q",
-					command, f.DefValue, dir)
-			}
-		}
-	})
-
 	t.Run("both refuse the same unusable windows with the same words", func(t *testing.T) {
 		t.Parallel()
 
@@ -1208,6 +1199,33 @@ func TestDebugGatherFlagsMatchMustGather(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestArtifactDirDefaultsToTheEnvironmentOnBothCommands covers the one default
+// that is not a constant. It is read when the flag is registered, so a command
+// that captured it any earlier, or that reached for the variable itself at run
+// time, would answer differently from the other one.
+//
+// It is not parallel, and neither is it a subtest of a parallel test: it sets
+// an environment variable, which the whole process shares.
+func TestArtifactDirDefaultsToTheEnvironmentOnBothCommands(t *testing.T) {
+	const dir = "/tmp/artifact-dir-from-the-environment"
+	t.Setenv("ARTIFACT_DIR", dir)
+
+	debugFlags, admFlags := bothCommands(t)
+
+	for command, set := range map[string]*pflag.FlagSet{"debug": debugFlags, "adm must-gather": admFlags} {
+		f := set.Lookup("artifacts-dir")
+		if f == nil {
+			t.Errorf("%s has no --artifacts-dir", command)
+
+			continue
+		}
+		if f.DefValue != dir {
+			t.Errorf("%s --artifacts-dir defaults to %q, want the environment's %q",
+				command, f.DefValue, dir)
+		}
+	}
 }
 
 // bothCommands builds the two commands that run the gather and returns their
