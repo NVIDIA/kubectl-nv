@@ -156,8 +156,13 @@ var laneOperands = []string{
 	"nvidia-operator-validator",
 }
 
-// cluster is two GPU workers with the six operands on each, the operator pod,
-// a node with no GPUs at all and a node the labels claim GPUs for.
+// cluster is two GPU workers with the six operands on each, the operator pod
+// on the second one, a node with no GPUs at all and a node the labels claim
+// GPUs for.
+//
+// The operator pod is kept off worker-1 so that the node the one-screen
+// assertion is made against carries exactly the six operands a GPU Operator
+// install puts on a worker, and not seven.
 func cluster() []runtime.Object {
 	objects := []runtime.Object{
 		gpuNode("worker-1", 4),
@@ -172,7 +177,7 @@ func cluster() []runtime.Object {
 				Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
 			},
 		},
-		operandPod("gpu-operator-0", "worker-1", "gpu-operator"),
+		operandPod("gpu-operator-0", "worker-2", "gpu-operator"),
 	}
 	for _, worker := range []string{"worker-1", "worker-2"} {
 		for _, app := range laneOperands {
