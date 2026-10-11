@@ -64,6 +64,11 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 			if opts.ArtifactDir == "" {
 				opts.ArtifactDir = defaultArtifactDir(time.Now())
 			}
+			// The version is read off the root rather than threaded through
+			// this constructor: the root is where the linker stamps it, and a
+			// second copy of it is a second thing to forget to update.
+			opts.ToolVersion = c.Root().Version
+			opts.Context = kubeconfigContext(o)
 
 			log := o.Log()
 			log.Infof("Using kubeconfig: %s", o.KubeconfigDisplay())
@@ -81,8 +86,35 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 	mg.Flags().StringVar(&opts.ArtifactDir, "artifacts-dir", os.Getenv(artifactDirEnvVar),
 		"path to the directory where the artifacts will be stored. "+
 			"Defaults to /tmp/nvidia-gpu-operator_<timestamp>")
+	mg.Flags().StringVar(&opts.Node, "node", "",
+		"collect only this node: its node object, the operand pods on it, their logs, "+
+			"its bug report and its device usage. The cluster-scoped resources are "+
+			"collected either way")
+	mg.Flags().DurationVar(&opts.Since, "since", 0,
+		"only collect container logs newer than this, for instance 2h or 30m. "+
+			"The default collects the whole log")
+	mg.Flags().BoolVar(&opts.NoExec, "no-exec", false,
+		"never exec into a driver pod: no nvidia-bug-report and no GPU device usage")
 
 	return mg
+}
+
+// kubeconfigContext names the context the bundle is collected through, for the
+// manifest. The raw configuration is asked rather than the flag alone, so that
+// a run without --context records the current context rather than an empty
+// field, and a bundle always says which cluster it came from.
+func kubeconfigContext(o *cmd.Options) string {
+	if o.ConfigFlags == nil {
+		return ""
+	}
+	if o.ConfigFlags.Context != nil && *o.ConfigFlags.Context != "" {
+		return *o.ConfigFlags.Context
+	}
+	raw, err := o.ConfigFlags.ToRawKubeConfigLoader().RawConfig()
+	if err != nil {
+		return ""
+	}
+	return raw.CurrentContext
 }
 
 // defaultArtifactDir names the directory the gpu-operator must-gather script
