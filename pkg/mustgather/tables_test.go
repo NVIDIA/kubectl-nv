@@ -18,6 +18,10 @@ package mustgather
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -243,6 +247,92 @@ func TestDaemonSetTableCountsTheRollout(t *testing.T) {
 		}
 		if row[index] != value {
 			t.Errorf("cell %d = %q, want %q (row: %v)", index, row[index], value, row)
+		}
+	}
+}
+
+// TestPodStatusComesFromTheServerSideTable is why the .status files exist at
+// all: they are what a support engineer scans first, and they have to say what
+// kubectl says. kubectl asks the API server for a Table and prints it; the
+// server knows states this package would have to re-derive, and got wrong.
+// An init container in a crash loop reads Init:CrashLoopBackOff there and
+// "Pending" from any client-side rendering of the pod's phase.
+func TestPodStatusComesFromTheServerSideTable(t *testing.T) {
+	table := &metav1.Table{
+		TypeMeta: metav1.TypeMeta{APIVersion: "meta.k8s.io/v1", Kind: "Table"},
+		ColumnDefinitions: []metav1.TableColumnDefinition{
+			{Name: "Name", Type: "string", Format: "name"},
+			{Name: "Ready", Type: "string"},
+			{Name: "Status", Type: "string"},
+			{Name: "Restarts", Type: "string"},
+			{Name: "Age", Type: "string"},
+			{Name: "IP", Type: "string", Priority: 1},
+			{Name: "Node", Type: "string", Priority: 1},
+		},
+		Rows: []metav1.TableRow{{
+			Cells: []any{
+				"nvidia-operator-validator-aaaaa", "0/1", "Init:CrashLoopBackOff",
+				"7 (2m ago)", "11m", "10.244.1.5", "gpu-node-2",
+			},
+		}},
+	}
+
+	var accept, path string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept, path = r.Header.Get("Accept"), r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(table)
+	}))
+	t.Cleanup(server.Close)
+
+	g, dir := newTestGathererAgainst(t, server.URL)
+
+	if err := g.writeArtifactFile("gpu_operand_pods.status", func(w io.Writer) error {
+		return g.writePodStatus(w, "gpu-operator", "", nil)
+	}); err != nil {
+		t.Fatalf("writing the status table: %v", err)
+	}
+
+	if !strings.Contains(accept, "as=Table") {
+		t.Errorf("the request asked for %q, want a Table", accept)
+	}
+	if !strings.Contains(path, "/namespaces/gpu-operator/pods") {
+		t.Errorf("the request went to %q, want the namespace's pods", path)
+	}
+
+	got := readArtifact(t, dir, "gpu_operand_pods.status")
+	for _, want := range []string{
+		"NAME", "READY", "STATUS", "NODE",
+		"nvidia-operator-validator-aaaaa", "Init:CrashLoopBackOff", "7 (2m ago)", "gpu-node-2",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the rendered table is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestPodStatusFallsBackWhenTheServerWillNotTable covers the cluster that
+// cannot serve a Table, and the proxy that mangles the Accept header. A .status
+// file that is empty because of either is worse than one rendered here.
+func TestPodStatusFallsBackWhenTheServerWillNotTable(t *testing.T) {
+	pod := v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "nvidia-device-plugin-aaaaa", Namespace: "gpu-operator"},
+		Spec:       v1.PodSpec{NodeName: "gpu-node-2", Containers: []v1.Container{{Name: "ctr"}}},
+		Status:     v1.PodStatus{Phase: v1.PodRunning},
+	}
+
+	g, dir := newTestGatherer(t, &pod)
+
+	if err := g.writeArtifactFile("gpu_operand_pods.status", func(w io.Writer) error {
+		return g.writePodStatus(w, "gpu-operator", "", []v1.Pod{pod})
+	}); err != nil {
+		t.Fatalf("writing the status table: %v", err)
+	}
+
+	got := readArtifact(t, dir, "gpu_operand_pods.status")
+	for _, want := range []string{"NAME", "READY", "STATUS", "nvidia-device-plugin-aaaaa", "gpu-node-2"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the fallback table is missing %q:\n%s", want, got)
 		}
 	}
 }

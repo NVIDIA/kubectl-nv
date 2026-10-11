@@ -80,6 +80,45 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+// newTestGathererWith builds a gatherer over a clientset the caller set up.
+func newTestGathererWith(t *testing.T, clientset *fake.Clientset) (*Gatherer, string) {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: clientset,
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds()),
+		config: offlineConfig(),
+	}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	return g, dir
+}
+
+// newTestGathererAgainst builds a gatherer whose REST configuration points at
+// a real server, for the paths that dial rather than going through a client.
+func newTestGathererAgainst(t *testing.T, host string) (*Gatherer, string) {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: fake.NewSimpleClientset(),
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds()),
+		config: &rest.Config{Host: host},
+	}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	return g, dir
+}
+
 // newTestGatherer builds a gatherer over the given cluster objects, writing to
 // a temporary artifact directory.
 func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string) {
