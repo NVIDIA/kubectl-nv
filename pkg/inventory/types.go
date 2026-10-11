@@ -23,13 +23,23 @@
 // deliberately flat and free of spec and status halves: nothing here is ever
 // applied to a cluster, so the split would carry no meaning.
 //
-// Two guarantees hold on the wire, both enforced by MarshalJSON rather than by
-// a constructor, because a zero value reaches a printer often enough:
+// Build every value through NewGPUNode and NewGPUNodeList. That is not a
+// convenience: the cli-runtime printers behind -o json, -o yaml and -o name
+// read TypeMeta off the object and refuse one whose GroupVersionKind is empty,
+// and they do it before any marshalling, so MarshalJSON stamping the envelope
+// does not reach them. A GPUNode literal prints as an error at -o json.
+// types_printer_test.go asserts both halves of that.
+//
+// Two guarantees then hold on the wire, enforced by MarshalJSON rather than by
+// the constructors, because a zero value still reaches encoding/json often
+// enough:
 //
 //   - The envelope is always stamped. A GPUNode marshals with the apiVersion
 //     and kind of pkg/output's contract whether or not TypeMeta was set.
 //   - Nothing is ever null. Every slice is an array and every map is an
 //     object, so a consumer can range or index without a null check first.
+//     The single documented exception is InitResult.ExitCode, where the
+//     alternative to an absent key is a null.
 //
 // GPUNode's own fields carry no omitempty either: the field set a reader sees
 // is the same on every node, so a jq expression written against one node works
@@ -67,20 +77,61 @@ const (
 	ModeNone = "none"
 )
 
+// ResourceCount is what a node advertises of one extended resource.
+type ResourceCount struct {
+	// Capacity is the resource's capacity on the node.
+	Capacity int64 `json:"capacity" yaml:"capacity"`
+	// Allocatable is what is left for the scheduler to place on it.
+	Allocatable int64 `json:"allocatable" yaml:"allocatable"`
+}
+
 // MIG is the Multi-Instance GPU configuration of a node, read from the
-// nvidia.com/mig.* labels.
+// nvidia.com/mig.* labels and, in the mixed strategy, from the node's own
+// extended resources.
 type MIG struct {
 	// Strategy is nvidia.com/mig.strategy: "none", "single" or "mixed".
-	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	Strategy string `json:"strategy" yaml:"strategy"`
 	// Config is nvidia.com/mig.config, the profile the mig-manager was asked
 	// to apply.
-	Config string `json:"config,omitempty" yaml:"config,omitempty"`
+	Config string `json:"config" yaml:"config"`
 	// ConfigState is nvidia.com/mig.config.state, where the mig-manager got
 	// to with it: "success", "pending", "failed".
-	ConfigState string `json:"configState,omitempty" yaml:"configState,omitempty"`
+	ConfigState string `json:"configState" yaml:"configState"`
 	// Capable is nvidia.com/mig.capable, whether the hardware supports MIG at
 	// all. A node can be capable and unconfigured.
 	Capable bool `json:"capable" yaml:"capable"`
+	// Resources is what the node advertises per MIG profile, keyed by the
+	// full resource name, for instance "nvidia.com/mig-1g.10gb".
+	//
+	// It is only ever populated under the mixed strategy, which is the one
+	// where it is the only description of the node's capacity: a mixed node
+	// advertises one extended resource per profile and no nvidia.com/gpu at
+	// all, so GPUNode.Capacity is zero on it and these counts are the real
+	// numbers. The single strategy keeps advertising nvidia.com/gpu and
+	// leaves this empty.
+	//
+	// The keys are the same strings pkg/source reads membership from, kept
+	// whole rather than split into a profile name, so that the two cannot
+	// disagree about what counts as a MIG resource.
+	Resources map[string]ResourceCount `json:"resources" yaml:"resources"`
+}
+
+// migJSON breaks the method set so that MarshalJSON does not recurse.
+type migJSON MIG
+
+// MarshalJSON renders a nil Resources as an empty object.
+func (m MIG) MarshalJSON() ([]byte, error) {
+	out := migJSON(m)
+	if out.Resources == nil {
+		out.Resources = map[string]ResourceCount{}
+	}
+
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling the MIG configuration: %w", err)
+	}
+
+	return raw, nil
 }
 
 // Sharing is how a node shares each physical GPU between pods, read from the
@@ -88,7 +139,7 @@ type MIG struct {
 type Sharing struct {
 	// Strategy is nvidia.com/gpu.sharing-strategy: "none", "time-slicing" or
 	// "mps".
-	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty"`
+	Strategy string `json:"strategy" yaml:"strategy"`
 	// Replicas is nvidia.com/gpu.replicas, how many times each GPU is
 	// advertised. It is 1, or absent, when nothing is shared.
 	Replicas int `json:"replicas" yaml:"replicas"`
@@ -99,26 +150,40 @@ type Sharing struct {
 // so this is where a failed validation is visible.
 type InitResult struct {
 	// Name is the init container name, for instance "toolkit-validation".
-	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	Name string `json:"name" yaml:"name"`
 	// ExitCode is the code it terminated with. It is a pointer because "has
 	// not finished" and "exited 0" are different facts and both are common.
+	//
+	// This is the one field in the package that keeps omitempty, and so the
+	// one field whose presence varies between nodes. The alternative for a nil
+	// pointer is a null, and never-null is the guarantee consumers were given
+	// first; an absent key and a null both have to be handled, and an absent
+	// key is the one that does not break a reader that trusted the rest.
 	ExitCode *int32 `json:"exitCode,omitempty" yaml:"exitCode,omitempty"`
 	// Reason is the termination reason, for instance "Error" or "Completed".
-	Reason string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	Reason string `json:"reason" yaml:"reason"`
 }
 
 // OperandPod is one GPU operator pod running on the node.
 type OperandPod struct {
 	// Name is the pod name.
-	Name string `json:"name,omitempty" yaml:"name,omitempty"`
+	Name string `json:"name" yaml:"name"`
 	// Namespace is the namespace it runs in, usually gpu-operator.
-	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	// Component is which operand it is, read from the "app" label or from
-	// "app.kubernetes.io/component". The operator has used both over its
-	// lifetime, so a reader takes whichever is there.
-	Component string `json:"component,omitempty" yaml:"component,omitempty"`
+	Namespace string `json:"namespace" yaml:"namespace"`
+	// Component is which operand it is: the verbatim value of the pod's "app"
+	// label, or of "app.kubernetes.io/component" when there is no "app". The
+	// operator has used both over its lifetime, so a reader takes whichever is
+	// there and does not rewrite it.
+	//
+	// Verbatim is the contract. The Component* constants in this package are
+	// the values the GPU Operator and the NVIDIA DRA driver are known to use,
+	// and a rule matching on a component compares against one of them; a pod
+	// labelled with something this package has never heard of still arrives
+	// here with its own label value rather than an empty string, so an
+	// unrecognised operand is visible rather than silently dropped.
+	Component string `json:"component" yaml:"component"`
 	// Phase is the pod phase.
-	Phase string `json:"phase,omitempty" yaml:"phase,omitempty"`
+	Phase string `json:"phase" yaml:"phase"`
 	// Restarts is the restart count summed over the pod's containers.
 	Restarts int32 `json:"restarts" yaml:"restarts"`
 	// Images are the container images the pod runs, which is how a driver or
@@ -173,7 +238,9 @@ type GPUNode struct {
 	// node can have GPUs and no GFD.
 	Count int `json:"count" yaml:"count"`
 
-	// Capacity is the nvidia.com/gpu capacity the node advertises.
+	// Capacity is the nvidia.com/gpu capacity the node advertises. It is zero
+	// on a node running MIG in the mixed strategy, which advertises one
+	// resource per profile instead; MIG.Resources carries those.
 	Capacity int64 `json:"capacity" yaml:"capacity"`
 	// Allocatable is the nvidia.com/gpu allocatable.
 	Allocatable int64 `json:"allocatable" yaml:"allocatable"`
@@ -223,12 +290,18 @@ type GPUNode struct {
 	// Taints are the node's taints, which is how a GPU node that nothing can
 	// land on explains itself.
 	Taints []corev1.Taint `json:"taints" yaml:"taints"`
-	// Conditions are the node conditions. gpu info fills them; gpu list leaves
-	// them empty, because a list of nodes with every condition on each one is
-	// not a list anyone reads.
+	// Conditions are the node conditions. gpu info and gpu health both fill
+	// them, the latter because NV-NODE-005 reads them; gpu list leaves them
+	// empty, because a list of nodes with every condition on each one is not a
+	// list anyone reads.
 	Conditions []corev1.NodeCondition `json:"conditions" yaml:"conditions"`
 
-	// Operands are the GPU operator pods running on the node.
+	// Operands are the GPU Operator's pods running on the node, plus the
+	// NVIDIA DRA driver's kubelet-plugin and IMEX daemon pods on it. The DRA
+	// pods are operands in every sense that matters to a reader: they are what
+	// makes the node's GPUs allocatable under DRA, and a node whose
+	// kubelet-plugin is not running advertises nothing even though every GPU
+	// Operator pod is healthy.
 	Operands []OperandPod `json:"operands" yaml:"operands"`
 	// ResourceSlices are the names of the gpu.nvidia.com ResourceSlices
 	// published for the node. gpu info fills them.
@@ -314,8 +387,8 @@ func (l GPUNodeList) MarshalJSON() ([]byte, error) {
 }
 
 // NewGPUNode returns a GPU node stamped with the API version and carrying the
-// name. The envelope is stamped on marshal too, so this is a convenience for
-// the in-memory value rather than the thing that makes the output correct.
+// name. Every GPUNode handed to a printer has to come from here or carry the
+// same TypeMeta: the printers read it off the struct, not off the bytes.
 func NewGPUNode(name string) *GPUNode {
 	return &GPUNode{
 		TypeMeta:   output.TypeMetaFor(output.KindGPUNode),
@@ -323,7 +396,8 @@ func NewGPUNode(name string) *GPUNode {
 	}
 }
 
-// NewGPUNodeList returns an empty list stamped with the API version.
+// NewGPUNodeList returns an empty list stamped with the API version. As with
+// NewGPUNode, a list handed to a printer has to come from here.
 func NewGPUNodeList() *GPUNodeList {
 	return &GPUNodeList{
 		TypeMeta: output.TypeMetaFor(output.KindGPUNodeList),

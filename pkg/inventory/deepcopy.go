@@ -28,7 +28,14 @@ import (
 //
 // Every reference field is copied here. A field added to a type and not added
 // here is a shallow copy that still compiles, so deepcopy_test.go mutates
-// every one of them through a copy and checks the original.
+// every one of them through a copy and checks the original, and
+// deepcopy_reflect_test.go does the same without naming any field: it refuses
+// a fixture that leaves a reference field unset, then mutates everything
+// reachable in a copy and requires the original to be untouched.
+//
+// TypeMeta and the scalars are covered by the *out = *n above. They are not
+// reassigned afterwards: a line that copies a value field again reads as if it
+// were doing something, and the next person has to work out that it is not.
 
 // DeepCopyInto copies the receiver into out.
 func (r *InitResult) DeepCopyInto(out *InitResult) {
@@ -81,6 +88,21 @@ func (p *OperandPod) DeepCopy() *OperandPod {
 	return out
 }
 
+// copyResourceCounts returns a copy of in, or nil when in is nil. ResourceCount
+// holds only numbers, so copying the entries is enough.
+func copyResourceCounts(in map[string]ResourceCount) map[string]ResourceCount {
+	if in == nil {
+		return nil
+	}
+
+	out := make(map[string]ResourceCount, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+
+	return out
+}
+
 // copyStringMap returns a copy of in, or nil when in is nil. Nil stays nil:
 // MarshalJSON is what turns it into an empty object, and a copy that quietly
 // allocated would make a value differ from its own copy.
@@ -101,9 +123,9 @@ func copyStringMap(in map[string]string) map[string]string {
 func (n *GPUNode) DeepCopyInto(out *GPUNode) {
 	*out = *n
 
-	out.TypeMeta = n.TypeMeta
 	n.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 
+	out.MIG.Resources = copyResourceCounts(n.MIG.Resources)
 	out.Deploy = copyStringMap(n.Deploy)
 	out.Topology = copyStringMap(n.Topology)
 
@@ -159,7 +181,6 @@ func (n *GPUNode) DeepCopyObject() runtime.Object {
 func (l *GPUNodeList) DeepCopyInto(out *GPUNodeList) {
 	*out = *l
 
-	out.TypeMeta = l.TypeMeta
 	l.ListMeta.DeepCopyInto(&out.ListMeta)
 
 	if l.Items != nil {
