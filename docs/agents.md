@@ -189,9 +189,12 @@ structured content, so a caller does not parse it twice. A command that fails
 comes back as a tool error carrying what it said, not as a protocol error the
 model would never see.
 
-Two flags are not offered and cannot be set: `--output`, because the server
-needs JSON to build structured content, and `--no-exec`, because of the next
-paragraph.
+Some flags are not offered and cannot be set: `--output`, because the server
+needs JSON to build structured content; `--no-exec`, because of the next
+paragraph; and any flag a command has marked for the server to leave out.
+`schema --write-dir` is marked that way: it writes files on the machine
+`kubectl-nv` runs on, which the read-only guarantee says nothing about because
+no Kubernetes object changes.
 
 ### Exec over MCP
 
