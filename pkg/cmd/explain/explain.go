@@ -37,7 +37,7 @@ import (
 func NewCommand(_ *cmd.Options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "explain CODE",
-		Short: "Explain a finding code reported by gpu health",
+		Short: "Explain a finding code reported by kubectl nv health",
 		Long: "Print the catalog entry for a finding code: what it means, what\n" +
 			"the evidence is, which GPU Operator versions it applies to, what to\n" +
 			"run next, and how to reproduce it.\n\n" +

@@ -94,7 +94,7 @@ var defaultOperandTolerations = []corev1.Toleration{
 // A cluster that keeps its GPU nodes behind a custom taint tells the operator
 // about it there, and the operator replaces the DaemonSets' own tolerations
 // with the list. A gate that read only the defaults would decide the operator
-// targets no node of such a cluster, and then gpu health would report nothing
+// targets no node of such a cluster, and then kubectl nv health would report nothing
 // at all about it.
 //
 // Anything unreadable is skipped rather than guessed at: the CRD is not

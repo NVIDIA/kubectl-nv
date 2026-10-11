@@ -28,7 +28,7 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// OperatorTargets is the gate that keeps gpu health off nodes the GPU Operator
+// OperatorTargets is the gate that keeps kubectl nv health off nodes the GPU Operator
 // was never going to touch, and getting it wrong in either direction is a way
 // to make the whole command useless: too permissive and a healthy lane reports
 // an error on every run, too strict and a broken node reports clean.

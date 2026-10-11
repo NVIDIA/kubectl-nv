@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-// Package health holds the rule contract behind gpu health: what a rule may
+// Package health holds the rule contract behind kubectl nv health: what a rule may
 // read, what it returns, and the registry that collects them.
 //
 // A rule is a pure function of an Input. It reads no cluster, no clock and no
@@ -66,7 +66,7 @@ type Input struct {
 	// nvidia.com/gpu capacity, those with capacity of any nvidia.com/mig-*
 	// profile, and those named by a gpu.nvidia.com ResourceSlice.
 	//
-	// health builds these with Conditions filled, unlike gpu list: NV-NODE-005
+	// health builds these with Conditions filled, unlike kubectl nv list: NV-NODE-005
 	// reads the node conditions, so a rule may rely on them being there.
 	//
 	// Operands on each node are the GPU Operator's pods plus the NVIDIA DRA
@@ -76,7 +76,7 @@ type Input struct {
 	Nodes []inventory.GPUNode
 	// Hinted are the label-only nodes, each with Hinted set. A node that
 	// carries a GPU hint label and advertises no GPUs is the most common
-	// thing a user runs gpu health to find, so it is a set of its own rather
+	// thing a user runs kubectl nv health to find, so it is a set of its own rather
 	// than a flag to filter Nodes by.
 	Hinted []inventory.GPUNode
 	// ClusterPolicies are the operator's ClusterPolicy objects, unstructured

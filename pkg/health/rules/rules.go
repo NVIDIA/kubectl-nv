@@ -145,7 +145,7 @@ func labelIsTrue(node inventory.GPUNode, name string) bool {
 // no nvidia.com/gpu to the container scheduler on purpose.
 //
 // Phase 2 of the operator's sandbox workload support is what these are about,
-// and gpu health has no rules for them yet: the only thing the current rules
+// and kubectl nv health has no rules for them yet: the only thing the current rules
 // have to do is not report a working one as broken.
 const (
 	workloadVMPassthrough = "vm-passthrough"

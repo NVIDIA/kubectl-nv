@@ -298,7 +298,7 @@ func TestRunKeepsACrossNodeFindingUnderANodeFilter(t *testing.T) {
 }
 
 // A hinted node is still a node a user can ask about: it is the most common
-// thing gpu health is run to find.
+// thing kubectl nv health is run to find.
 func TestRunAcceptsAHintedNodeFilter(t *testing.T) {
 	t.Parallel()
 
@@ -316,7 +316,7 @@ func TestRunAcceptsAHintedNodeFilter(t *testing.T) {
 
 // A name --node does not match must not report clean.
 //
-// The message matters as much as the exit code. gpu health only ever looks at
+// The message matters as much as the exit code. kubectl nv health only ever looks at
 // GPU nodes and the nodes hinted as ones, so a name it cannot match is either
 // a typo or a node of the cluster that has no GPUs at all, and it cannot tell
 // which. Saying "no node named X" would be a claim about the cluster that this
@@ -344,7 +344,7 @@ func TestRunRejectsANodeItDidNotLookAt(t *testing.T) {
 		t.Fatalf("Run returned %T, want an *output.UsageError", err)
 	}
 
-	want := `gpu health looked at no node named "wroker-1": it checks GPU nodes and nodes ` +
+	want := `kubectl nv health looked at no node named "wroker-1": it checks GPU nodes and nodes ` +
 		`labelled as having GPUs, and this run found control-plane and worker-1`
 	if err.Error() != want {
 		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)
@@ -362,7 +362,7 @@ func TestRunRejectsANodeWhenItFoundNoneAtAll(t *testing.T) {
 		t.Fatal("Run returned no error over an empty cluster")
 	}
 
-	want := `gpu health looked at no node named "worker-1": it checks GPU nodes and nodes ` +
+	want := `kubectl nv health looked at no node named "worker-1": it checks GPU nodes and nodes ` +
 		`labelled as having GPUs, and this run found none`
 	if err.Error() != want {
 		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)

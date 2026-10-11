@@ -25,7 +25,7 @@ import (
 // NodeNoAllocatableGPUs is NV-NODE-002: the node says it has GPUs and the
 // scheduler cannot place one on it.
 //
-// This is the finding gpu health exists for. It covers two shapes of the same
+// This is the finding kubectl nv health exists for. It covers two shapes of the same
 // problem, told apart by the hinted evidence key: a node that advertises no
 // nvidia.com/gpu capacity at all, and one that advertises capacity the kubelet
 // offers none of.

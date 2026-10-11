@@ -161,12 +161,12 @@ func nodesChecked(
 	}
 
 	// Said as what this command knows rather than as what the cluster holds.
-	// gpu health only ever looks at GPU nodes and at nodes labelled as having
+	// kubectl nv health only ever looks at GPU nodes and at nodes labelled as having
 	// GPUs, so a name it cannot match is either a typo or an ordinary node
 	// with no GPUs, and it cannot tell which: "no node named X" would be a
 	// claim about the cluster that nothing here checked.
 	usage := output.NewUsageError(
-		"gpu health looked at no node named %q: it checks GPU nodes and nodes labelled as having GPUs, and %s",
+		"kubectl nv health looked at no node named %q: it checks GPU nodes and nodes labelled as having GPUs, and %s",
 		nodeFilter, knownNodes(all))
 
 	if len(unreachable) > 0 {
