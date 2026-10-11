@@ -16,10 +16,11 @@
 #
 # The lane is a Mokka t4 lane, which brings up two real workers with simulated
 # GPUs, plus the KWOK nodes hack/mokka/kwok-nodes.sh adds on top. KWOK nodes
-# have no kubelet and run no pods, so they cost an API object each; that is
-# what makes this size affordable on a hosted runner, and it is also why this
-# job says nothing about whether the operands are healthy. e2e-mokka answers
-# that question, on every pull request, and this one does not try to.
+# have no kubelet and run no pods of their own, so they cost an API object
+# each; that is what makes this size affordable on a hosted runner, and it is
+# also why this job says nothing about whether the operands are healthy.
+# e2e-mokka answers that question, on every pull request, and this one does not
+# try to.
 #
 # Nightly rather than per pull request. The run takes most of an hour and the
 # number it produces is a trend, not a gate: a pull request that makes "list"
@@ -58,8 +59,23 @@ jobs:
   scale:
     name: list and health over ${{ inputs.nodes || '2000' }} nodes
     runs-on: ubuntu-latest
-    # The lane install is the same work e2e-mokka does, plus the KWOK install,
-    # two thousand node creates and six timed runs of the binary.
+    # The budget, in the order the steps spend it. Every wait below has to fit
+    # inside this with room to spare, or the job is killed mid-install and
+    # reports a job timeout instead of whichever wait actually ran out.
+    #
+    #   runner setup, Go, kind, helm, the suite's own tests, make build   5m
+    #   kind create cluster and the node image pull                       5m
+    #   2 x 12m helm (nvml-mock, then the GPU Operator)                  24m
+    #   up.sh operand rollout and lane assertions (MOKKA_READY_TIMEOUT)  10m
+    #   kwok-nodes.sh: install, 2,000 creates, readiness, pod CIDRs      15m
+    #   go test: the settle wait (10m) and six timed runs                13m
+    #   teardown, diagnostics and the upload                              5m
+    #                                                                   -----
+    #                                                                    77m   against 90m
+    #
+    # All of those are ceilings. A healthy lane took about 12 minutes to the
+    # end of the operator install on the machine this was developed against,
+    # and 20 fake nodes were created and Ready in one second.
     timeout-minutes: 90
     env:
       MOKKA_LANE: scale
@@ -83,6 +99,17 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: ${{ steps.go_version.outputs.GOLANG_VERSION }}
+
+      # First, before anything that costs an hour. These check the lane scripts
+      # and the suite's own decisions with no cluster at all, and they are the
+      # two suites that would otherwise only ever be run by hand: nothing else
+      # in .github/workflows runs the hack/mokka tests.
+      - name: Check the lane scripts and the suite's own logic
+        run: |
+          set -euo pipefail
+          bash hack/mokka/up_test.sh
+          bash hack/mokka/kwok-nodes_test.sh
+          go test -tags scale -count=1 ./test/e2e/...
 
       - name: Install kind
         env:
@@ -120,7 +147,14 @@ jobs:
 
       - name: Bring up the Mokka lane
         env:
-          MOKKA_HELM_TIMEOUT: 15m
+          # kind-scale.yaml is kind-mokka.yaml with podSubnet widened to
+          # 10.240.0.0/12. The node IPAM controller gives every node a /24, a
+          # KWOK node included, and the default 10.244.0.0/16 holds 256 of
+          # them: past about 253 nodes the lane stops allocating and the rest
+          # come up Ready with no pod CIDR. kwok-nodes.sh fails when it sees
+          # that, so this is not optional at 2,000.
+          MOKKA_KIND_CONFIG: kind-scale.yaml
+          MOKKA_HELM_TIMEOUT: 12m
           MOKKA_READY_TIMEOUT: "600"
         run: hack/mokka/up.sh "${MOKKA_LANE}" "${MOKKA_PROFILE}"
 
@@ -141,9 +175,14 @@ jobs:
         # -run pins this to the scale test. The rest of the e2e suite carries
         # the e2e tag and would otherwise run here too, and a must-gather over
         # two thousand nodes is neither what this job measures nor something
-        # its timeout has room for.
+        # the budget above has room for.
+        #
+        # -timeout 25m is the suite's own share of that budget: a 10m settle
+        # wait plus six runs that take minutes. It is not the whole job
+        # timeout, so a wedged run is reported as a Go test timeout with a
+        # stack, which says far more than a cancelled job does.
         run: |
-          go test -tags e2e,scale -count=1 -timeout 60m -v \
+          go test -tags e2e,scale -count=1 -timeout 25m -v \
             -run TestScaleLane ./test/e2e/...
 
       # Uploaded whichever way the suite ended: a run that missed its threshold
@@ -166,11 +205,14 @@ jobs:
           out="${GITHUB_WORKSPACE}/bin/e2e-diagnostics-scale"
           mkdir -p "${out}"
           # None of these may decide the exit code: they run to describe a
-          # failure that has already happened.
+          # failure that has already happened. Node and pod lists are thousands
+          # of lines at this size, which is the point of having them.
           kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
             get nodes -o wide > "${out}/nodes.txt" 2>&1 || true
           kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
             get pods -A -o wide > "${out}/pods.txt" 2>&1 || true
+          kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
+            get daemonsets -A > "${out}/daemonsets.txt" 2>&1 || true
           kubectl --kubeconfig "${kubeconfig}" --context kind-kubectl-nv-scale \
             get events -A --sort-by=.lastTimestamp > "${out}/events.txt" 2>&1 || true
 
@@ -183,9 +225,11 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # The lane is a kind cluster on a hosted runner, which is thrown away
-      # after the job. It is torn down anyway: a down.sh that stops working is
-      # a bug a developer would otherwise only find on their own machine.
+      # The runner is thrown away after the job, so this is not about
+      # reclaiming anything: it is the only place down.sh runs on a schedule.
+      # Its exit code is the step's, with no "|| true" to swallow it, because a
+      # down.sh that has stopped working is a bug every developer would
+      # otherwise meet on their own machine first.
       - name: Tear the lane down
         if: always()
-        run: hack/mokka/down.sh "${MOKKA_LANE}" || true
+        run: hack/mokka/down.sh "${MOKKA_LANE}"

@@ -35,6 +35,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	appsv1 "k8s.io/api/apps/v1"
 )
 
 // scaleNodePrefix is the name hack/mokka/kwok-nodes.sh gives every node it
@@ -317,19 +319,6 @@ func sortedObjectKeys(object map[string]any) []string {
 	return keys
 }
 
-// sortedCodes lists the exit codes a run is allowed, for an error message.
-func sortedCodes(allowed map[int]bool) []int {
-	codes := make([]int, 0, len(allowed))
-	for code, ok := range allowed {
-		if ok {
-			codes = append(codes, code)
-		}
-	}
-	sort.Ints(codes)
-
-	return codes
-}
-
 // ---------------------------------------------------------------------------
 // The three things that can fail the suite
 // ---------------------------------------------------------------------------
@@ -487,6 +476,62 @@ func firstN(names []string, n int) string {
 	}
 
 	return fmt.Sprintf("%s and %d more", strings.Join(names[:n], ", "), len(names)-n)
+}
+
+// ---------------------------------------------------------------------------
+// Deciding that the lane has stopped moving
+// ---------------------------------------------------------------------------
+//
+// Measuring a lane that is still placing pods measures the scheduler. Two
+// conditions say it has stopped: every DaemonSet has placed a pod on every
+// node it wants one on, and the pod count is the same twice running. The
+// decisions are here, away from the client that fetches the numbers, so they
+// can be driven through the states a 2,000 node lane passes on its way up.
+
+// pendingDaemonSets names the DaemonSets that have not yet placed a pod on
+// every node they want one on.
+//
+// The comparison is currentNumberScheduled against desiredNumberScheduled and
+// deliberately not numberReady. A fake node's pods are answered for by KWOK's
+// pod Stages, so numberReady waits on a different controller than the one
+// whose work perturbs a measurement, and on a lane where KWOK is slow it would
+// wait for something that never settles.
+func pendingDaemonSets(items []appsv1.DaemonSet) []string {
+	pending := make([]string, 0)
+	for i := range items {
+		ds := &items[i]
+		if ds.Status.CurrentNumberScheduled != ds.Status.DesiredNumberScheduled {
+			pending = append(pending, fmt.Sprintf("%s/%s (%d of %d)",
+				ds.Namespace, ds.Name,
+				ds.Status.CurrentNumberScheduled, ds.Status.DesiredNumberScheduled))
+		}
+	}
+	sort.Strings(pending)
+
+	return pending
+}
+
+// settled decides whether the lane has stopped moving, and when it has not,
+// says what is still moving. previous is the pod count from the poll before
+// this one, or -1 on the first poll: a lane is never called settled on the
+// strength of a single observation, because one count on its own cannot be
+// compared with anything.
+func settled(pending []string, total, previous int) (bool, string) {
+	switch {
+	case len(pending) > 0:
+		return false, fmt.Sprintf("DaemonSets still placing pods: %s", firstN(pending, 5))
+	case previous < 0:
+		return false, fmt.Sprintf("the pod count is %d, with nothing yet to compare it against", total)
+	case total != previous:
+		return false, fmt.Sprintf("the pod count moved from %d to %d", previous, total)
+	default:
+		return true, ""
+	}
+}
+
+// onFakeNode reports whether a pod is placed on a node kwok-nodes.sh made.
+func onFakeNode(nodeName string) bool {
+	return strings.HasPrefix(nodeName, scaleNodePrefix)
 }
 
 // ---------------------------------------------------------------------------

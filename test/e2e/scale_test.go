@@ -41,7 +41,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -226,26 +225,25 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 	client := clusterClient(t)
 	deadline := time.Now().Add(timeout)
 	previous := -1
-	reason := "nothing was polled"
+	var reason string
 
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-		pending, err := unscheduledDaemonSets(ctx, client)
+		pending, err := listPendingDaemonSets(ctx, client)
 		if err == nil {
 			total, onFake, err = countPods(ctx, client)
 		}
 		cancel()
 
-		switch {
-		case err != nil:
+		if err != nil {
 			reason = err.Error()
-		case len(pending) > 0:
-			reason = fmt.Sprintf("DaemonSets still placing pods: %s", firstN(pending, 5))
-		case total != previous:
-			reason = fmt.Sprintf("the pod count moved from %d to %d", previous, total)
+		} else {
+			var done bool
+			done, reason = settled(pending, total, previous)
 			previous = total
-		default:
-			return total, onFake
+			if done {
+				return total, onFake
+			}
 		}
 
 		if time.Now().After(deadline) {
@@ -256,23 +254,15 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 	}
 }
 
-// unscheduledDaemonSets names the DaemonSets that have not yet placed a pod on
-// every node they want one on.
-func unscheduledDaemonSets(ctx context.Context, client kubernetes.Interface) ([]string, error) {
+// listPendingDaemonSets fetches the DaemonSets and asks pendingDaemonSets
+// which of them are still placing pods.
+func listPendingDaemonSets(ctx context.Context, client kubernetes.Interface) ([]string, error) {
 	list, err := client.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("listing DaemonSets: %w", err)
 	}
 
-	pending := make([]string, 0)
-	for _, ds := range list.Items {
-		if ds.Status.CurrentNumberScheduled != ds.Status.DesiredNumberScheduled {
-			pending = append(pending, fmt.Sprintf("%s/%s (%d of %d)",
-				ds.Namespace, ds.Name, ds.Status.CurrentNumberScheduled, ds.Status.DesiredNumberScheduled))
-		}
-	}
-
-	return pending, nil
+	return pendingDaemonSets(list.Items), nil
 }
 
 // countPods counts every pod in the cluster and how many of them sit on a fake
@@ -287,7 +277,7 @@ func countPods(ctx context.Context, client kubernetes.Interface) (total, onFake 
 		}
 		for i := range page.Items {
 			total++
-			if strings.HasPrefix(page.Items[i].Spec.NodeName, scaleNodePrefix) {
+			if onFakeNode(page.Items[i].Spec.NodeName) {
 				onFake++
 			}
 		}

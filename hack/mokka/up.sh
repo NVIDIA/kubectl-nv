@@ -85,6 +85,26 @@ CONTEXT="$(mokka::context "${LANE}")"
 BIN_DIR="${MOKKA_BIN_DIR:-${SCRIPT_DIR}/bin}"
 KUBECONFIG_OUT="${BIN_DIR}/kubeconfig-${LANE}"
 
+# The kind topology. The scale lane needs a wider pod subnet than kind's
+# default, which is a property of the cluster at creation and so a different
+# config file rather than a flag; everything else keeps kind-mokka.yaml.
+#
+# A value with no slash in it is taken as a file next to this script, so a
+# caller can say MOKKA_KIND_CONFIG=kind-scale.yaml from any working directory.
+# Anything else is a path and is used as given.
+#
+# A misspelled override is a usage error and not a fall back to the default:
+# the lane would come up with the wrong topology and nothing after this point
+# would notice.
+KIND_CONFIG="${MOKKA_KIND_CONFIG:-kind-mokka.yaml}"
+case "${KIND_CONFIG}" in
+    */*) ;;
+    *) KIND_CONFIG="${SCRIPT_DIR}/${KIND_CONFIG}" ;;
+esac
+if [ ! -f "${KIND_CONFIG}" ]; then
+    mokka::die 2 "up.sh: kind config not found: ${KIND_CONFIG}"
+fi
+
 # Belt and braces alongside the explicit --kubeconfig on every call below: with
 # this set, a call that somehow lost its flag still cannot reach ~/.kube/config.
 export KUBECONFIG="${KUBECONFIG_OUT}"
@@ -135,7 +155,7 @@ mokka::phase "create cluster ${CLUSTER}"
 kind create cluster \
     --name "${CLUSTER}" \
     --image "${MOKKA_KIND_NODE_IMAGE}" \
-    --config "${SCRIPT_DIR}/kind-mokka.yaml" \
+    --config "${KIND_CONFIG}" \
     --kubeconfig "${KUBECONFIG_OUT}"
 CLUSTER_CREATED=true
 

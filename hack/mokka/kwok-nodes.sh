@@ -33,7 +33,8 @@
 #   3  a required tool is missing
 #   5  the nodes did not become Ready and advertise their GPUs in time
 #   6  a downloaded KWOK manifest did not match its pinned sha256
-#   7  the target context is not a kubectl-nv lane, so nothing was touched
+#   7  the target context is not a kubectl-nv lane, or the server behind it is
+#      not a loopback address, so nothing was touched
 #
 # This script never reads or writes the caller's default kubeconfig: it uses
 # the lane kubeconfig up.sh wrote, under hack/mokka/bin, and names it on every
@@ -183,6 +184,32 @@ if ! [[ ${KWOK_BATCH_SIZE} =~ ^[1-9][0-9]*$ ]]; then
     mokka::die 2 "kwok-nodes.sh: KWOK_BATCH_SIZE must be a whole number above zero, got '${KWOK_BATCH_SIZE}'"
 fi
 
+# The label values are checked here rather than left to the API server. A value
+# it rejects fails the apply of a whole batch, and the message names the
+# hundredth node in that batch rather than the variable that was wrong.
+# Kubernetes label values are at most 63 characters of alphanumerics, dots,
+# dashes and underscores, beginning and ending alphanumeric.
+mokka::valid_label_value() {
+    [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$ ]]
+}
+
+for pair in \
+    "KWOK_GPU_PRODUCT=${KWOK_GPU_PRODUCT}" \
+    "KWOK_GPU_FAMILY=${KWOK_GPU_FAMILY}"; do
+    if ! mokka::valid_label_value "${pair#*=}"; then
+        mokka::die 2 "kwok-nodes.sh: ${pair%%=*} is not a valid label value: '${pair#*=}'"
+    fi
+done
+
+for pair in \
+    "KWOK_GPU_MEMORY=${KWOK_GPU_MEMORY}" \
+    "KWOK_COMPUTE_MAJOR=${KWOK_COMPUTE_MAJOR}" \
+    "KWOK_COMPUTE_MINOR=${KWOK_COMPUTE_MINOR}"; do
+    if ! [[ ${pair#*=} =~ ^[0-9]+$ ]]; then
+        mokka::die 2 "kwok-nodes.sh: ${pair%%=*} must be a whole number, got '${pair#*=}'"
+    fi
+done
+
 BIN_DIR="${MOKKA_BIN_DIR:-${SCRIPT_DIR}/bin}"
 KUBECONFIG_IN="${MOKKA_KUBECONFIG:-${BIN_DIR}/kubeconfig-${LANE}}"
 CONTEXT="${MOKKA_CONTEXT:-$(mokka::context "${LANE}")}"
@@ -201,7 +228,7 @@ if ! [[ ${CONTEXT} =~ ^kind-kubectl-nv-[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]; t
     mokka::die 7 "kwok-nodes.sh: refusing to touch context '${CONTEXT}': only a kind-kubectl-nv-<lane> context is a Mokka lane"
 fi
 
-mokka::require_tools kubectl curl shasum
+mokka::require_tools kubectl curl shasum awk
 
 # Belt and braces alongside the explicit --kubeconfig below.
 export KUBECONFIG="${KUBECONFIG_IN}"
@@ -209,6 +236,21 @@ export KUBECONFIG="${KUBECONFIG_IN}"
 k() {
     kubectl --kubeconfig "${KUBECONFIG_IN}" --context "${CONTEXT}" "$@"
 }
+
+# ---------------------------------------------------------------------------
+# The second half of the context guard: where that context actually points
+# ---------------------------------------------------------------------------
+#
+# A context name is a name somebody chose, and nothing stops anybody giving a
+# production cluster the name kind-kubectl-nv-scale. A kind cluster always
+# publishes its API server on the loopback address with a port kind picked, so
+# that is checked as well. Together the two mean this script can only ever
+# create and delete nodes in a cluster running on this machine.
+
+SERVER="$(k config view --minify -o 'jsonpath={.clusters[0].cluster.server}' 2> /dev/null || true)"
+if ! [[ ${SERVER} =~ ^https://127\.0\.0\.1:[0-9]{1,5}$ ]]; then
+    mokka::die 7 "kwok-nodes.sh: refusing to touch context '${CONTEXT}': its server is '${SERVER:-<unreadable>}', and a kind lane answers on https://127.0.0.1:<port>"
+fi
 
 # ---------------------------------------------------------------------------
 # --delete
@@ -220,8 +262,12 @@ if [ "${MODE}" = "delete" ]; then
     # nodes too, and this script did not make them.
     k delete nodes --selector "${KWOK_OWNER_LABEL}=true" --ignore-not-found --wait=false
     mokka::phase
-    printf 'lane %s: the nodes labelled %s=true are gone; KWOK itself was left installed\n' \
+    # --wait=false means the API server accepted the deletions, not that the
+    # objects have gone. Saying otherwise invites a rerun a second later that
+    # then trips the leftover-node check for a reason nobody can see.
+    printf 'lane %s: deletion requested for every node labelled %s=true; KWOK itself was left installed\n' \
         "${LANE}" "${KWOK_OWNER_LABEL}"
+    printf 'the objects go once their finalizers clear; "kubectl get nodes" says when\n'
     exit 0
 fi
 
@@ -261,11 +307,37 @@ install_kwok() {
     rm -rf "${tmp}"
 }
 
+# kwok_complete reports whether this lane holds a KWOK that will actually do
+# something. The controller Deployment on its own is not enough: the Stage
+# objects come from a second manifest, and a run that applied the first and
+# died before the second leaves a lane whose fake nodes are created and then
+# never go Ready. Checking only the Deployment would skip the install that
+# would have fixed it.
+kwok_complete() {
+    k --namespace kube-system get deployment kwok-controller -o name > /dev/null 2>&1 &&
+        k get stage node-initialize -o name > /dev/null 2>&1
+}
+
 mokka::phase "ensure KWOK ${KWOK_VERSION} is installed in lane ${LANE}"
-if k --namespace kube-system get deployment kwok-controller -o name > /dev/null 2>&1; then
-    printf '[mokka] kwok-controller is already there; leaving it alone\n'
+if kwok_complete; then
+    printf '[mokka] kwok-controller and its Stages are already there; leaving them alone\n'
 else
     install_kwok
+fi
+
+# ---------------------------------------------------------------------------
+# Refuse a lane that already holds more nodes than were asked for
+# ---------------------------------------------------------------------------
+#
+# The readiness wait below counts up to COUNT and stops, so a lane left over
+# from an earlier, larger run looks exactly like a healthy one. The suite then
+# measures a lane of a size nobody chose. Fewer is fine: this run is about to
+# create the rest.
+
+existing="$(k get nodes --selector "${KWOK_OWNER_LABEL}=true" -o name 2> /dev/null | grep -c . | tr -d ' ' || true)"
+[ -n "${existing}" ] || existing=0
+if [ "${existing}" -gt "${COUNT}" ]; then
+    mokka::die 2 "kwok-nodes.sh: lane ${LANE} already holds ${existing} fake node(s) and ${COUNT} were asked for; run 'hack/mokka/kwok-nodes.sh --delete ${LANE}' first"
 fi
 
 # ---------------------------------------------------------------------------
@@ -407,6 +479,36 @@ while :; do
     fi
     sleep "${MOKKA_POLL_INTERVAL}"
 done
+
+# ---------------------------------------------------------------------------
+# Every node has to have been given a pod CIDR
+# ---------------------------------------------------------------------------
+#
+# The node IPAM controller carves a /24 out of the cluster pod subnet for every
+# node, a KWOK node that will never run a real pod included. kind's default
+# subnet is 10.244.0.0/16, which is 256 of those, so a lane stops being able to
+# allocate somewhere past the 253rd node; the nodes after that are created,
+# adopted by KWOK and marked Ready with no spec.podCIDR at all.
+#
+# Nothing above notices, because being Ready and advertising GPUs is all the
+# wait asks for. So it is asked here, and it fails rather than warns: a lane
+# that is quietly missing the pod CIDRs of three quarters of its nodes is not
+# the lane the numbers would be attributed to. hack/mokka/kind-scale.yaml is
+# the answer, through MOKKA_KIND_CONFIG.
+
+mokka::phase "check every fake node was given a pod CIDR"
+cidrs="$(k get nodes --selector "${KWOK_OWNER_LABEL}=true" \
+    -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.podCIDR}{"\n"}{end}' \
+    2> /dev/null || true)"
+# A line with a name and no second field is a node the allocator had no room
+# left for.
+without="$(printf '%s\n' "${cidrs}" | awk 'NF > 0 && $2 == "" { print $1 }')"
+if [ -n "${without}" ]; then
+    without_count="$(printf '%s\n' "${without}" | grep -c . | tr -d ' ')"
+    printf '%s\n' "kwok-nodes.sh: ${without_count} of ${COUNT} fake nodes have no spec.podCIDR:" >&2
+    printf '%s\n' "${without}" | head -5 >&2
+    mokka::die 5 "kwok-nodes.sh: the lane's podSubnet has no room for ${COUNT} nodes; bring the lane up with MOKKA_KIND_CONFIG=kind-scale.yaml, which widens it to 10.240.0.0/12"
+fi
 
 mokka::phase
 
