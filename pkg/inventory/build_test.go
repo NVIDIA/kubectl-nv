@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -45,15 +46,29 @@ type countingSource struct {
 	podsErr     error
 	sliceErr    error
 
+	// mu guards calls. Subtests share a source and run in parallel, so the
+	// counter is the one piece of shared mutable state here.
+	mu    sync.Mutex
 	calls map[string]int
 }
 
 func (s *countingSource) count(name string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.calls == nil {
 		s.calls = map[string]int{}
 	}
 
 	s.calls[name]++
+}
+
+// callCount reports how often a method was asked for.
+func (s *countingSource) callCount(name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.calls[name]
 }
 
 func (s *countingSource) Nodes(context.Context) ([]corev1.Node, error) {
@@ -157,22 +172,22 @@ func TestBuildReadsTheClusterOnce(t *testing.T) {
 
 	want := map[string]int{"ClassifyNodes": 1, "Pods": 1, "ResourceSlices": 1}
 	for name, n := range want {
-		if src.calls[name] != n {
-			t.Errorf("%s called %d times, want %d", name, src.calls[name], n)
+		if src.callCount(name) != n {
+			t.Errorf("%s called %d times, want %d", name, src.callCount(name), n)
 		}
 	}
 
 	// Nodes and HintedNodes are the halves of ClassifyNodes: calling them as
 	// well is a second pass over the cluster describing a second moment.
 	for _, name := range []string{"Nodes", "HintedNodes", "ClusterPolicies"} {
-		if src.calls[name] != 0 {
-			t.Errorf("%s called %d times, want none", name, src.calls[name])
+		if src.callCount(name) != 0 {
+			t.Errorf("%s called %d times, want none", name, src.callCount(name))
 		}
 	}
 
 	// The one pod list covers every namespace and filters nothing server side,
 	// because the operands and the requested GPUs come out of the same read.
-	if src.calls["Pods(,)"] != 1 {
+	if src.callCount("Pods(,)") != 1 {
 		t.Errorf("the pod list was not the unfiltered all-namespace one: %#v", src.calls)
 	}
 }
@@ -312,8 +327,8 @@ func TestBuildNoPods(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	if src.calls["Pods"] != 0 {
-		t.Errorf("Pods called %d times under --no-pods, want none", src.calls["Pods"])
+	if src.callCount("Pods") != 0 {
+		t.Errorf("Pods called %d times under --no-pods, want none", src.callCount("Pods"))
 	}
 
 	if itemNamed(t, list, "n1").RequestedKnown {
