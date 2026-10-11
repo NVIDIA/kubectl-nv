@@ -24,6 +24,22 @@ gpu:
   # Two boards and not the profile's eight: fourteen partitions per worker is
   # already enough to show the shape change, and each extra board is more
   # staging work on a node that is simulating all of it.
+  #
+  # What this count does and does not change, measured on a lane run of
+  # 2026-10-11, because the two views disagree and the difference is confusing
+  # the first time it is met:
+  #
+  #   - It caps what the node agent STAGES. On a worker,
+  #     /var/lib/nvml-mock/driver/proc/driver/nvidia-caps/mig-minors named gpu0
+  #     and gpu1 only, 14 GPU-instance and 14 compute-instance access lines,
+  #     and /var/lib/nvml-mock/driver/dev held nvidia0 and nvidia1. That staged
+  #     surface is what the device plugin reads, so the node advertised 14.
+  #   - It does NOT change what NVML reports inside the nvml-mock pod.
+  #     `nvidia-smi -L` in the node-agent container listed the profile's full
+  #     eight boards, 56 slices.
+  #
+  # The number that decides allocatable is the staged one. A reader checking
+  # this lane with nvidia-smi and finding eight boards has not found a bug.
   count: 2
   mig:
     enabled: true

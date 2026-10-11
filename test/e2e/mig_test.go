@@ -303,6 +303,14 @@ func TestMIGLane(t *testing.T) {
 	t.Run("gpu health finds nothing at warning or above", func(t *testing.T) {
 		res := run(t, migCommandGroup, "health", "--fail-on", "warning", "-o", "json")
 
+		// Checked before the report is walked: a command that printed no
+		// report at all has an exit code and a stderr that say why, and
+		// "unexpected end of JSON input" does not.
+		if !json.Valid([]byte(res.stdout)) {
+			t.Fatalf("%s health --fail-on warning exited %d and did not print a JSON report\nstdout:\n%s\nstderr:\n%s",
+				migCommandGroup, res.code, res.stdout, res.stderr)
+		}
+
 		raised := findingsAtOrAbove(t, res.stdout, "warning")
 		if len(raised) != 0 {
 			t.Errorf("%s health raised %d finding(s) at warning or above on a healthy partitioned lane:\n  %s",

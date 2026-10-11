@@ -41,16 +41,22 @@ mig::build_image() {
         return 0
     fi
 
-    mokka::phase "stage ${MIG_UPSTREAM_REPO} at ${MIG_UPSTREAM_SHA}"
-    local staging="${MIG_STAGING_DIR:-}"
-    if [ -z "${staging}" ]; then
-        staging="$(mktemp -d "${TMPDIR:-/tmp}/kubectl-nv-mig-upstream.XXXXXX")"
-        # Only a temporary directory this function created is this function's
-        # to delete. A caller-supplied MIG_STAGING_DIR is left alone.
-        # shellcheck disable=SC2064
-        trap "rm -rf '${staging}'" RETURN
+    # A caller that has already resolved the tree (up.sh stages it for the
+    # chart whether or not the image needs building) hands it over rather than
+    # having it extracted a second time.
+    if [ -z "${MIG_UPSTREAM_TREE}" ]; then
+        mokka::phase "stage ${MIG_UPSTREAM_REPO} at ${MIG_UPSTREAM_SHA}"
+        local staging="${MIG_STAGING_DIR:-}"
+        if [ -z "${staging}" ]; then
+            staging="$(mktemp -d "${TMPDIR:-/tmp}/kubectl-nv-mig-upstream.XXXXXX")"
+            # Only a temporary directory this function created is this
+            # function's to delete. A caller-supplied MIG_STAGING_DIR is left
+            # alone, and so is a tree the caller already staged.
+            # shellcheck disable=SC2064
+            trap "rm -rf '${staging}'" RETURN
+        fi
+        mig::stage_upstream "${staging}"
     fi
-    mig::stage_upstream "${staging}"
 
     mokka::phase "build $(mig::image_ref)"
     docker build \
