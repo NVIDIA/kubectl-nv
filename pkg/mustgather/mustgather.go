@@ -316,17 +316,10 @@ func (g *Gatherer) gatherOpenShiftVersion() error {
 	if !isOpenShift {
 		return skip("not an OpenShift cluster")
 	}
-	{
-		// Construct the file path for the OpenShift version file.
-		versionFilePath := filepath.Join(g.opts.ArtifactDir, "openshift_version.yaml")
-		// Create the file.
-		_ = versionFilePath
-		return g.writeArtifactFile("openshift_version.yaml", func(w io.Writer) error {
-			_, werr := io.WriteString(w, oversion)
-			return werr
-		})
-	}
-	return nil
+	return g.writeArtifactFile("openshift_version.yaml", func(w io.Writer) error {
+		_, werr := io.WriteString(w, oversion)
+		return werr
+	})
 }
 
 // gatherNodeInfo collects node information.
@@ -754,8 +747,10 @@ func (g *Gatherer) collect() error {
 	// Being told no is not the same as asking for no. A bundle missing the
 	// driver evidence because RBAC refused the exec is incomplete, and a script
 	// that files it as complete files an unanswerable support ticket.
+	// A denied exec is reported on its own, because its cause is one thing the
+	// user can act on rather than a list of collectors that each failed for
+	// their own reason.
 	if len(s.execDenied) > 0 {
-		failed = append(failed, s.execDenied...)
 		return fmt.Errorf("not allowed to exec into the driver pods; these collectors were skipped: %s",
 			strings.Join(s.execDenied, ", "))
 	}
@@ -933,16 +928,6 @@ func (g *Gatherer) indexArtifact(path string) {
 	if g.opts.Debug {
 		g.step("Wrote %s", name)
 	}
-}
-
-// writeArtifact writes a whole artifact in one go, for the marker files that
-// record what the cluster does not have.
-func (g *Gatherer) writeArtifact(path string, data []byte) error {
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
-	}
-	g.recordArtifact(path)
-	return nil
 }
 
 // writeMarker writes a file recording what the cluster does not have.

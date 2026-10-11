@@ -115,9 +115,3 @@ func (e *timeoutError) Error() string {
 // Timeout reports the deadline that was exceeded, so a caller can tell this
 // apart from any other failure without matching on the message.
 func (e *timeoutError) Timeout() time.Duration { return e.timeout }
-
-// timedOut reports whether err is one of ours for a deadline that ran out.
-func timedOut(err error) bool {
-	var t *timeoutError
-	return errors.As(err, &t)
-}
