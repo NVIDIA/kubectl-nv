@@ -43,12 +43,26 @@ kubectl nv info <node>
 
 ## Reproduction
 
-The state to produce is a node whose device plugin advertises a capacity
-the kubelet does not fully offer: mark one simulated device unhealthy on
-a Mokka worker and let the device plugin re-advertise. Reserving a GPU
-through the kubelet's `--system-reserved` produces the same split on a
-real node.
+On a Mokka lane, fail one simulated device on a worker and let the
+device plugin re-advertise what is left.
 
-Both paths need the lane's device simulation driven directly rather than
-a label edit, which is why this reproduction is a description of the
-state and not a command line. E2 automates it.
+```shell
+POD=$(kubectl -n mokka get pod -l app.kubernetes.io/name=nvml-mock \
+  --field-selector spec.nodeName=<node> \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n mokka exec "$POD" -- nvml-mock-ctl fail --gpu 0 \
+  --mode ecc_uncorrectable --xid 79
+```
+
+Recover with `--mode healthy` on the same GPU. The flags are the ones
+`docs/nvml-mock-ctl.md` documents in k8s-test-infra v0.4.0, the chart
+version this lane pins.
+
+What the node's allocatable count does in response has not been observed
+here, and this entry does not claim it: the device plugin may drop the
+device, mark it unhealthy, or leave the count alone. E3 runs the
+injection against a live lane and records the answer, in
+`hack/mokka/faults/nv-node-003.sh inject|recover <node>`.
+
+Reserving a GPU through the kubelet's `--system-reserved` produces the
+same split on real hardware.

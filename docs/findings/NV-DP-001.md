@@ -58,14 +58,25 @@ kubectl nv info <node>
 
 ## Reproduction
 
-The state to produce is a GPU node whose device plugin pod is gone while
-the node still has GPU capacity. Deleting the pod is not enough: the
-DaemonSet puts it straight back, and the node keeps its capacity in the
-meantime.
+On a Mokka lane, point the device plugin at an image tag that does not
+exist. The pods roll to an image that will never pull, so they stay
+unready while the deploy label and the ClusterPolicy both still say the
+operand belongs there.
 
-Switching the operand off with the deploy label removes the pod but also
-suppresses this rule on purpose, so that path reproduces NV-NODE-002 and
-NV-OP-002 instead. A reproduction that leaves the capacity in place
-needs the plugin container held unready rather than the pod removed,
-which is why this one is a description of the state and not a command
-line. E2 automates it.
+```shell
+kubectl patch clusterpolicy cluster-policy --type=merge \
+  -p '{"spec":{"devicePlugin":{"version":"v0.0.0-absent"}}}'
+kubectl nv health
+```
+
+ClusterPolicy is cluster scoped, so the command carries no `-n`. Save
+`spec.devicePlugin.version` before the patch and write the saved value
+back to recover.
+
+The same patch reproduces NV-OP-001, because the policy leaves `ready`
+while an operand it enables is not. Switching the operand off with the
+deploy label instead would suppress this rule on purpose, and reproduce
+NV-NODE-002 and NV-OP-002 rather than this one.
+
+E3 scripts both halves as
+`hack/mokka/faults/nv-dp-001.sh inject|recover <node>`.

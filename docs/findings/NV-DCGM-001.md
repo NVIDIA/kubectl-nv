@@ -70,7 +70,10 @@ kubectl nv health --fail-on warning
 
 That is a write to the lane, so it belongs in a lane fixture and never
 in anything `kubectl nv` itself runs: the plugin is read-only toward a
-cluster. E2 automates it.
+cluster. Recover by removing the node selector again.
+
+E3 scripts both halves as
+`hack/mokka/faults/nv-dcgm-001.sh inject|recover <node>`.
 
 ## Next command
 
