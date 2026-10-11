@@ -170,6 +170,25 @@ func operatorPod(image string) *corev1.Pod {
 	}
 }
 
+// hintedNode is a node that claims GPUs through its labels and advertises
+// none: the single most common thing this command is run to find, and the one
+// kind of node the inventory leaves out unless it is asked for.
+func hintedNode(name string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+			Labels: map[string]string{
+				"nvidia.com/gpu.present":                      "true",
+				"feature.node.kubernetes.io/pci-10de.present": "true",
+				"nvidia.com/gpu.deploy.device-plugin":         "true",
+			},
+		},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+}
+
 // clusterPolicy is a ClusterPolicy in the state given.
 func clusterPolicy(name, state string) *unstructured.Unstructured {
 	obj := map[string]any{
@@ -217,6 +236,133 @@ func TestHealthOnAHealthyClusterExitsZero(t *testing.T) {
 
 	if !strings.Contains(s.out.String(), "0 errors, 0 warnings, 0 infos") {
 		t.Errorf("the summary does not count the findings:\n%s", s.out)
+	}
+}
+
+// A node that claims GPUs and advertises none has to reach the rules at all.
+//
+// The inventory leaves such nodes out unless it is asked for them, and they
+// arrive marked Hinted rather than in a set of their own, so two separate
+// things have to be right for NV-NODE-002 to fire: the builder has to be asked
+// to include them, and the command has to sort them into Input.Hinted. Neither
+// shows up in a fixture made only of GPU nodes.
+func TestHealthReportsOnHintedNodes(t *testing.T) {
+	t.Parallel()
+
+	c := healthyCluster()
+	c.objects = append(c.objects, hintedNode("worker-hinted"))
+
+	s, err := run(t, c)
+	if err == nil {
+		t.Fatalf("health found nothing on a node that claims GPUs and has none:\n%s", s.out)
+	}
+
+	for _, want := range []string{"worker-hinted", "NV-NODE-002"} {
+		if !strings.Contains(s.out.String(), want) {
+			t.Errorf("the table does not contain %q:\n%s", want, s.out)
+		}
+	}
+
+	// Two nodes checked: the GPU node and the hinted one. A run that left the
+	// hinted node out of the inventory would report one.
+	if !strings.Contains(s.out.String(), "2 nodes checked") {
+		t.Errorf("the summary does not count the hinted node:\n%s", s.out)
+	}
+
+	// Which set it lands in decides which rules see it, and that does not show
+	// in the row count: NV-NODE-002 walks both sets, so a hinted node filed
+	// under Nodes still produces this finding. What changes is everything that
+	// walks the GPU nodes alone. NV-DP-001 would then report a missing device
+	// plugin on a node that advertises no GPUs for it to have advertised, and
+	// NV-NODE-002's own evidence would call the node not hinted.
+	s, err = run(t, c, "-o", "json")
+	if err == nil {
+		t.Fatal("health found nothing on the hinted node")
+	}
+
+	var report struct {
+		Findings []struct {
+			Code     string            `json:"code"`
+			Node     string            `json:"node"`
+			Evidence map[string]string `json:"evidence"`
+		} `json:"findings"`
+	}
+	if jsonErr := json.Unmarshal(s.out.Bytes(), &report); jsonErr != nil {
+		t.Fatalf("parsing the report: %v\n%s", jsonErr, s.out)
+	}
+
+	var sawNodeFinding bool
+
+	for _, f := range report.Findings {
+		if f.Node != "worker-hinted" {
+			continue
+		}
+
+		if f.Code == "NV-DP-001" {
+			t.Errorf("a hinted node was checked for a device plugin: %+v", f)
+		}
+
+		if f.Code == "NV-NODE-002" {
+			sawNodeFinding = true
+
+			if f.Evidence["hinted"] != "true" {
+				t.Errorf("evidence[hinted] is %q, want true: the node was filed as a GPU node",
+					f.Evidence["hinted"])
+			}
+		}
+	}
+
+	if !sawNodeFinding {
+		t.Errorf("no NV-NODE-002 for the hinted node: %+v", report.Findings)
+	}
+}
+
+// A cluster the operator was never installed on is an answer, not a failure.
+// The API server serves no clusterpolicies collection at all there, and
+// reading that as a denied read would exit 3 over a cluster that is complete.
+func TestHealthOnAClusterWithNoOperator(t *testing.T) {
+	t.Parallel()
+
+	s := &streams{out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	io := genericiooptions.IOStreams{In: strings.NewReader(""), Out: s.out, ErrOut: s.err}
+
+	dyn := newDynamic()
+	dyn.(*dynamicfake.FakeDynamicClient).PrependReactor("list", "clusterpolicies",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, apierrors.NewNotFound(
+				schema.GroupResource{Group: "nvidia.com", Resource: "clusterpolicies"}, "")
+		})
+
+	o := &cmd.Options{
+		Streams: io,
+		Factory: &fakeFactory{
+			clientset: fake.NewSimpleClientset(gpuNode("worker-1", 4, 4)),
+			dynamic:   dyn,
+		},
+		Logger: output.NewLogger(io, output.LoggerOptions{NoColor: true}),
+	}
+
+	command := health.NewCommand(o)
+	command.SetOut(s.out)
+	command.SetErr(s.err)
+	command.SetArgs([]string{"-o", "json"})
+	command.SilenceUsage = true
+	command.SilenceErrors = true
+
+	err := command.Execute()
+	if got := output.ExitCodeFor(err); got != output.ExitOK {
+		t.Errorf("exit code is %d, want %d: %v\n%s", got, output.ExitOK, err, s.out)
+	}
+
+	var report struct {
+		Partial bool `json:"partial"`
+	}
+	if err := json.Unmarshal(s.out.Bytes(), &report); err != nil {
+		t.Fatalf("parsing the report: %v\n%s", err, s.out)
+	}
+
+	if report.Partial {
+		t.Errorf("a cluster with no GPU Operator was reported as a partial read:\n%s", s.out)
 	}
 }
 
@@ -573,6 +719,10 @@ func TestOperatorVersionFromImage(t *testing.T) {
 		// rule on it would skip checks on every cluster deployed by digest.
 		{"nvcr.io/nvidia/gpu-operator@sha256:" + strings.Repeat("a", 64), ""},
 		{"registry.example.com:5000/nvidia/gpu-operator", ""},
+		// Two colons in the name is not a reference this code can read, and
+		// neither half of it is a version. Picking one would gate every rule
+		// in the catalog on a string that is not one.
+		{"gpu-operator:v1:2", ""},
 		{"", ""},
 	} {
 		t.Run(tc.image, func(t *testing.T) {

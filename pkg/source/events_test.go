@@ -181,8 +181,36 @@ func TestBundleNodeEventsIsPartial(t *testing.T) {
 		t.Fatalf("NodeEvents returned %T (%v), want a *PartialError", err, err)
 	}
 
-	if partial.Resource != fileNodeEvents {
-		t.Errorf("the partial error names %q, want %q", partial.Resource, fileNodeEvents)
+	if partial.Resource != "node_events.yaml" {
+		t.Errorf("the partial error names %q, want node_events.yaml", partial.Resource)
+	}
+}
+
+// A bundle that holds every other artifact and no events file is still
+// partial on events alone. The empty-directory case above would pass against
+// a reader pointed at any absent file; this one fails unless it is pointed at
+// the events file in particular.
+func TestBundleNodeEventsIsPartialBesideTheOtherArtifacts(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	writeBundleFile(t, dir, "nodes.yaml", "apiVersion: v1\nkind: NodeList\nitems: []\n")
+	writeBundleFile(t, dir, "resourceslices.yaml", "apiVersion: v1\nkind: List\nitems: []\n")
+
+	bundle, err := NewBundle(dir)
+	if err != nil {
+		t.Fatalf("NewBundle: %v", err)
+	}
+
+	_, err = bundle.NodeEvents(context.Background())
+
+	var partial *PartialError
+	if !errors.As(err, &partial) {
+		t.Fatalf("NodeEvents returned %T (%v), want a *PartialError", err, err)
+	}
+
+	if partial.Resource != "node_events.yaml" {
+		t.Errorf("the partial error names %q, want node_events.yaml", partial.Resource)
 	}
 }
 
@@ -192,7 +220,12 @@ func TestBundleNodeEventsReadsTheFileWhenItIsThere(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	writeBundleFile(t, dir, fileNodeEvents, `apiVersion: v1
+
+	// Written by its literal name, not through the constant. A test that
+	// wrote through fileNodeEvents would write and read the same wrong file,
+	// and a constant pointed at nodes.yaml would pass it while the reader
+	// parsed a node list as events.
+	writeBundleFile(t, dir, "node_events.yaml", `apiVersion: v1
 kind: EventList
 items:
 - apiVersion: v1

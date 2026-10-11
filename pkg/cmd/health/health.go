@@ -328,12 +328,18 @@ func OperatorVersionFromImage(image string) string {
 		name = name[:i]
 	}
 
-	i := strings.LastIndex(name, ":")
-	if i < 0 {
+	// Exactly one colon, or none. A repository name cannot contain one, so
+	// anything with two is a reference this code cannot read, and an
+	// unreadable reference means an unknown version rather than a guess at
+	// which colon was the right one: health.VersionInRange treats unknown as
+	// no constraint, so every rule runs, where a wrong guess would gate the
+	// catalog on a string that is not a version.
+	_, tag, found := strings.Cut(name, ":")
+	if !found || strings.Contains(tag, ":") {
 		return ""
 	}
 
-	return name[i+1:]
+	return tag
 }
 
 // newSource returns the read path: a must-gather directory when one was named,
