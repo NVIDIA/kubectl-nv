@@ -30,6 +30,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
@@ -83,6 +84,13 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 
 	c.Flags().StringVar(&writeDir, "write-dir", "",
 		"Write one <kind>.json per registered kind into this directory instead of printing one")
+	// The flag writes files, which is the generator behind "make schema" and
+	// not something to hand a model: the MCP server leaves it out of the tool.
+	if err := c.Flags().SetAnnotation("write-dir", mcp.SuppressAnnotation, []string{"true"}); err != nil {
+		// SetAnnotation only fails on a flag that is not registered, and the
+		// line above registered it.
+		panic(fmt.Sprintf("marking --write-dir for the MCP server: %v", err))
+	}
 
 	return c
 }

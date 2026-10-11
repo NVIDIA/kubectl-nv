@@ -70,6 +70,16 @@ var suppressedFlags = map[string]bool{
 // outputFlag is the flag the server sets to json on a command that has one.
 const outputFlag = "output"
 
+// SuppressAnnotation marks a flag that no tool offers. A command sets it on a
+// flag of its own with pflag's SetAnnotation.
+//
+// It exists for the flags the read-only guard says nothing about because they
+// touch no cluster: --write-dir writes files on the machine kubectl-nv runs
+// on, which is not something to hand a model even though no Kubernetes object
+// changes. The command that owns such a flag is the only place that knows it
+// is one.
+const SuppressAnnotation = "kubectl-nv.nvidia.com/mcp-suppress"
+
 // Tool is one read-only leaf command as it is offered over MCP.
 type Tool struct {
 	// Name is the command path joined with underscores, for instance
@@ -168,6 +178,9 @@ func inputSchema(c *cobra.Command, forceNoExec, takesArgs bool) map[string]any {
 
 	add := func(f *pflag.Flag) {
 		if f.Hidden || suppressedFlags[f.Name] {
+			return
+		}
+		if len(f.Annotations[SuppressAnnotation]) > 0 {
 			return
 		}
 		if forceNoExec && execFlags[f.Name] {
