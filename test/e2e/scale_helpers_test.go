@@ -57,15 +57,15 @@ func TestMedianDuration(t *testing.T) {
 			t.Parallel()
 
 			in := append([]time.Duration(nil), tc.in...)
-			got := medianDuration(in)
+			got := scaleMedianDuration(in)
 			if got != tc.want {
-				t.Errorf("medianDuration(%v) = %v, want %v", tc.in, got, tc.want)
+				t.Errorf("scaleMedianDuration(%v) = %v, want %v", tc.in, got, tc.want)
 			}
 			// Reporting must not reorder the caller's samples: the report
 			// prints the runs in the order they were measured.
 			for i := range in {
 				if in[i] != tc.in[i] {
-					t.Fatalf("medianDuration sorted its argument in place: %v, was %v", in, tc.in)
+					t.Fatalf("scaleMedianDuration sorted its argument in place: %v, was %v", in, tc.in)
 				}
 			}
 		})
@@ -87,8 +87,8 @@ func TestMaxDuration(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := maxDuration(tc.in); got != tc.want {
-				t.Errorf("maxDuration(%v) = %v, want %v", tc.in, got, tc.want)
+			if got := scaleMaxDuration(tc.in); got != tc.want {
+				t.Errorf("scaleMaxDuration(%v) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -119,8 +119,60 @@ func TestScaleConfigDefaults(t *testing.T) {
 	if cfg.Runs != 3 {
 		t.Errorf("Runs = %d, want 3", cfg.Runs)
 	}
-	if cfg.HealthCountPath != "summary.nodesChecked" {
-		t.Errorf("HealthCountPath = %q, want %q", cfg.HealthCountPath, "summary.nodesChecked")
+	if cfg.HintedNodes != 1 {
+		t.Errorf("HintedNodes = %d, want 1", cfg.HintedNodes)
+	}
+	if cfg.RealNodes != 2 {
+		t.Errorf("RealNodes = %d, want 2", cfg.RealNodes)
+	}
+	if cfg.SettleTimeout != 10*time.Minute {
+		t.Errorf("SettleTimeout = %v, want 10m", cfg.SettleTimeout)
+	}
+}
+
+// TestHealthPathsMatchTheMergedReport pins the two paths this suite reads out
+// of "health --summary -o json" to where the merged types put them. They are
+// constants now rather than environment variables: the fields exist, and a
+// knob for "where did the field go" is a knob for not noticing it moved.
+//
+// pkg/health.Summary tags NodesChecked as "nodesChecked" under the inline
+// "summary", and output.ReportStatus is inline in HealthReport, so the
+// findings sit at the top level rather than under the summary.
+func TestHealthPathsMatchTheMergedReport(t *testing.T) {
+	t.Parallel()
+
+	if healthNodesPath != "summary.nodesChecked" {
+		t.Errorf("healthNodesPath = %q, want %q", healthNodesPath, "summary.nodesChecked")
+	}
+	if healthFindingsPath != "findings" {
+		t.Errorf("healthFindingsPath = %q, want %q", healthFindingsPath, "findings")
+	}
+
+	// A report shaped like the merged one, read through the paths the suite
+	// uses. If HealthReport stopped inlining ReportStatus the findings would
+	// move under a "status" key and this would say so.
+	report := []byte(`{
+	  "apiVersion": "nv.nvidia.com/v1alpha1",
+	  "kind": "HealthReport",
+	  "findings": [{"code": "NV-DP-001"}, {"code": "NV-DCGM-001"}],
+	  "summary": {"errors": 1, "warnings": 1, "infos": 0, "nodesChecked": 2003,
+	              "gpuCapacity": 16008, "gpuAllocatable": 16008}
+	}`)
+
+	nodes, err := scaleCountAtPath(report, healthNodesPath)
+	if err != nil {
+		t.Fatalf("reading %q: %v", healthNodesPath, err)
+	}
+	if nodes != 2003 {
+		t.Errorf("nodes = %d, want 2003", nodes)
+	}
+
+	findings, err := scaleCountAtPath(report, healthFindingsPath)
+	if err != nil {
+		t.Fatalf("reading %q: %v", healthFindingsPath, err)
+	}
+	if findings != 2 {
+		t.Errorf("findings = %d, want 2", findings)
 	}
 }
 
@@ -128,12 +180,14 @@ func TestScaleConfigOverrides(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := scaleConfigFrom(env(map[string]string{
-		"KUBECTL_NV_SCALE_NODES":             "20",
-		"KUBECTL_NV_SCALE_LIST_THRESHOLD":    "90s",
-		"KUBECTL_NV_SCALE_HEALTH_THRESHOLD":  "2m",
-		"KUBECTL_NV_SCALE_RUNS":              "1",
-		"KUBECTL_NV_SCALE_HEALTH_COUNT_PATH": "summary.nodes",
-		"KUBECTL_NV_SCALE_REPORT_DIR":        "/tmp/somewhere",
+		"KUBECTL_NV_SCALE_NODES":            "20",
+		"KUBECTL_NV_SCALE_LIST_THRESHOLD":   "90s",
+		"KUBECTL_NV_SCALE_HEALTH_THRESHOLD": "2m",
+		"KUBECTL_NV_SCALE_RUNS":             "1",
+		"KUBECTL_NV_SCALE_REAL_NODES":       "2",
+		"KUBECTL_NV_SCALE_HINTED_NODES":     "0",
+		"KUBECTL_NV_SCALE_SETTLE_TIMEOUT":   "90s",
+		"KUBECTL_NV_SCALE_REPORT_DIR":       "/tmp/somewhere",
 	}))
 	if err != nil {
 		t.Fatalf("scaleConfigFrom with overrides: %v", err)
@@ -150,8 +204,13 @@ func TestScaleConfigOverrides(t *testing.T) {
 	if cfg.Runs != 1 {
 		t.Errorf("Runs = %d, want 1", cfg.Runs)
 	}
-	if cfg.HealthCountPath != "summary.nodes" {
-		t.Errorf("HealthCountPath = %q, want %q", cfg.HealthCountPath, "summary.nodes")
+	// Zero hinted nodes is a legitimate override: a lane whose control plane
+	// carries no GPU labels has none for health to count.
+	if cfg.HintedNodes != 0 {
+		t.Errorf("HintedNodes = %d, want 0", cfg.HintedNodes)
+	}
+	if cfg.SettleTimeout != 90*time.Second {
+		t.Errorf("SettleTimeout = %v, want 90s", cfg.SettleTimeout)
 	}
 	if cfg.ReportDir != "/tmp/somewhere" {
 		t.Errorf("ReportDir = %q, want %q", cfg.ReportDir, "/tmp/somewhere")
@@ -203,9 +262,14 @@ func TestScaleConfigRejectsBadValues(t *testing.T) {
 			`KUBECTL_NV_SCALE_RUNS="0": want a positive whole number`,
 		},
 		{
-			"count path is empty",
-			map[string]string{"KUBECTL_NV_SCALE_HEALTH_COUNT_PATH": "   "},
-			`KUBECTL_NV_SCALE_HEALTH_COUNT_PATH="   ": want a dotted JSON path`,
+			"hinted nodes is negative",
+			map[string]string{"KUBECTL_NV_SCALE_HINTED_NODES": "-1"},
+			`KUBECTL_NV_SCALE_HINTED_NODES="-1": want a whole number, zero or above`,
+		},
+		{
+			"real nodes is zero",
+			map[string]string{"KUBECTL_NV_SCALE_REAL_NODES": "0"},
+			`KUBECTL_NV_SCALE_REAL_NODES="0": want a positive whole number`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,9 +286,9 @@ func TestScaleConfigRejectsBadValues(t *testing.T) {
 	}
 }
 
-// listJSON is the shape "kubectl nv list -o json" prints: a GPUNodeList whose
+// scaleListJSON is the shape "kubectl nv list -o json" prints: a GPUNodeList whose
 // items each carry metadata.name.
-const listJSON = `{
+const scaleListJSON = `{
   "apiVersion": "nv.nvidia.com/v1alpha1",
   "kind": "GPUNodeList",
   "items": [
@@ -237,17 +301,17 @@ const listJSON = `{
 func TestNodeNames(t *testing.T) {
 	t.Parallel()
 
-	got, err := nodeNames([]byte(listJSON))
+	got, err := scaleNodeNames([]byte(scaleListJSON))
 	if err != nil {
-		t.Fatalf("nodeNames: %v", err)
+		t.Fatalf("scaleNodeNames: %v", err)
 	}
 	want := []string{"kubectl-nv-scale-worker", "kwok-gpu-1", "kwok-gpu-2"}
 	if len(got) != len(want) {
-		t.Fatalf("nodeNames = %v, want %v", got, want)
+		t.Fatalf("scaleNodeNames = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Errorf("nodeNames[%d] = %q, want %q", i, got[i], want[i])
+			t.Errorf("scaleNodeNames[%d] = %q, want %q", i, got[i], want[i])
 		}
 	}
 }
@@ -257,9 +321,9 @@ func TestNodeNamesRejectsAnUnnamedItem(t *testing.T) {
 
 	// An item with no metadata.name would otherwise be counted as a node with
 	// the empty name, and a list of 2,000 empty names still has length 2,000.
-	_, err := nodeNames([]byte(`{"items":[{"metadata":{"name":"a"}},{"metadata":{}}]}`))
+	_, err := scaleNodeNames([]byte(`{"items":[{"metadata":{"name":"a"}},{"metadata":{}}]}`))
 	if err == nil {
-		t.Fatal("nodeNames accepted an item with no metadata.name")
+		t.Fatal("scaleNodeNames accepted an item with no metadata.name")
 	}
 	const want = `item 1 of the list has no metadata.name`
 	if err.Error() != want {
@@ -270,8 +334,8 @@ func TestNodeNamesRejectsAnUnnamedItem(t *testing.T) {
 func TestNodeNamesRejectsNonJSON(t *testing.T) {
 	t.Parallel()
 
-	if _, err := nodeNames([]byte("NAME  PRODUCT\nworker  T4\n")); err == nil {
-		t.Fatal("nodeNames accepted table output as JSON")
+	if _, err := scaleNodeNames([]byte("NAME  PRODUCT\nworker  T4\n")); err == nil {
+		t.Fatal("scaleNodeNames accepted table output as JSON")
 	}
 }
 
@@ -279,11 +343,11 @@ func TestCountWithPrefix(t *testing.T) {
 	t.Parallel()
 
 	names := []string{"kwok-gpu-1", "kwok-gpu-20", "worker", "kwok-gpuish"}
-	if got := countWithPrefix(names, "kwok-gpu-"); got != 2 {
-		t.Errorf("countWithPrefix = %d, want 2", got)
+	if got := scaleCountWithPrefix(names, "kwok-gpu-"); got != 2 {
+		t.Errorf("scaleCountWithPrefix = %d, want 2", got)
 	}
-	if got := countWithPrefix(names, "worker"); got != 1 {
-		t.Errorf("countWithPrefix = %d, want 1", got)
+	if got := scaleCountWithPrefix(names, "worker"); got != 1 {
+		t.Errorf("scaleCountWithPrefix = %d, want 1", got)
 	}
 }
 
@@ -304,12 +368,12 @@ func TestCountAtPath(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := countAtPath([]byte(tc.raw), tc.path)
+			got, err := scaleCountAtPath([]byte(tc.raw), tc.path)
 			if err != nil {
-				t.Fatalf("countAtPath(%s): %v", tc.path, err)
+				t.Fatalf("scaleCountAtPath(%s): %v", tc.path, err)
 			}
 			if got != tc.want {
-				t.Errorf("countAtPath(%s) = %d, want %d", tc.path, got, tc.want)
+				t.Errorf("scaleCountAtPath(%s) = %d, want %d", tc.path, got, tc.want)
 			}
 		})
 	}
@@ -361,9 +425,9 @@ func TestCountAtPathReportsWhatItFoundInstead(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := countAtPath([]byte(tc.raw), tc.path)
+			_, err := scaleCountAtPath([]byte(tc.raw), tc.path)
 			if err == nil {
-				t.Fatalf("countAtPath(%s) returned no error, want %q", tc.path, tc.want)
+				t.Fatalf("scaleCountAtPath(%s) returned no error, want %q", tc.path, tc.want)
 			}
 			if err.Error() != tc.want {
 				t.Errorf("error = %q, want %q", err.Error(), tc.want)
@@ -377,9 +441,9 @@ func TestCountAtPathRejectsNonJSON(t *testing.T) {
 
 	// The binary prints a table when -o json is dropped by mistake. That has
 	// to be an error naming the decode, not a count of zero.
-	_, err := countAtPath([]byte("NAME  GPUS\nworker  4\n"), "summary.nodesChecked")
+	_, err := scaleCountAtPath([]byte("NAME  GPUS\nworker  4\n"), "summary.nodesChecked")
 	if err == nil {
-		t.Fatal("countAtPath accepted table output as JSON")
+		t.Fatal("scaleCountAtPath accepted table output as JSON")
 	}
 	var syntax *json.SyntaxError
 	if !errors.As(err, &syntax) {
@@ -388,15 +452,15 @@ func TestCountAtPathRejectsNonJSON(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// assessList
+// scaleAssessList
 // ---------------------------------------------------------------------------
 //
 // The cases here are the ones a reviewer drove a fake binary through. Each one
 // is an answer that is wrong and fast, which is the only kind of wrong answer
 // a timing suite is tempted to accept.
 
-// listOf renders a GPUNodeList naming exactly these nodes.
-func listOf(names ...string) []byte {
+// scaleListOf renders a GPUNodeList naming exactly these nodes.
+func scaleListOf(names ...string) []byte {
 	items := make([]string, 0, len(names))
 	for _, n := range names {
 		items = append(items, `{"metadata":{"name":"`+n+`"}}`)
@@ -405,23 +469,23 @@ func listOf(names ...string) []byte {
 	return []byte(`{"kind":"GPUNodeList","items":[` + strings.Join(items, ",") + `]}`)
 }
 
-// fakeAndReal is a lane of n fake nodes plus the two workers, in the order
+// scaleLaneOf is a lane of n fake nodes plus the two workers, in the order
 // the binary sorts them.
-func fakeAndReal(n int) []byte {
+func scaleLaneOf(n int) []byte {
 	names := []string{"kubectl-nv-scale-worker", "kubectl-nv-scale-worker2"}
 	for i := 1; i <= n; i++ {
 		names = append(names, fmt.Sprintf("kwok-gpu-%d", i))
 	}
 
-	return listOf(names...)
+	return scaleListOf(names...)
 }
 
 func TestAssessListAcceptsTheLane(t *testing.T) {
 	t.Parallel()
 
-	census, err := assessList(fakeAndReal(20), 20, 2)
+	census, err := scaleAssessList(scaleLaneOf(20), 20, 2)
 	if err != nil {
-		t.Fatalf("assessList on a correct lane: %v", err)
+		t.Fatalf("scaleAssessList on a correct lane: %v", err)
 	}
 	if census.Fake != 20 || census.Real != 2 || census.Total != 22 {
 		t.Errorf("census = %+v, want {Fake:20 Real:2 Total:22}", census)
@@ -440,26 +504,26 @@ func TestAssessListRejectsAWrongLane(t *testing.T) {
 			// The empty run. Instant, and the fastest number this suite
 			// would ever record.
 			"no nodes at all",
-			listOf(),
+			scaleListOf(),
 			"list is missing 3 of the 3 fake nodes: kwok-gpu-1, kwok-gpu-2, kwok-gpu-3",
 		},
 		{
 			// The count is right and the lane is not: kwok-gpu-1 twice,
 			// kwok-gpu-3 gone. A test that only counted would pass here.
 			"one node named twice and another missing",
-			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-1", "kwok-gpu-2"),
+			scaleListOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-1", "kwok-gpu-2"),
 			"list named 1 node(s) more than once: kwok-gpu-1 (2 times)",
 		},
 		{
 			"a fake node missing",
-			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-2"),
+			scaleListOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-2"),
 			"list is missing 1 of the 3 fake nodes: kwok-gpu-3",
 		},
 		{
 			// Every expected node is there, and one more besides: a lane
 			// that was created twice at different counts and deleted once.
 			"a fake node from outside the range",
-			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2",
+			scaleListOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2",
 				"kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3", "kwok-gpu-9"),
 			"list names 1 node(s) outside kwok-gpu-1..3: kwok-gpu-9",
 		},
@@ -467,12 +531,12 @@ func TestAssessListRejectsAWrongLane(t *testing.T) {
 			// A lane that lost a worker. "At least one real node" passes
 			// here; an equality does not.
 			"a worker gone",
-			listOf("kubectl-nv-scale-worker", "kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3"),
+			scaleListOf("kubectl-nv-scale-worker", "kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3"),
 			"list names 1 node(s) that are not kwok-gpu-*, want exactly 2",
 		},
 		{
 			"a node that should not be there at all",
-			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "somebody-elses-node",
+			scaleListOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "somebody-elses-node",
 				"kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3"),
 			"list names 3 node(s) that are not kwok-gpu-*, want exactly 2",
 		},
@@ -480,9 +544,9 @@ func TestAssessListRejectsAWrongLane(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := assessList(tc.raw, 3, 2)
+			_, err := scaleAssessList(tc.raw, 3, 2)
 			if err == nil {
-				t.Fatalf("assessList accepted it; want %q", tc.want)
+				t.Fatalf("scaleAssessList accepted it; want %q", tc.want)
 			}
 			if err.Error() != tc.want {
 				t.Errorf("error = %q, want %q", err.Error(), tc.want)
@@ -495,9 +559,9 @@ func TestAssessListCapsALongNameList(t *testing.T) {
 	t.Parallel()
 
 	// A 2,000 node lane that answered empty must not print 2,000 names.
-	_, err := assessList(listOf(), 2000, 2)
+	_, err := scaleAssessList(scaleListOf(), 2000, 2)
 	if err == nil {
-		t.Fatal("assessList accepted an empty 2,000 node lane")
+		t.Fatal("scaleAssessList accepted an empty 2,000 node lane")
 	}
 	const want = "list is missing 2000 of the 2000 fake nodes: kwok-gpu-1, kwok-gpu-10, kwok-gpu-100, kwok-gpu-1000, kwok-gpu-1001 and 1995 more"
 	if err.Error() != want {
@@ -506,15 +570,15 @@ func TestAssessListCapsALongNameList(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// assessRuns
+// scaleAssessRuns
 // ---------------------------------------------------------------------------
 
 func TestAssessRunsWithinTheThreshold(t *testing.T) {
 	t.Parallel()
 
-	stats, err := assessRuns([]time.Duration{4 * time.Second, 2 * time.Second, 3 * time.Second}, 5*time.Second)
+	stats, err := scaleAssessRuns([]time.Duration{4 * time.Second, 2 * time.Second, 3 * time.Second}, 5*time.Second)
 	if err != nil {
-		t.Fatalf("assessRuns under the threshold: %v", err)
+		t.Fatalf("scaleAssessRuns under the threshold: %v", err)
 	}
 	if stats.Median != 3*time.Second {
 		t.Errorf("Median = %v, want 3s", stats.Median)
@@ -532,9 +596,9 @@ func TestAssessRunsOverTheThreshold(t *testing.T) {
 
 	// The median decides, not the max: 6s, 7s, 8s is over a 5s threshold on
 	// every statistic, so a comparison that was silently dropped shows up.
-	stats, err := assessRuns([]time.Duration{6 * time.Second, 7 * time.Second, 8 * time.Second}, 5*time.Second)
+	stats, err := scaleAssessRuns([]time.Duration{6 * time.Second, 7 * time.Second, 8 * time.Second}, 5*time.Second)
 	if err == nil {
-		t.Fatal("assessRuns accepted a median over the threshold")
+		t.Fatal("scaleAssessRuns accepted a median over the threshold")
 	}
 	const want = "median 7s over 3 runs, want at most 5s (runs: [6s 7s 8s])"
 	if err.Error() != want {
@@ -551,9 +615,9 @@ func TestAssessRunsOnTheThresholdExactly(t *testing.T) {
 	t.Parallel()
 
 	// The threshold is a limit, not a wall to stay under: exactly 5s passes.
-	stats, err := assessRuns([]time.Duration{5 * time.Second}, 5*time.Second)
+	stats, err := scaleAssessRuns([]time.Duration{5 * time.Second}, 5*time.Second)
 	if err != nil {
-		t.Fatalf("assessRuns at exactly the threshold: %v", err)
+		t.Fatalf("scaleAssessRuns at exactly the threshold: %v", err)
 	}
 	if !stats.Within {
 		t.Error("Within = false at exactly the threshold, want true")
@@ -564,9 +628,9 @@ func TestAssessRunsRejectsNoRuns(t *testing.T) {
 	t.Parallel()
 
 	// A command that was never run is not a command that was instant.
-	_, err := assessRuns(nil, 5*time.Second)
+	_, err := scaleAssessRuns(nil, 5*time.Second)
 	if err == nil {
-		t.Fatal("assessRuns accepted an empty set of runs")
+		t.Fatal("scaleAssessRuns accepted an empty set of runs")
 	}
 	if err.Error() != "no runs were measured" {
 		t.Errorf("error = %q, want %q", err.Error(), "no runs were measured")
@@ -592,9 +656,12 @@ func TestScaleReportRoundTrip(t *testing.T) {
 		TotalNodes:      2002,
 		PodsTotal:       6042,
 		PodsOnFakeNodes: 6000,
-		HealthNodes:     2002,
+		ExpectedHinted:  1,
+		HealthNodes:     2003,
 		HealthFindings:  4000,
-		HealthCountPath: "summary.nodesChecked",
+		HealthErrors:    2000,
+		HealthWarnings:  2000,
+		HealthInfos:     0,
 		Timings: []commandTiming{{
 			Command:     "[list -o json]",
 			Runs:        []commandRun{{DurationMS: 1200, ExitCode: 0, StdoutLen: 99}},
@@ -672,8 +739,8 @@ func TestExitCodePolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := allows(tc.allowed, tc.code); got != tc.want {
-				t.Errorf("allows(%v, %d) = %v, want %v", tc.allowed, tc.code, got, tc.want)
+			if got := scaleAllows(tc.allowed, tc.code); got != tc.want {
+				t.Errorf("scaleAllows(%v, %d) = %v, want %v", tc.allowed, tc.code, got, tc.want)
 			}
 		})
 	}
@@ -692,10 +759,10 @@ func TestTheReviewersFakeBinaryIsRejected(t *testing.T) {
 
 		// Checking only the last run passes this: the full list is last and
 		// the median is whatever two instant runs make it.
-		runs := [][]byte{listOf(), listOf(), fakeAndReal(fake)}
+		runs := [][]byte{scaleListOf(), scaleListOf(), scaleLaneOf(fake)}
 		rejected := 0
 		for i, raw := range runs {
-			if _, err := assessList(raw, fake, real); err != nil {
+			if _, err := scaleAssessList(raw, fake, real); err != nil {
 				rejected++
 				t.Logf("run %d rejected: %v", i+1, err)
 			}
@@ -710,10 +777,10 @@ func TestTheReviewersFakeBinaryIsRejected(t *testing.T) {
 
 		// The list itself is perfect, so no amount of looking at the nodes
 		// catches this one. The exit code is the whole signal.
-		if _, err := assessList(fakeAndReal(fake), fake, real); err != nil {
-			t.Fatalf("the list was correct, so assessList should pass it: %v", err)
+		if _, err := scaleAssessList(scaleLaneOf(fake), fake, real); err != nil {
+			t.Fatalf("the list was correct, so scaleAssessList should pass it: %v", err)
 		}
-		if allows(listExitCodes, 3) {
+		if scaleAllows(listExitCodes, 3) {
 			t.Error("list is allowed to exit 3, so a partial read would be timed and reported as a pass")
 		}
 	})
@@ -726,11 +793,11 @@ func TestTheReviewersFakeBinaryIsRejected(t *testing.T) {
 		for i := 1; i <= fake-1; i++ {
 			names = append(names, fmt.Sprintf("kwok-gpu-%d", i))
 		}
-		raw := listOf(names...)
+		raw := scaleListOf(names...)
 
-		census, err := assessList(raw, fake, real)
+		census, err := scaleAssessList(raw, fake, real)
 		if err == nil {
-			t.Fatalf("assessList accepted a lane with kwok-gpu-1 twice and kwok-gpu-%d missing (census %+v)", fake, census)
+			t.Fatalf("scaleAssessList accepted a lane with kwok-gpu-1 twice and kwok-gpu-%d missing (census %+v)", fake, census)
 		}
 		t.Logf("rejected: %v", err)
 	})

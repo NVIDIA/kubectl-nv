@@ -62,19 +62,19 @@ func TestScaleLane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scale configuration: %v", err)
 	}
-	t.Logf("scale: expecting %d fake nodes and %d real, %d runs per command, thresholds list=%s health=%s",
-		cfg.Nodes, cfg.RealNodes, cfg.Runs, cfg.ListThreshold, cfg.HealthThreshold)
+	t.Logf("scale: expecting %d fake nodes, %d real and %d hinted, %d runs per command, thresholds list=%s health=%s",
+		cfg.Nodes, cfg.RealNodes, cfg.HintedNodes, cfg.Runs, cfg.ListThreshold, cfg.HealthThreshold)
 
 	report := scaleReport{
 		RecordedAt: time.Now().UTC().Format(time.RFC3339),
 		// Which commit these numbers belong to. A trend read across nightlies
 		// is worth nothing if a row cannot be tied back to a tree.
-		CommitSHA:       os.Getenv("GITHUB_SHA"),
-		Binary:          binaryPath,
-		ExpectedFake:    cfg.Nodes,
-		ExpectedReal:    cfg.RealNodes,
-		HealthFindings:  -1,
-		HealthCountPath: cfg.HealthCountPath,
+		CommitSHA:      os.Getenv("GITHUB_SHA"),
+		Binary:         binaryPath,
+		ExpectedFake:   cfg.Nodes,
+		ExpectedReal:   cfg.RealNodes,
+		ExpectedHinted: cfg.HintedNodes,
+		HealthFindings: -1,
 	}
 	// The report is written whichever way the assertions go, and every timing
 	// is appended the moment it exists rather than at the end: a run that
@@ -96,7 +96,7 @@ func TestScaleLane(t *testing.T) {
 	total, onFake := waitForLaneToSettle(t, cfg.SettleTimeout)
 	report.PodsTotal = total
 	report.PodsOnFakeNodes = onFake
-	t.Logf("scale: lane settled with %d pods, %d of them on fake nodes", total, onFake)
+	t.Logf("scale: lane laneSettled with %d pods, %d of them on fake nodes", total, onFake)
 
 	// -----------------------------------------------------------------
 	// list
@@ -107,7 +107,7 @@ func TestScaleLane(t *testing.T) {
 	// Every run, not the last one. A command that answered correctly once and
 	// emptily twice has a median this suite would otherwise be delighted with.
 	for i, raw := range listRuns {
-		census, err := assessList([]byte(raw), cfg.Nodes, cfg.RealNodes)
+		census, err := scaleAssessList([]byte(raw), cfg.Nodes, cfg.RealNodes)
 		if err != nil {
 			t.Errorf("run %d of list -o json: %v", i+1, err)
 		}
@@ -125,12 +125,15 @@ func TestScaleLane(t *testing.T) {
 	healthRuns := measure(t, &report, cfg.Runs, cfg.HealthThreshold, healthExitCodes,
 		"health", "--summary", "-o", "json")
 
-	wantNodes := cfg.Nodes + cfg.RealNodes
+	// health builds its inventory with IncludeHinted, so it checks the nodes
+	// list leaves out as well: the fake nodes, the real workers, and the
+	// lane's control plane, which nvml-mock labels and no operand runs on.
+	wantNodes := cfg.Nodes + cfg.RealNodes + cfg.HintedNodes
 	for i, raw := range healthRuns {
-		counted, err := countAtPath([]byte(raw), cfg.HealthCountPath)
+		counted, err := scaleCountAtPath([]byte(raw), healthNodesPath)
 		if err != nil {
-			t.Errorf("run %d: reading %q out of health --summary -o json: %v\nset %s if the field moved\noutput:\n%s",
-				i+1, cfg.HealthCountPath, err, envHealthCountPath, raw)
+			t.Errorf("run %d: reading %q out of health --summary -o json: %v\noutput:\n%s",
+				i+1, healthNodesPath, err, firstBytes(raw, 2000))
 
 			continue
 		}
@@ -138,19 +141,31 @@ func TestScaleLane(t *testing.T) {
 			report.HealthNodes = counted
 		}
 		if counted != wantNodes {
-			t.Errorf("run %d: health --summary counted %d nodes at %q, want %d",
-				i+1, counted, cfg.HealthCountPath, wantNodes)
+			t.Errorf("run %d: health --summary counted %d nodes at %q, want %d (%d fake + %d real + %d hinted)",
+				i+1, counted, healthNodesPath, wantNodes, cfg.Nodes, cfg.RealNodes, cfg.HintedNodes)
 		}
 	}
 
-	// Recorded, never asserted. See the package comment.
+	// Recorded, never asserted. See the package comment. --summary suppresses
+	// the findings in the table and not in the JSON, so they are all here.
 	if len(healthRuns) > 0 {
-		if n, err := countAtPath([]byte(healthRuns[0]), "summary.findings"); err == nil {
-			report.HealthFindings = n
+		first := []byte(healthRuns[0])
+		for path, into := range map[string]*int{
+			healthFindingsPath: &report.HealthFindings,
+			"summary.errors":   &report.HealthErrors,
+			"summary.warnings": &report.HealthWarnings,
+			"summary.infos":    &report.HealthInfos,
+		} {
+			if n, err := scaleCountAtPath(first, path); err == nil {
+				*into = n
+			} else {
+				t.Logf("scale: could not read %q for the report: %v", path, err)
+			}
 		}
 	}
-	t.Logf("scale: %d fake nodes, %d real nodes, health counted %d, findings %d",
-		report.FakeNodes, report.RealNodes, report.HealthNodes, report.HealthFindings)
+	t.Logf("scale: %d fake nodes, %d real nodes, health counted %d; findings %d (%d error, %d warning, %d info)",
+		report.FakeNodes, report.RealNodes, report.HealthNodes,
+		report.HealthFindings, report.HealthErrors, report.HealthWarnings, report.HealthInfos)
 }
 
 // measure runs the binary cfg.Runs times, appends the timing to the report
@@ -181,13 +196,13 @@ func measure(t *testing.T, report *scaleReport, runs int, threshold time.Duratio
 			StdoutLen:  len(res.stdout),
 		})
 
-		if !allows(allowed, res.code) {
+		if !scaleAllows(allowed, res.code) {
 			bad = append(bad, fmt.Sprintf("run %d exited %d (want one of %v)\nstderr:\n%s",
 				i+1, res.code, allowed, res.stderr))
 		}
 	}
 
-	stats, err := assessRuns(durations, threshold)
+	stats, err := scaleAssessRuns(durations, threshold)
 	timing.MedianMS = stats.Median.Milliseconds()
 	timing.MaxMS = stats.Max.Milliseconds()
 	timing.Within = stats.Within
@@ -207,7 +222,7 @@ func measure(t *testing.T, report *scaleReport, runs int, threshold time.Duratio
 }
 
 // waitForLaneToSettle blocks until the lane has stopped changing underneath
-// the measurement, and returns the pod counts it settled at.
+// the measurement, and returns the pod counts it laneSettled at.
 //
 // Two conditions, both needed. Every DaemonSet has to have placed a pod on
 // every node it wants one on, and the total pod count has to be the same twice
@@ -231,7 +246,7 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		pending, err := listPendingDaemonSets(ctx, client)
 		if err == nil {
-			total, onFake, err = countPods(ctx, client)
+			total, onFake, err = scaleCountPods(ctx, client)
 		}
 		cancel()
 
@@ -239,7 +254,7 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 			reason = err.Error()
 		} else {
 			var done bool
-			done, reason = settled(pending, total, previous)
+			done, reason = laneSettled(pending, total, previous)
 			previous = total
 			if done {
 				return total, onFake
@@ -247,14 +262,14 @@ func waitForLaneToSettle(t *testing.T, timeout time.Duration) (total, onFake int
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("the lane had not settled after %s: %s", timeout, reason)
+			t.Fatalf("the lane had not laneSettled after %s: %s", timeout, reason)
 		}
 		t.Logf("scale: waiting for the lane to settle: %s", reason)
 		time.Sleep(settlePoll)
 	}
 }
 
-// listPendingDaemonSets fetches the DaemonSets and asks pendingDaemonSets
+// listPendingDaemonSets fetches the DaemonSets and asks scalePendingDaemonSets
 // which of them are still placing pods.
 func listPendingDaemonSets(ctx context.Context, client kubernetes.Interface) ([]string, error) {
 	list, err := client.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
@@ -262,13 +277,13 @@ func listPendingDaemonSets(ctx context.Context, client kubernetes.Interface) ([]
 		return nil, fmt.Errorf("listing DaemonSets: %w", err)
 	}
 
-	return pendingDaemonSets(list.Items), nil
+	return scalePendingDaemonSets(list.Items), nil
 }
 
-// countPods counts every pod in the cluster and how many of them sit on a fake
+// scaleCountPods counts every pod in the cluster and how many of them sit on a fake
 // node, a page at a time. Only the two counts are kept: the objects are
 // thousands and none of them is read twice.
-func countPods(ctx context.Context, client kubernetes.Interface) (total, onFake int, err error) {
+func scaleCountPods(ctx context.Context, client kubernetes.Interface) (total, onFake int, err error) {
 	opts := metav1.ListOptions{Limit: podPageSize}
 	for {
 		page, err := client.CoreV1().Pods("").List(ctx, opts)
@@ -277,7 +292,7 @@ func countPods(ctx context.Context, client kubernetes.Interface) (total, onFake 
 		}
 		for i := range page.Items {
 			total++
-			if onFakeNode(page.Items[i].Spec.NodeName) {
+			if scaleOnFakeNode(page.Items[i].Spec.NodeName) {
 				onFake++
 			}
 		}
@@ -286,4 +301,15 @@ func countPods(ctx context.Context, client kubernetes.Interface) (total, onFake 
 		}
 		opts.Continue = page.Continue
 	}
+}
+
+// firstBytes caps an output quoted into a failure message. A health report
+// over two thousand nodes is megabytes, and none of it after the first page
+// helps anybody see why a field could not be read.
+func firstBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return s[:n] + fmt.Sprintf("\n... (%d bytes more)", len(s)-n)
 }

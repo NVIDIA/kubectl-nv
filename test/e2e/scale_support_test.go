@@ -53,11 +53,23 @@ const (
 	envListThreshold   = "KUBECTL_NV_SCALE_LIST_THRESHOLD"
 	envHealthThreshold = "KUBECTL_NV_SCALE_HEALTH_THRESHOLD"
 	envRuns            = "KUBECTL_NV_SCALE_RUNS"
-	envHealthCountPath = "KUBECTL_NV_SCALE_HEALTH_COUNT_PATH"
 	envReportDir       = "KUBECTL_NV_SCALE_REPORT_DIR"
 	envRealNodes       = "KUBECTL_NV_SCALE_REAL_NODES"
+	envHintedNodes     = "KUBECTL_NV_SCALE_HINTED_NODES"
 	envSettleTimeout   = "KUBECTL_NV_SCALE_SETTLE_TIMEOUT"
 )
+
+// healthNodesPath is where the merged HealthReport carries the node count:
+// pkg/health.Summary.NodesChecked, under the inline summary. It is a constant
+// and no longer an environment variable, because the field now exists and a
+// knob for "where did the field go" is a knob for not noticing that it moved.
+const healthNodesPath = "summary.nodesChecked"
+
+// healthFindingsPath is where the findings are. output.ReportStatus is inline
+// in HealthReport, so they sit at the top level and not under the summary, and
+// --summary only suppresses them in the table: -o json carries the whole
+// report either way.
+const healthFindingsPath = "findings"
 
 // scaleConfig is the whole of what the suite reads from its environment.
 type scaleConfig struct {
@@ -78,11 +90,14 @@ type scaleConfig struct {
 	// SettleTimeout bounds the wait for the lane to stop moving before
 	// anything is measured.
 	SettleTimeout time.Duration
-	// HealthCountPath is the dotted path to the node count in the health
-	// summary. It is a variable and not a constant because the summary's
-	// field names are younger than this suite: a rename has to be a one line
-	// change to the workflow, not a red nightly nobody can explain.
-	HealthCountPath string
+	// HintedNodes is how many nodes health counts that list does not. The
+	// health command builds its inventory with IncludeHinted, so a node that
+	// carries the GPU labels and advertises no allocatable GPUs is checked by
+	// the rules and left out of the list. On a Mokka lane that is the control
+	// plane: nvml-mock runs there and labels it, and the operands do not
+	// tolerate its taint. So health counts one more node than list names, and
+	// the suite has to know which.
+	HintedNodes int
 	// ReportDir is where the numbers are written for the workflow to upload.
 	ReportDir string
 }
@@ -104,37 +119,34 @@ func scaleConfigFrom(getenv func(string) string) (scaleConfig, error) {
 		HealthThreshold: 15 * time.Second,
 		Runs:            3,
 		RealNodes:       2,
+		HintedNodes:     1,
 		SettleTimeout:   10 * time.Minute,
-		HealthCountPath: "summary.nodesChecked",
 		ReportDir:       defaultReportDir,
 	}
 
 	var err error
-	if cfg.Nodes, err = positiveInt(getenv, envNodes, cfg.Nodes); err != nil {
+	if cfg.Nodes, err = scalePositiveInt(getenv, envNodes, cfg.Nodes); err != nil {
 		return scaleConfig{}, err
 	}
-	if cfg.Runs, err = positiveInt(getenv, envRuns, cfg.Runs); err != nil {
+	if cfg.Runs, err = scalePositiveInt(getenv, envRuns, cfg.Runs); err != nil {
 		return scaleConfig{}, err
 	}
-	if cfg.RealNodes, err = positiveInt(getenv, envRealNodes, cfg.RealNodes); err != nil {
+	if cfg.RealNodes, err = scalePositiveInt(getenv, envRealNodes, cfg.RealNodes); err != nil {
 		return scaleConfig{}, err
 	}
-	if cfg.SettleTimeout, err = positiveDuration(getenv, envSettleTimeout, cfg.SettleTimeout); err != nil {
+	if cfg.HintedNodes, err = scaleWholeInt(getenv, envHintedNodes, cfg.HintedNodes); err != nil {
 		return scaleConfig{}, err
 	}
-	if cfg.ListThreshold, err = positiveDuration(getenv, envListThreshold, cfg.ListThreshold); err != nil {
+	if cfg.SettleTimeout, err = scalePositiveDuration(getenv, envSettleTimeout, cfg.SettleTimeout); err != nil {
 		return scaleConfig{}, err
 	}
-	if cfg.HealthThreshold, err = positiveDuration(getenv, envHealthThreshold, cfg.HealthThreshold); err != nil {
+	if cfg.ListThreshold, err = scalePositiveDuration(getenv, envListThreshold, cfg.ListThreshold); err != nil {
+		return scaleConfig{}, err
+	}
+	if cfg.HealthThreshold, err = scalePositiveDuration(getenv, envHealthThreshold, cfg.HealthThreshold); err != nil {
 		return scaleConfig{}, err
 	}
 
-	if raw := getenv(envHealthCountPath); raw != "" {
-		if strings.TrimSpace(raw) == "" {
-			return scaleConfig{}, fmt.Errorf("%s=%q: want a dotted JSON path", envHealthCountPath, raw)
-		}
-		cfg.HealthCountPath = strings.TrimSpace(raw)
-	}
 	if raw := getenv(envReportDir); raw != "" {
 		cfg.ReportDir = raw
 	}
@@ -142,9 +154,9 @@ func scaleConfigFrom(getenv func(string) string) (scaleConfig, error) {
 	return cfg, nil
 }
 
-// positiveInt reads a whole number above zero, or keeps the default when the
+// scalePositiveInt reads a whole number above zero, or keeps the default when the
 // variable is unset.
-func positiveInt(getenv func(string) string, name string, fallback int) (int, error) {
+func scalePositiveInt(getenv func(string) string, name string, fallback int) (int, error) {
 	raw := getenv(name)
 	if raw == "" {
 		return fallback, nil
@@ -157,9 +169,25 @@ func positiveInt(getenv func(string) string, name string, fallback int) (int, er
 	return n, nil
 }
 
-// positiveDuration reads a Go duration above zero, or keeps the default when
+// scaleWholeInt reads a whole number at or above zero. Zero is a legitimate answer
+// for a count of hinted nodes: a lane whose control plane carries no GPU
+// labels at all has none.
+func scaleWholeInt(getenv func(string) string, name string, fallback int) (int, error) {
+	raw := getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s=%q: want a whole number, zero or above", name, raw)
+	}
+
+	return n, nil
+}
+
+// scalePositiveDuration reads a Go duration above zero, or keeps the default when
 // the variable is unset.
-func positiveDuration(getenv func(string) string, name string, fallback time.Duration) (time.Duration, error) {
+func scalePositiveDuration(getenv func(string) string, name string, fallback time.Duration) (time.Duration, error) {
 	raw := getenv(name)
 	if raw == "" {
 		return fallback, nil
@@ -175,10 +203,10 @@ func positiveDuration(getenv func(string) string, name string, fallback time.Dur
 	return d, nil
 }
 
-// medianDuration is the middle of the samples, or the mean of the two middle
+// scaleMedianDuration is the middle of the samples, or the mean of the two middle
 // ones when there is an even number of them. It sorts a copy: the report
 // prints the runs in the order they were measured.
-func medianDuration(samples []time.Duration) time.Duration {
+func scaleMedianDuration(samples []time.Duration) time.Duration {
 	if len(samples) == 0 {
 		return 0
 	}
@@ -193,8 +221,8 @@ func medianDuration(samples []time.Duration) time.Duration {
 	return (sorted[mid-1] + sorted[mid]) / 2
 }
 
-// maxDuration is the slowest sample.
-func maxDuration(samples []time.Duration) time.Duration {
+// scaleMaxDuration is the slowest sample.
+func scaleMaxDuration(samples []time.Duration) time.Duration {
 	var worst time.Duration
 	for _, d := range samples {
 		if d > worst {
@@ -205,10 +233,10 @@ func maxDuration(samples []time.Duration) time.Duration {
 	return worst
 }
 
-// nodeNames reads .items[].metadata.name out of a GPUNodeList. An item with
+// scaleNodeNames reads .items[].metadata.name out of a GPUNodeList. An item with
 // no name is an error rather than an empty string: a list of 2,000 empty
 // names still has length 2,000, and the count assertion would pass on it.
-func nodeNames(raw []byte) ([]string, error) {
+func scaleNodeNames(raw []byte) ([]string, error) {
 	var list struct {
 		Items []struct {
 			Metadata struct {
@@ -231,8 +259,8 @@ func nodeNames(raw []byte) ([]string, error) {
 	return names, nil
 }
 
-// countWithPrefix counts the names that start with prefix.
-func countWithPrefix(names []string, prefix string) int {
+// scaleCountWithPrefix counts the names that start with prefix.
+func scaleCountWithPrefix(names []string, prefix string) int {
 	n := 0
 	for _, name := range names {
 		if strings.HasPrefix(name, prefix) {
@@ -243,12 +271,12 @@ func countWithPrefix(names []string, prefix string) int {
 	return n
 }
 
-// countAtPath reads a count out of JSON at a dotted path. An array counts its
+// scaleCountAtPath reads a count out of JSON at a dotted path. An array counts its
 // elements and a number is itself; anything else, including a path that does
 // not resolve, is an error naming what was found instead. The health
 // summary's field names are not frozen, and a count assertion that quietly
 // compared nothing would be worse than a red suite.
-func countAtPath(raw []byte, path string) (int, error) {
+func scaleCountAtPath(raw []byte, path string) (int, error) {
 	var doc any
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return 0, fmt.Errorf("decoding the output: %w", err)
@@ -266,12 +294,12 @@ func countAtPath(raw []byte, path string) (int, error) {
 		if !ok {
 			if i == 0 {
 				return 0, fmt.Errorf("no %q at the top of the output; the output holds: %s",
-					segment, strings.Join(sortedObjectKeys(object), ", "))
+					segment, strings.Join(scaleSortedObjectKeys(object), ", "))
 			}
 
 			return 0, fmt.Errorf("no %q under %q in the output; %q holds: %s",
 				segment, strings.Join(segments[:i], "."), strings.Join(segments[:i], "."),
-				strings.Join(sortedObjectKeys(object), ", "))
+				strings.Join(scaleSortedObjectKeys(object), ", "))
 		}
 		cursor = next
 	}
@@ -287,12 +315,12 @@ func countAtPath(raw []byte, path string) (int, error) {
 
 		return int(value), nil
 	default:
-		return 0, fmt.Errorf("%q is a %s, want a number or an array", path, jsonTypeOf(cursor))
+		return 0, fmt.Errorf("%q is a %s, want a number or an array", path, scaleJSONTypeOf(cursor))
 	}
 }
 
-// jsonTypeOf names a decoded JSON value the way the error messages read.
-func jsonTypeOf(value any) string {
+// scaleJSONTypeOf names a decoded JSON value the way the error messages read.
+func scaleJSONTypeOf(value any) string {
 	switch value.(type) {
 	case string:
 		return "string"
@@ -307,9 +335,9 @@ func jsonTypeOf(value any) string {
 	}
 }
 
-// sortedObjectKeys lists an object's keys, so an error message is the same on every
+// scaleSortedObjectKeys lists an object's keys, so an error message is the same on every
 // run and can be compared.
-func sortedObjectKeys(object map[string]any) []string {
+func scaleSortedObjectKeys(object map[string]any) []string {
 	keys := make([]string, 0, len(object))
 	for k := range object {
 		keys = append(keys, k)
@@ -344,8 +372,8 @@ var (
 	healthExitCodes = []int{0, 1}
 )
 
-// allows reports whether code is one the command may exit with.
-func allows(allowed []int, code int) bool {
+// scaleAllows reports whether code is one the command may exit with.
+func scaleAllows(allowed []int, code int) bool {
 	for _, want := range allowed {
 		if want == code {
 			return true
@@ -355,8 +383,8 @@ func allows(allowed []int, code int) bool {
 	return false
 }
 
-// listCensus is what one run of "list -o json" said the lane holds.
-type listCensus struct {
+// scaleListCensus is what one run of "list -o json" said the lane holds.
+type scaleListCensus struct {
 	// Fake is how many nodes were named kwok-gpu-<n>.
 	Fake int
 	// Real is how many were not.
@@ -365,15 +393,15 @@ type listCensus struct {
 	Total int
 }
 
-// assessList reads one run of "list -o json" and decides whether it named the
+// scaleAssessList reads one run of "list -o json" and decides whether it named the
 // lane. Counting is not enough: the count is right while the names are wrong
 // if one node is listed twice and another is missing, which is exactly the
 // answer a broken paginator gives. So the fake names have to be the set
 // kwok-nodes.sh creates, exactly, each one once.
-func assessList(raw []byte, wantFake, wantReal int) (listCensus, error) {
-	names, err := nodeNames(raw)
+func scaleAssessList(raw []byte, wantFake, wantReal int) (scaleListCensus, error) {
+	names, err := scaleNodeNames(raw)
 	if err != nil {
-		return listCensus{}, err
+		return scaleListCensus{}, err
 	}
 
 	seen := make(map[string]int, len(names))
@@ -389,8 +417,8 @@ func assessList(raw []byte, wantFake, wantReal int) (listCensus, error) {
 	if len(repeated) > 0 {
 		sort.Strings(repeated)
 
-		return listCensus{}, fmt.Errorf("list named %d node(s) more than once: %s",
-			len(repeated), firstN(repeated, 5))
+		return scaleListCensus{}, fmt.Errorf("list named %d node(s) more than once: %s",
+			len(repeated), scaleFirstN(repeated, 5))
 	}
 
 	// The names kwok-nodes.sh creates, by construction: kwok-gpu-1 upwards.
@@ -399,7 +427,7 @@ func assessList(raw []byte, wantFake, wantReal int) (listCensus, error) {
 		wanted[fmt.Sprintf("%s%d", scaleNodePrefix, i)] = true
 	}
 
-	census := listCensus{Total: len(names)}
+	census := scaleListCensus{Total: len(names)}
 	extra := make([]string, 0)
 	for _, name := range names {
 		if !strings.HasPrefix(name, scaleNodePrefix) {
@@ -424,10 +452,10 @@ func assessList(raw []byte, wantFake, wantReal int) (listCensus, error) {
 	switch {
 	case len(missing) > 0:
 		return census, fmt.Errorf("list is missing %d of the %d fake nodes: %s",
-			len(missing), wantFake, firstN(missing, 5))
+			len(missing), wantFake, scaleFirstN(missing, 5))
 	case len(extra) > 0:
 		return census, fmt.Errorf("list names %d node(s) outside %s1..%d: %s",
-			len(extra), scaleNodePrefix, wantFake, firstN(extra, 5))
+			len(extra), scaleNodePrefix, wantFake, scaleFirstN(extra, 5))
 	case census.Real != wantReal:
 		return census, fmt.Errorf("list names %d node(s) that are not %s*, want exactly %d",
 			census.Real, scaleNodePrefix, wantReal)
@@ -436,8 +464,8 @@ func assessList(raw []byte, wantFake, wantReal int) (listCensus, error) {
 	return census, nil
 }
 
-// runStats is the shape of one command's timings.
-type runStats struct {
+// scaleRunStats is the shape of one command's timings.
+type scaleRunStats struct {
 	Median time.Duration
 	Max    time.Duration
 	// Within is whether the median met the threshold. It is derived here and
@@ -446,17 +474,17 @@ type runStats struct {
 	Within bool
 }
 
-// assessRuns reduces the measured runs and decides whether they met the
+// scaleAssessRuns reduces the measured runs and decides whether they met the
 // threshold. No runs at all is an error rather than a zero median: a command
 // that was never run is not a command that was instant.
-func assessRuns(durations []time.Duration, threshold time.Duration) (runStats, error) {
+func scaleAssessRuns(durations []time.Duration, threshold time.Duration) (scaleRunStats, error) {
 	if len(durations) == 0 {
-		return runStats{}, fmt.Errorf("no runs were measured")
+		return scaleRunStats{}, fmt.Errorf("no runs were measured")
 	}
 
-	stats := runStats{
-		Median: medianDuration(durations),
-		Max:    maxDuration(durations),
+	stats := scaleRunStats{
+		Median: scaleMedianDuration(durations),
+		Max:    scaleMaxDuration(durations),
 	}
 	stats.Within = stats.Median <= threshold
 
@@ -468,9 +496,9 @@ func assessRuns(durations []time.Duration, threshold time.Duration) (runStats, e
 	return stats, nil
 }
 
-// firstN renders at most n of the names, so an error about a 2,000 node lane
+// scaleFirstN renders at most n of the names, so an error about a 2,000 node lane
 // is still something a reader can take in.
-func firstN(names []string, n int) string {
+func scaleFirstN(names []string, n int) string {
 	if len(names) <= n {
 		return strings.Join(names, ", ")
 	}
@@ -488,7 +516,7 @@ func firstN(names []string, n int) string {
 // decisions are here, away from the client that fetches the numbers, so they
 // can be driven through the states a 2,000 node lane passes on its way up.
 
-// pendingDaemonSets names the DaemonSets that have not yet placed a pod on
+// scalePendingDaemonSets names the DaemonSets that have not yet placed a pod on
 // every node they want one on.
 //
 // The comparison is currentNumberScheduled against desiredNumberScheduled and
@@ -496,14 +524,14 @@ func firstN(names []string, n int) string {
 // pod Stages, so numberReady waits on a different controller than the one
 // whose work perturbs a measurement, and on a lane where KWOK is slow it would
 // wait for something that never settles.
-func pendingDaemonSets(items []appsv1.DaemonSet) []string {
+func scalePendingDaemonSets(items []appsv1.DaemonSet) []string {
 	pending := make([]string, 0)
 	for i := range items {
-		ds := &items[i]
-		if ds.Status.CurrentNumberScheduled != ds.Status.DesiredNumberScheduled {
+		scaleDaemonSet := &items[i]
+		if scaleDaemonSet.Status.CurrentNumberScheduled != scaleDaemonSet.Status.DesiredNumberScheduled {
 			pending = append(pending, fmt.Sprintf("%s/%s (%d of %d)",
-				ds.Namespace, ds.Name,
-				ds.Status.CurrentNumberScheduled, ds.Status.DesiredNumberScheduled))
+				scaleDaemonSet.Namespace, scaleDaemonSet.Name,
+				scaleDaemonSet.Status.CurrentNumberScheduled, scaleDaemonSet.Status.DesiredNumberScheduled))
 		}
 	}
 	sort.Strings(pending)
@@ -511,15 +539,15 @@ func pendingDaemonSets(items []appsv1.DaemonSet) []string {
 	return pending
 }
 
-// settled decides whether the lane has stopped moving, and when it has not,
+// laneSettled decides whether the lane has stopped moving, and when it has not,
 // says what is still moving. previous is the pod count from the poll before
-// this one, or -1 on the first poll: a lane is never called settled on the
+// this one, or -1 on the first poll: a lane is never called laneSettled on the
 // strength of a single observation, because one count on its own cannot be
 // compared with anything.
-func settled(pending []string, total, previous int) (bool, string) {
+func laneSettled(pending []string, total, previous int) (bool, string) {
 	switch {
 	case len(pending) > 0:
-		return false, fmt.Sprintf("DaemonSets still placing pods: %s", firstN(pending, 5))
+		return false, fmt.Sprintf("DaemonSets still placing pods: %s", scaleFirstN(pending, 5))
 	case previous < 0:
 		return false, fmt.Sprintf("the pod count is %d, with nothing yet to compare it against", total)
 	case total != previous:
@@ -529,8 +557,8 @@ func settled(pending []string, total, previous int) (bool, string) {
 	}
 }
 
-// onFakeNode reports whether a pod is placed on a node kwok-nodes.sh made.
-func onFakeNode(nodeName string) bool {
+// scaleOnFakeNode reports whether a pod is placed on a node kwok-nodes.sh made.
+func scaleOnFakeNode(nodeName string) bool {
 	return strings.HasPrefix(nodeName, scaleNodePrefix)
 }
 
@@ -568,9 +596,12 @@ type scaleReport struct {
 	TotalNodes      int             `json:"totalNodes"`
 	PodsTotal       int             `json:"podsTotal"`
 	PodsOnFakeNodes int             `json:"podsOnFakeNodes"`
+	ExpectedHinted  int             `json:"expectedHintedNodes"`
 	HealthNodes     int             `json:"healthSummaryNodes"`
 	HealthFindings  int             `json:"healthFindings"`
-	HealthCountPath string          `json:"healthCountPath"`
+	HealthErrors    int             `json:"healthErrors"`
+	HealthWarnings  int             `json:"healthWarnings"`
+	HealthInfos     int             `json:"healthInfos"`
 	Timings         []commandTiming `json:"timings"`
 }
 

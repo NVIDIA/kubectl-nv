@@ -29,9 +29,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ds builds one DaemonSet status: how many nodes it wants a pod on, how many
+// scaleDaemonSet builds one DaemonSet status: how many nodes it wants a pod on, how many
 // it has placed one on, and how many of those are Ready.
-func ds(namespace, name string, desired, current, ready int32) appsv1.DaemonSet {
+func scaleDaemonSet(namespace, name string, desired, current, ready int32) appsv1.DaemonSet {
 	return appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
 		Status: appsv1.DaemonSetStatus{
@@ -48,48 +48,48 @@ func TestPendingDaemonSets(t *testing.T) {
 	t.Run("all placed", func(t *testing.T) {
 		t.Parallel()
 
-		got := pendingDaemonSets([]appsv1.DaemonSet{
-			ds("kube-system", "kube-proxy", 2002, 2002, 2002),
-			ds("mokka", "nvml-mock", 2002, 2002, 2002),
+		got := scalePendingDaemonSets([]appsv1.DaemonSet{
+			scaleDaemonSet("kube-system", "kube-proxy", 2002, 2002, 2002),
+			scaleDaemonSet("mokka", "nvml-mock", 2002, 2002, 2002),
 		})
 		if len(got) != 0 {
-			t.Errorf("pendingDaemonSets = %v, want none", got)
+			t.Errorf("scalePendingDaemonSets = %v, want none", got)
 		}
 	})
 
 	t.Run("one still placing", func(t *testing.T) {
 		t.Parallel()
 
-		got := pendingDaemonSets([]appsv1.DaemonSet{
-			ds("kube-system", "kube-proxy", 2002, 2002, 2002),
-			ds("kube-system", "kindnet", 2002, 1500, 1500),
+		got := scalePendingDaemonSets([]appsv1.DaemonSet{
+			scaleDaemonSet("kube-system", "kube-proxy", 2002, 2002, 2002),
+			scaleDaemonSet("kube-system", "kindnet", 2002, 1500, 1500),
 		})
 		if len(got) != 1 || got[0] != "kube-system/kindnet (1500 of 2002)" {
-			t.Errorf("pendingDaemonSets = %v, want one entry naming kindnet at 1500 of 2002", got)
+			t.Errorf("scalePendingDaemonSets = %v, want one entry naming kindnet at 1500 of 2002", got)
 		}
 	})
 
-	t.Run("placed but not ready still counts as settled", func(t *testing.T) {
+	t.Run("placed but not ready still counts as laneSettled", func(t *testing.T) {
 		t.Parallel()
 
 		// A fake node's pods are marked Ready by KWOK, not by a kubelet.
 		// Waiting on numberReady would be waiting on a different controller
 		// than the one whose work moves the measurement, and on a lane where
 		// KWOK lags it would never finish at all.
-		got := pendingDaemonSets([]appsv1.DaemonSet{
-			ds("kube-system", "kube-proxy", 2002, 2002, 0),
+		got := scalePendingDaemonSets([]appsv1.DaemonSet{
+			scaleDaemonSet("kube-system", "kube-proxy", 2002, 2002, 0),
 		})
 		if len(got) != 0 {
-			t.Errorf("pendingDaemonSets = %v, want none: every pod is placed", got)
+			t.Errorf("scalePendingDaemonSets = %v, want none: every pod is placed", got)
 		}
 	})
 
-	t.Run("a DaemonSet that wants no nodes is settled", func(t *testing.T) {
+	t.Run("a DaemonSet that wants no nodes is laneSettled", func(t *testing.T) {
 		t.Parallel()
 
-		got := pendingDaemonSets([]appsv1.DaemonSet{ds("gpu-operator", "mig-manager", 0, 0, 0)})
+		got := scalePendingDaemonSets([]appsv1.DaemonSet{scaleDaemonSet("gpu-operator", "mig-manager", 0, 0, 0)})
 		if len(got) != 0 {
-			t.Errorf("pendingDaemonSets = %v, want none", got)
+			t.Errorf("scalePendingDaemonSets = %v, want none", got)
 		}
 	})
 }
@@ -111,10 +111,10 @@ func TestSettled(t *testing.T) {
 		},
 		{
 			// The very first poll. One observation cannot be compared with
-			// anything, and calling the lane settled on it would mean
+			// anything, and calling the lane laneSettled on it would mean
 			// measuring whatever happened to be true the instant the suite
 			// started.
-			"the first poll is never settled",
+			"the first poll is never laneSettled",
 			nil, 6042, -1, false,
 			"the pod count is 6042, with nothing yet to compare it against",
 		},
@@ -135,9 +135,9 @@ func TestSettled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, reason := settled(tc.pending, tc.total, tc.previous)
+			got, reason := laneSettled(tc.pending, tc.total, tc.previous)
 			if got != tc.want {
-				t.Errorf("settled = %v, want %v (reason %q)", got, tc.want, reason)
+				t.Errorf("laneSettled = %v, want %v (reason %q)", got, tc.want, reason)
 			}
 			if reason != tc.reason {
 				t.Errorf("reason = %q, want %q", reason, tc.reason)
@@ -156,8 +156,8 @@ func TestOnFakeNode(t *testing.T) {
 		"":                        false,
 		"kwok-gpu":                false,
 	} {
-		if got := onFakeNode(name); got != want {
-			t.Errorf("onFakeNode(%q) = %v, want %v", name, got, want)
+		if got := scaleOnFakeNode(name); got != want {
+			t.Errorf("scaleOnFakeNode(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
