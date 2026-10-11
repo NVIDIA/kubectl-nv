@@ -427,8 +427,15 @@ export MOKKA_BIN_DIR="${WORK}/kubeconfigs"
 TOOL_DIR="${WORK}/systools"
 OUTER_STUBS="${WORK}/outer-stubs"
 
+# Timeouts. A case that is meant to converge needs the wall clock only to not
+# run out, because the shims answer on a call count rather than on elapsed
+# time; ten seconds against a `date +%s` of one-second resolution is margin
+# enough, and it is also the cost of a case the subject will never satisfy.
+# That second number matters: a mutant that breaks one assertion makes every
+# later case spin to this deadline, so a deadline of a minute turns a mutation
+# run into twenty.
 expect_converge() {
-    export MOKKA_READY_TIMEOUT=60
+    export MOKKA_READY_TIMEOUT=10
     export MOKKA_POLL_INTERVAL=0
 }
 
