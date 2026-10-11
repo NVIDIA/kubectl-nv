@@ -348,3 +348,46 @@ func TestForbiddenExecExitsPartial(t *testing.T) {
 		t.Errorf("collector bug-report status = %q, want it to start with skipped:forbidden", status)
 	}
 }
+
+// TestNodeWithoutAGPULabelIsSkippedNotFatal covers --node pointed at a node
+// that carries no NVIDIA PCI label. A cluster with no GPU node at all is a
+// cluster the gather has nothing to say about, and it reports that. Narrowing
+// to one node that happens not to be a GPU node is a different thing: the
+// cluster has GPU nodes, this one is not among them, and the rest of the
+// bundle, which is what the user asked for, is still worth collecting.
+func TestNodeWithoutAGPULabelIsSkippedNotFatal(t *testing.T) {
+	plain := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cpu-node-1"}}
+	objects := append(twoNodeCluster(), plain)
+
+	dir, names, err := runGather(t, &Options{Node: "cpu-node-1"}, objects...)
+	if err != nil {
+		t.Fatalf("Run returned %v, want the gather to carry on past a node with no GPU", err)
+	}
+
+	if !contains(names, "nodes.yaml") {
+		t.Errorf("the bundle holds no nodes.yaml: %v", names)
+	}
+	if contains(names, "gpu_nodes.yaml") {
+		t.Error("the bundle holds gpu_nodes.yaml for a node that carries no NVIDIA PCI label")
+	}
+
+	manifest := readManifest(t, dir)
+	if got := manifest.statusOf(t, "gpu-nodes"); got != "skipped:cpu-node-1 carries no NVIDIA PCI label" {
+		t.Errorf("gpu-nodes status = %q, want it skipped naming the node", got)
+	}
+}
+
+// TestNoGPUNodesAtAllIsStillAFailure is the other side of it: without --node,
+// a cluster where nothing carries an NVIDIA PCI label is a cluster this tool
+// has nothing to report on, and saying so is the answer.
+func TestNoGPUNodesAtAllIsStillAFailure(t *testing.T) {
+	plain := &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: "cpu-node-1"}}
+
+	_, _, err := runGather(t, &Options{}, plain)
+	if err == nil {
+		t.Fatal("Run returned nil over a cluster with no GPU nodes, want the failure reported")
+	}
+	if !strings.Contains(err.Error(), "NVIDIA PCI label") {
+		t.Errorf("error = %v, want it to say no node carries an NVIDIA PCI label", err)
+	}
+}
