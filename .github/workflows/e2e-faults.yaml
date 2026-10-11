@@ -56,7 +56,7 @@ jobs:
     # A cold run pulls the node image, the nvml-mock chart and the GPU Operator
     # images on two workers before the suite starts, and the suite itself then
     # waits out an inject and a recover per finding code.
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -115,20 +115,26 @@ jobs:
       - name: Run the fault suite against its own lane
         env:
           # The lane's own waits have to fit inside timeout-minutes with room
-          # for the suite, which is the long part here:
+          # for the suite:
           #
           #   2 x 12m helm                              24m
           #   2 x 300s ready                            10m
           #   runner setup, kind create, image pulls    about 5m
-          #   the fault suite itself                    up to 45m
+          #   the fault suite, worst case               up to 50m
           #   teardown and the diagnostics dump         about 5m
           #                                            -----
-          #                                             89m   against 90m
+          #                                             94m   against 100m
           #
-          # The suite's own -timeout is 90m, deliberately above the job's: a
-          # job killed by the runner uploads its diagnostics through the
-          # cancelled() condition below, where a Go test that panicked on its
-          # own timeout has already left the lane in whatever state it was in.
+          # The 50 minutes is what the suite's own -timeout allows and not what
+          # it takes: eight injections, each waiting at most 2 minutes for a
+          # finding to appear and 3 for it to clear, against a measured worst
+          # case of 11 seconds and 58 seconds on a t4 lane. A healthy run is
+          # four minutes.
+          #
+          # The job's timeout is above the suite's on purpose. A Go test that
+          # hits its own timeout panics and prints every goroutine, which names
+          # the wait that hung; a job killed by the runner first prints
+          # nothing, and the lane is gone by the time anyone looks.
           MOKKA_HELM_TIMEOUT: 12m
           MOKKA_READY_TIMEOUT: "300"
         run: make e2e-faults

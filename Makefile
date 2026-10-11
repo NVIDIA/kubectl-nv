@@ -284,6 +284,42 @@ e2e-mig: build
 	fi; \
 	exit $$rc
 
+# The shell harnesses
+# ---------------------------------------------------------------------------
+#
+# Every hack/ and test/e2e harness that is a shell script, in one target, so
+# that CI runs them. They were developer-run until 2026-10-11, which meant the
+# lane scripts, the ones that write to live clusters, were the only code in the
+# tree whose tests nothing enforced.
+#
+# Discovered rather than listed. A list drifts: a harness added next to a new
+# lane script is exactly the one a hand-maintained list forgets, and the
+# forgetting is silent. The count guard is what stops the other failure mode,
+# an expression that matches nothing and reports success over an empty set.
+SCRIPT_TEST_MIN ?= 4
+
+.PHONY: test-scripts
+test-scripts:
+	@set -u; \
+	harnesses="$$(find hack test/e2e -type f -name '*_test.sh' | sort)"; \
+	count="$$(printf '%s\n' "$$harnesses" | grep -c . || true)"; \
+	if [ "$$count" -lt $(SCRIPT_TEST_MIN) ]; then \
+	    printf 'make test-scripts: found %s harness(es), expected at least %s\n' \
+	        "$$count" "$(SCRIPT_TEST_MIN)" >&2; \
+	    printf 'make test-scripts: either the tree lost some, or this target stopped finding them\n' >&2; \
+	    exit 1; \
+	fi; \
+	rc=0; \
+	for harness in $$harnesses; do \
+	    printf '==> %s\n' "$$harness"; \
+	    if ! "$$harness"; then \
+	        rc=1; \
+	        printf 'make test-scripts: %s FAILED\n' "$$harness" >&2; \
+	    fi; \
+	done; \
+	exit $$rc
+
+# ---------------------------------------------------------------------------
 # The faults lane
 # ---------------------------------------------------------------------------
 #
@@ -298,51 +334,72 @@ e2e-mig: build
 # fault tests are behind "e2e && faults" and the healthy gate behind "e2e"
 # alone, so `make e2e-mokka` cannot compile an injection even if it were
 # pointed at this lane by hand.
-#
-# The suite's own timeout is longer than e2e-mokka's. Sixteen injections, each
-# waiting for an operator reconcile or a kubelet status update to take hold and
-# again for it to clear, is a different order of wall clock from one gather.
 .PHONY: e2e-faults
 
 FAULTS_LANE ?= faults
 FAULTS_PROFILE ?= t4
-FAULTS_FLAGS ?= -tags e2e,faults -count=1 -timeout 90m
+# 50 minutes, against a suite that takes four when it works. Eight injections
+# wait at most 2 minutes each for a finding to appear and 3 for it to clear, so
+# the worst case the polls can reach is 40 minutes plus the rest of the e2e
+# suite; a Go timeout above the job's own would be a timeout that never fires,
+# and the run would be killed by the runner with no test output at all.
+FAULTS_FLAGS ?= -tags e2e,faults -count=1 -timeout 50m
 FAULTS_CLUSTER := kubectl-nv-$(FAULTS_LANE)
 FAULTS_CONTEXT := kind-$(FAULTS_CLUSTER)
 FAULTS_KUBECONFIG := $(MOKKA_BIN_DIR)/kubeconfig-$(FAULTS_LANE)
 FAULTS_DIAG_DIR ?= $(CURDIR)/bin/e2e-diagnostics-$(FAULTS_LANE)
+# Where hack/mokka/faults keeps what it saved before it broke something. It is
+# per cluster, and a cluster of this name that existed yesterday is not this
+# one: the state is dropped as the lane comes up, so a run that was killed
+# before its recover cannot hand stale values to the next one.
+FAULTS_STATE_DIR := $(MOKKA_BIN_DIR)/faults-state/$(FAULTS_CLUSTER)
 
 # The same shape as e2e-mokka, down to the exit 4 case: a lane of that name
 # that was already there belongs to somebody else and is neither dumped nor
 # deleted.
+#
+# The diagnostics are a function rather than a tail of the recipe, and the
+# signal traps call it. A run cancelled by CI or by Ctrl-C is exactly when the
+# dump is worth having, and a dump that only ran on the failure path never ran
+# for either. It is POSIX sh, because make runs recipes under /bin/sh, which is
+# dash on the runners: no local, no [[, no arrays.
 e2e-faults: build
 	@set -u; \
 	export MOKKA_BIN_DIR="$(MOKKA_BIN_DIR)"; \
-	hack/mokka/up.sh $(FAULTS_LANE) $(FAULTS_PROFILE); up=$$?; \
-	if [ $$up -eq 4 ]; then \
-	    printf 'e2e-faults: %s already exists and was not created here; nothing touched\n' "$(FAULTS_CLUSTER)" >&2; \
-	    exit 4; \
-	fi; \
-	trap 'exit 130' INT; \
-	trap 'exit 143' TERM; \
-	trap 'hack/mokka/down.sh $(FAULTS_LANE) || printf "e2e-faults: down.sh failed; cluster %s may still be up\n" "$(FAULTS_CLUSTER)" >&2' EXIT; \
-	rc=$$up; \
-	if [ $$rc -eq 0 ]; then \
-	    KUBECONFIG=$(FAULTS_KUBECONFIG) \
-	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
-	        $(GO_CMD) test $(FAULTS_FLAGS) ./test/e2e/...; \
-	    rc=$$?; \
-	fi; \
-	if [ $$rc -ne 0 ]; then \
+	dumped=0; \
+	dump() { \
+	    if [ "$$dumped" -ne 0 ]; then return 0; fi; \
+	    dumped=1; \
 	    mkdir -p $(FAULTS_DIAG_DIR); \
 	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
 	        get pods -A -o wide > $(FAULTS_DIAG_DIR)/pods.txt 2>&1 || true; \
 	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
 	        get nodes -o yaml > $(FAULTS_DIAG_DIR)/nodes.yaml 2>&1 || true; \
 	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
+	        get clusterpolicies.nvidia.com -o yaml > $(FAULTS_DIAG_DIR)/clusterpolicy.yaml 2>&1 || true; \
+	    kubectl --kubeconfig $(FAULTS_KUBECONFIG) --context $(FAULTS_CONTEXT) \
 	        get events -A --sort-by=.lastTimestamp > $(FAULTS_DIAG_DIR)/events.txt 2>&1 || true; \
+	    cp -R $(FAULTS_STATE_DIR) $(FAULTS_DIAG_DIR)/faults-state 2>/dev/null || true; \
 	    kind export logs $(FAULTS_DIAG_DIR)/kind --name $(FAULTS_CLUSTER) \
 	        > $(FAULTS_DIAG_DIR)/kind-export.txt 2>&1 || true; \
 	    printf 'e2e-faults: diagnostics in %s\n' "$(FAULTS_DIAG_DIR)" >&2; \
+	}; \
+	hack/mokka/up.sh $(FAULTS_LANE) $(FAULTS_PROFILE); up=$$?; \
+	if [ $$up -eq 4 ]; then \
+	    printf 'e2e-faults: %s already exists and was not created here; nothing touched\n' "$(FAULTS_CLUSTER)" >&2; \
+	    exit 4; \
 	fi; \
+	trap 'dump; exit 130' INT; \
+	trap 'dump; exit 143' TERM; \
+	trap 'hack/mokka/down.sh $(FAULTS_LANE) || printf "e2e-faults: down.sh failed; cluster %s may still be up\n" "$(FAULTS_CLUSTER)" >&2' EXIT; \
+	rc=$$up; \
+	if [ $$rc -eq 0 ]; then \
+	    rm -rf $(FAULTS_STATE_DIR); \
+	    KUBECONFIG=$(FAULTS_KUBECONFIG) \
+	    KUBECTL_NV_BIN=$(CURDIR)/bin/$(BINARY_NAME) \
+	    MOKKA_PROFILE=$(FAULTS_PROFILE) \
+	        $(GO_CMD) test $(FAULTS_FLAGS) ./test/e2e/...; \
+	    rc=$$?; \
+	fi; \
+	if [ $$rc -ne 0 ]; then dump; fi; \
 	exit $$rc
