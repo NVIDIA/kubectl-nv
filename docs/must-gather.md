@@ -11,31 +11,60 @@ default location is under `/tmp`, where every account on the machine can look.
 ## Flags
 
 - `--artifacts-dir <dir>`: where the bundle goes. Defaults to
-  `/tmp/nvidia-gpu-operator_<timestamp>`, the same name the gpu-operator
-  script uses, or to `$ARTIFACT_DIR` when that is set.
+  `/tmp/nvidia-gpu-operator_<timestamp>_<suffix>`, the gpu-operator script's
+  name with seconds and a short random suffix so two runs a minute apart do not
+  share a directory, or to `$ARTIFACT_DIR` when that is set. A directory that
+  already holds something is refused with exit 2 and left alone: mixing two
+  runs produces a bundle nothing can take apart afterwards, because the
+  manifest indexes both runs' files and its digests check out.
 - `--node <name>`: collect one node instead of the whole cluster. The node
   object, the operand pods on it, their logs, its bug report and its device
   usage are collected; the cluster-scoped resources are collected either way,
   because a node's state cannot be read without them. A node that carries no
   NVIDIA PCI label leaves the `gpu_nodes` files out of the bundle, with the
-  reason in the manifest; the rest is still collected.
+  reason in the manifest; the rest is still collected. A name the cluster does
+  not have is a usage error, exit 2, rather than a bundle that looks complete
+  and says nothing about any node.
+
+  Three collectors stay cluster-wide under `--node`, because narrowing them
+  would remove what the node's state has to be read against: the cluster-scoped
+  resources (ClusterPolicy, NVIDIADriver, GPUCluster, DeviceClass,
+  HyperConverged, KubeVirt), the GPU operator pod and its logs, which are one
+  pod's record of what the operator did to every node, and the operand
+  daemonsets, which say what was supposed to be running on the node.
 - `--since <duration>`: only collect container logs newer than this, for
   instance `2h` or `30m`. The window is not applied to the previous log of a
   container: that log ended when the container died, so a window measured from
   now would empty exactly the file a crash loop is diagnosed from.
 - `--no-exec`: never run a command inside a driver pod. The bug report and the
   device usage are skipped and recorded as such.
+- `--exec-timeout <duration>`: how long one command inside a driver pod, or one
+  copy out of it, may take. Defaults to 2m. A pod that accepts the connection
+  and never answers then costs one artifact rather than the whole bundle; it is
+  recorded as `error:timeout after <duration>` and the gather moves on.
+
+`--since` and `--exec-timeout` are rejected below one second, exit 2: a window
+that short collects nothing and a deadline that short cannot finish a bug
+report.
 
 ## Exit codes
 
 - `0`: the gather ran. Collectors skipped by `--no-exec`, or because the
   cluster does not have what they collect, are a complete run.
-- `3`: the gather ran but could not do part of what was asked. The common case
-  is RBAC refusing `pods/exec`, which leaves the bundle without the driver
-  evidence support reads first. The error names the collectors that were
-  skipped.
+- `2`: the command line was wrong. A `--node` the cluster does not have, a
+  window below a second, or an artifact directory that already holds a bundle.
+- `3`: the gather ran but could not do part of what was asked. The common cases
+  are RBAC refusing `pods/exec`, which leaves the bundle without the driver
+  evidence support reads first, and a collector that failed while the others
+  succeeded. The error names them.
 - `4`: nothing could be collected, so the bundle says nothing about the
-  cluster.
+  cluster. The `.missing` markers do not count as something collected: a bundle
+  holding only those has reached the cluster and found nothing.
+
+One collector failing does not stop the rest. Its entry in the manifest carries
+`error:<text>` and everything behind it is still collected, because a bundle
+that stops at the first refused list is a bundle missing evidence nobody asked
+it to leave out.
 
 Being told no and asking for no are different outcomes on purpose. A script
 that files an exec-denied bundle as a complete one files an unanswerable
@@ -90,7 +119,7 @@ engineer opening a bundle.
 | (no equivalent) | `nvidia_driver.missing` | holds the reason |
 | `gpu_cluster.yaml` | `gpu_cluster.yaml` | when the CRD exists |
 | `deviceclasses.yaml` | `deviceclasses.yaml` | when the CRD exists |
-| `resourceslices-<driver>.yaml` | `resourceslices.yaml` | one file, NVIDIA's slices |
+| `resourceslices-<driver>.yaml` | `resourceslices.yaml` | one file, both NVIDIA drivers |
 | `all_machines.list` | `machines.yaml` | OpenShift only, YAML not a list |
 | `gpu_nodes.labels` | `gpu_nodes.labels` | |
 | `gpu_nodes.status` | `gpu_nodes.status` | |
@@ -127,7 +156,13 @@ bundle the logs of the containers behind it. The per-line
 
 The script writes one `resourceslices-<driver>.yaml` per NVIDIA DRA driver.
 kubectl-nv writes one `resourceslices.yaml` holding the slices published under
-`gpu.nvidia.com`, which is what Track B chose.
+both of them: `gpu.nvidia.com` for the GPUs and `compute-domain.nvidia.com` for
+the compute domains, which is how IMEX is allocated across a fabric.
+
+The version of `resource.k8s.io` is discovered rather than pinned. The group
+has been through `v1beta1`, `v1beta2` and `v1` in four releases, so a client
+fixed at one of them reports a cluster that is using DRA as not having it. Only
+a cluster serving none of them has no DRA.
 
 `machines.yaml` is YAML where the script's `all_machines.list` is the plain
 table `kubectl get machines` prints. The rest of the bundle is YAML a reader
@@ -146,11 +181,16 @@ reader reaches straight for its `.spec`. `nvidia_driver.yaml` is a list, as
 the script's `kubectl get nvidiadrivers.nvidia.com -A -oyaml` produces,
 because a cluster can run more than one NVIDIADriver.
 
-`.status` and `.descr` files are rendered in process rather than by shelling
-out to kubectl. A `.status` is the column set `kubectl get -o wide` prints,
-built over the typed client; a `.descr` comes from the describers in
-`k8s.io/kubectl/pkg/describe`, which is the same code `kubectl describe` runs.
-Neither needs kubectl on the machine the gather runs from.
+`.status` and `.descr` files are produced in process rather than by shelling
+out to kubectl. The pod `.status` files are the Table the API server itself
+renders, which is what `kubectl get -o wide` prints: the server knows pod
+states that cannot be re-derived correctly from the objects alone, so an init
+container in a crash loop reads `Init:CrashLoopBackOff` rather than `Pending`.
+A server that will not serve a Table falls back to a local renderer with the
+same columns, because an empty `.status` is worse. A `.descr` comes from the
+describers in `k8s.io/kubectl/pkg/describe`, which is the same code
+`kubectl describe` runs. Neither needs kubectl on the machine the gather runs
+from.
 
 The GPU nodes of `gpu_nodes.status` and `gpu_nodes.descr` are the nodes
 carrying an NVIDIA PCI label, the same set as `gpu_nodes.labels` and
@@ -162,12 +202,15 @@ script writes two empty files for nodes it has just listed in a third.
 ## Driver pods
 
 The bug report and the device usage are collected from the driver pods, found
-under all four labels the script uses:
+under four labels. Three are the ones the gpu-operator script uses (lines 337
+to 339); the fourth is kubectl-nv's own and predates this work:
 
-- `app=nvidia-driver-daemonset`, the operator's own driver daemonset
 - `app.kubernetes.io/component=nvidia-driver`, the form newer charts use
-- `app=nvidia-vgpu-manager-daemonset`, the vGPU manager
-- `openshift.driver-toolkit`, the OpenShift driver toolkit
+  (script)
+- `app=nvidia-vgpu-manager-daemonset`, the vGPU manager (script)
+- `openshift.driver-toolkit`, the OpenShift driver toolkit (script)
+- `app=nvidia-driver-daemonset`, the operator's own driver daemonset, which
+  kubectl-nv has always looked under and the script does not
 
 A pod carrying more than one of them is collected once. The command runs in
 the container named by the pod's `kubectl.kubernetes.io/default-container`
@@ -185,4 +228,10 @@ A cluster with no driver pod at all, which is what the Mokka lane is and what
 `driver.enabled=false` gives anywhere, is a complete gather. The collector is
 recorded `skipped:no driver pods` and the gather says so on its error stream,
 so that a bundle with no `nvidia-bug-report` file is not mistaken for one
-whose collector failed.
+whose collector failed. Driver pods that are all there and none of which can be
+asked, because every one is pending, is recorded `skipped:no driver pod could
+be reached` instead: that is a different cluster.
+
+Being refused the exec is different again. An exec is an HTTP upgrade, so a
+denial fails the upgrade before any status is decoded and arrives as plain
+text; it is recognised all the same, recorded `skipped:forbidden`, and exits 3.

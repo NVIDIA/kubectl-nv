@@ -29,10 +29,13 @@ import (
 )
 
 // driverLabels are the four selectors a driver pod can carry. Each one is a
-// different way of installing the driver: the operator's own daemonset, the
-// app.kubernetes.io form newer charts use, the vGPU manager, and the OpenShift
-// driver toolkit. Dropping any one of them loses the bug report of every
-// cluster installed that way, and the bundle says nothing about it.
+// different way of installing the driver, and dropping any one of them loses
+// the bug report of every cluster installed that way with nothing in the
+// bundle to say so.
+//
+// Three are the ones the gpu-operator script uses, at lines 337 to 339 of
+// hack/must-gather.sh. The fourth, app=nvidia-driver-daemonset, is kubectl-nv's
+// own: the script does not look under it, and this plugin always has.
 var driverLabels = []string{
 	"app=nvidia-driver-daemonset",
 	"app.kubernetes.io/component=nvidia-driver",
