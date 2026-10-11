@@ -971,6 +971,55 @@ fi
 unset FAKE_KIND_CLUSTERS
 
 # ---------------------------------------------------------------------------
+# The kind topology
+# ---------------------------------------------------------------------------
+#
+# The scale lane needs a wider pod subnet than kind's default, which is a
+# topology change and so a different config file, not a flag. Everything else
+# keeps the file it has always used.
+
+reset_fixtures
+run_subject "${UP}" t1 t4
+assert_logged "--config ${SCRIPT_DIR}/kind-mokka.yaml" "up.sh defaults to kind-mokka.yaml"
+
+reset_fixtures
+MOKKA_KIND_CONFIG="kind-scale.yaml" run_subject "${UP}" t1 t4
+assert_logged "--config ${SCRIPT_DIR}/kind-scale.yaml" "a bare name resolves next to the script"
+assert_not_logged "--config ${SCRIPT_DIR}/kind-mokka.yaml" "the override replaces the default rather than adding to it"
+
+reset_fixtures
+printf 'kind: Cluster\n' > "${WORK}/elsewhere.yaml"
+MOKKA_KIND_CONFIG="${WORK}/elsewhere.yaml" run_subject "${UP}" t1 t4
+assert_logged "--config ${WORK}/elsewhere.yaml" "a path is taken as given"
+
+# A misspelled override must not fall back to the default: the lane that came
+# up would be the wrong topology, and nothing downstream would say so.
+reset_fixtures
+MOKKA_KIND_CONFIG="${WORK}/there-is-no-such-file.yaml" run_subject "${UP}" t1 t4
+assert_rc 2 "a kind config that does not exist"
+assert_says "kind config not found" "the missing config is named"
+assert_not_logged "create cluster" "a missing kind config creates nothing"
+
+# The file the scale lane actually points at has to be there and has to carry
+# the wider subnet, or the override is pointing at a topology nobody checked.
+if [ -f "${SCRIPT_DIR}/kind-scale.yaml" ]; then
+    ok "kind-scale.yaml exists"
+    if grep -q 'podSubnet: "10.240.0.0/12"' "${SCRIPT_DIR}/kind-scale.yaml"; then
+        ok "kind-scale.yaml widens the pod subnet to 10.240.0.0/12"
+    else
+        nope "kind-scale.yaml does not set podSubnet to 10.240.0.0/12" \
+            "$(grep -n 'podSubnet' "${SCRIPT_DIR}/kind-scale.yaml" || echo '  no podSubnet line at all')"
+    fi
+    if grep -q 'role: worker' "${SCRIPT_DIR}/kind-scale.yaml"; then
+        ok "kind-scale.yaml still asks for workers"
+    else
+        nope "kind-scale.yaml has no worker nodes"
+    fi
+else
+    nope "kind-scale.yaml is missing, so MOKKA_KIND_CONFIG has nothing to point at"
+fi
+
+# ---------------------------------------------------------------------------
 # Static analysis of the scripts under test
 # ---------------------------------------------------------------------------
 #

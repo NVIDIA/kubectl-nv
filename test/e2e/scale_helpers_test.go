@@ -26,6 +26,11 @@ package e2e
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -380,4 +385,353 @@ func TestCountAtPathRejectsNonJSON(t *testing.T) {
 	if !errors.As(err, &syntax) {
 		t.Errorf("error = %v (%T), want it to wrap a *json.SyntaxError", err, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// assessList
+// ---------------------------------------------------------------------------
+//
+// The cases here are the ones a reviewer drove a fake binary through. Each one
+// is an answer that is wrong and fast, which is the only kind of wrong answer
+// a timing suite is tempted to accept.
+
+// listOf renders a GPUNodeList naming exactly these nodes.
+func listOf(names ...string) []byte {
+	items := make([]string, 0, len(names))
+	for _, n := range names {
+		items = append(items, `{"metadata":{"name":"`+n+`"}}`)
+	}
+
+	return []byte(`{"kind":"GPUNodeList","items":[` + strings.Join(items, ",") + `]}`)
+}
+
+// fakeAndReal is a lane of n fake nodes plus the two workers, in the order
+// the binary sorts them.
+func fakeAndReal(n int) []byte {
+	names := []string{"kubectl-nv-scale-worker", "kubectl-nv-scale-worker2"}
+	for i := 1; i <= n; i++ {
+		names = append(names, fmt.Sprintf("kwok-gpu-%d", i))
+	}
+
+	return listOf(names...)
+}
+
+func TestAssessListAcceptsTheLane(t *testing.T) {
+	t.Parallel()
+
+	census, err := assessList(fakeAndReal(20), 20, 2)
+	if err != nil {
+		t.Fatalf("assessList on a correct lane: %v", err)
+	}
+	if census.Fake != 20 || census.Real != 2 || census.Total != 22 {
+		t.Errorf("census = %+v, want {Fake:20 Real:2 Total:22}", census)
+	}
+}
+
+func TestAssessListRejectsAWrongLane(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		raw  []byte
+		want string
+	}{
+		{
+			// The empty run. Instant, and the fastest number this suite
+			// would ever record.
+			"no nodes at all",
+			listOf(),
+			"list is missing 3 of the 3 fake nodes: kwok-gpu-1, kwok-gpu-2, kwok-gpu-3",
+		},
+		{
+			// The count is right and the lane is not: kwok-gpu-1 twice,
+			// kwok-gpu-3 gone. A test that only counted would pass here.
+			"one node named twice and another missing",
+			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-1", "kwok-gpu-2"),
+			"list named 1 node(s) more than once: kwok-gpu-1 (2 times)",
+		},
+		{
+			"a fake node missing",
+			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1", "kwok-gpu-2"),
+			"list is missing 1 of the 3 fake nodes: kwok-gpu-3",
+		},
+		{
+			// Every expected node is there, and one more besides: a lane
+			// that was created twice at different counts and deleted once.
+			"a fake node from outside the range",
+			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2",
+				"kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3", "kwok-gpu-9"),
+			"list names 1 node(s) outside kwok-gpu-1..3: kwok-gpu-9",
+		},
+		{
+			// A lane that lost a worker. "At least one real node" passes
+			// here; an equality does not.
+			"a worker gone",
+			listOf("kubectl-nv-scale-worker", "kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3"),
+			"list names 1 node(s) that are not kwok-gpu-*, want exactly 2",
+		},
+		{
+			"a node that should not be there at all",
+			listOf("kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "somebody-elses-node",
+				"kwok-gpu-1", "kwok-gpu-2", "kwok-gpu-3"),
+			"list names 3 node(s) that are not kwok-gpu-*, want exactly 2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := assessList(tc.raw, 3, 2)
+			if err == nil {
+				t.Fatalf("assessList accepted it; want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("error = %q, want %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestAssessListCapsALongNameList(t *testing.T) {
+	t.Parallel()
+
+	// A 2,000 node lane that answered empty must not print 2,000 names.
+	_, err := assessList(listOf(), 2000, 2)
+	if err == nil {
+		t.Fatal("assessList accepted an empty 2,000 node lane")
+	}
+	const want = "list is missing 2000 of the 2000 fake nodes: kwok-gpu-1, kwok-gpu-10, kwok-gpu-100, kwok-gpu-1000, kwok-gpu-1001 and 1995 more"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// assessRuns
+// ---------------------------------------------------------------------------
+
+func TestAssessRunsWithinTheThreshold(t *testing.T) {
+	t.Parallel()
+
+	stats, err := assessRuns([]time.Duration{4 * time.Second, 2 * time.Second, 3 * time.Second}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("assessRuns under the threshold: %v", err)
+	}
+	if stats.Median != 3*time.Second {
+		t.Errorf("Median = %v, want 3s", stats.Median)
+	}
+	if stats.Max != 4*time.Second {
+		t.Errorf("Max = %v, want 4s", stats.Max)
+	}
+	if !stats.Within {
+		t.Error("Within = false, want true")
+	}
+}
+
+func TestAssessRunsOverTheThreshold(t *testing.T) {
+	t.Parallel()
+
+	// The median decides, not the max: 6s, 7s, 8s is over a 5s threshold on
+	// every statistic, so a comparison that was silently dropped shows up.
+	stats, err := assessRuns([]time.Duration{6 * time.Second, 7 * time.Second, 8 * time.Second}, 5*time.Second)
+	if err == nil {
+		t.Fatal("assessRuns accepted a median over the threshold")
+	}
+	const want = "median 7s over 3 runs, want at most 5s (runs: [6s 7s 8s])"
+	if err.Error() != want {
+		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	// Within travels into the uploaded report, so a false error with a true
+	// flag would still tell a reader the run was fine.
+	if stats.Within {
+		t.Error("Within = true beside an error, want false")
+	}
+}
+
+func TestAssessRunsOnTheThresholdExactly(t *testing.T) {
+	t.Parallel()
+
+	// The threshold is a limit, not a wall to stay under: exactly 5s passes.
+	stats, err := assessRuns([]time.Duration{5 * time.Second}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("assessRuns at exactly the threshold: %v", err)
+	}
+	if !stats.Within {
+		t.Error("Within = false at exactly the threshold, want true")
+	}
+}
+
+func TestAssessRunsRejectsNoRuns(t *testing.T) {
+	t.Parallel()
+
+	// A command that was never run is not a command that was instant.
+	_, err := assessRuns(nil, 5*time.Second)
+	if err == nil {
+		t.Fatal("assessRuns accepted an empty set of runs")
+	}
+	if err.Error() != "no runs were measured" {
+		t.Errorf("error = %q, want %q", err.Error(), "no runs were measured")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The report
+// ---------------------------------------------------------------------------
+
+func TestScaleReportRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := filepath.Join(t.TempDir(), "diagnostics", "nested")
+	want := scaleReport{
+		RecordedAt:      "2026-10-11T12:00:00Z",
+		CommitSHA:       "0123456789abcdef",
+		Binary:          "/w/bin/kubectl-nv",
+		ExpectedFake:    2000,
+		ExpectedReal:    2,
+		FakeNodes:       2000,
+		RealNodes:       2,
+		TotalNodes:      2002,
+		PodsTotal:       6042,
+		PodsOnFakeNodes: 6000,
+		HealthNodes:     2002,
+		HealthFindings:  4000,
+		HealthCountPath: "summary.nodesChecked",
+		Timings: []commandTiming{{
+			Command:     "[list -o json]",
+			Runs:        []commandRun{{DurationMS: 1200, ExitCode: 0, StdoutLen: 99}},
+			MedianMS:    1200,
+			MaxMS:       1300,
+			ThresholdMS: 5000,
+			Within:      true,
+		}},
+	}
+
+	// The directory does not exist yet: the workflow uploads whatever is at
+	// this path, and a suite that needed somebody to have made it first would
+	// upload nothing on the one run where it mattered.
+	if err := writeScaleReport(dir, want); err != nil {
+		t.Fatalf("writeScaleReport: %v", err)
+	}
+
+	got, err := readScaleReport(dir)
+	if err != nil {
+		t.Fatalf("reading back what was written: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip changed the report:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestScaleReportIsValidJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := writeScaleReport(dir, scaleReport{ExpectedFake: 20}); err != nil {
+		t.Fatalf("writeScaleReport: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, reportFile))
+	if err != nil {
+		t.Fatalf("reading the report: %v", err)
+	}
+	// The workflow uploads this for a person and for whatever reads it next.
+	if !json.Valid(raw) {
+		t.Errorf("the report is not valid JSON:\n%s", raw)
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		t.Error("the report does not end with a newline")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The exit codes a measured run may have
+// ---------------------------------------------------------------------------
+
+func TestExitCodePolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name    string
+		allowed []int
+		code    int
+		want    bool
+	}{
+		{"list succeeded", listExitCodes, 0, true},
+		// The lane kubeconfig is a cluster-admin on a kind cluster. A partial
+		// read is not a slow lane, it is a defect, and timing it is timing a
+		// command that answered with less than the lane holds.
+		{"list read only part of the cluster", listExitCodes, 3, false},
+		{"list hit a usage error", listExitCodes, 2, false},
+		{"list could not reach the cluster", listExitCodes, 4, false},
+		{"list found findings, which it cannot", listExitCodes, 1, false},
+		{"health was clean", healthExitCodes, 0, true},
+		// Fake nodes carry no operands, so the operand rules fire and health
+		// exits 1 on every run of this lane.
+		{"health found findings", healthExitCodes, 1, true},
+		{"health read only part of the cluster", healthExitCodes, 3, false},
+		{"health could not reach the cluster", healthExitCodes, 4, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := allows(tc.allowed, tc.code); got != tc.want {
+				t.Errorf("allows(%v, %d) = %v, want %v", tc.allowed, tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheReviewersFakeBinaryIsRejected replays the three answers a reviewer's
+// fake binary gave that this suite used to accept. Each is fast and wrong,
+// which is the pairing a timing suite exists to be suspicious of.
+func TestTheReviewersFakeBinaryIsRejected(t *testing.T) {
+	t.Parallel()
+
+	const fake, real = 20, 2
+
+	t.Run("two empty runs and one full run", func(t *testing.T) {
+		t.Parallel()
+
+		// Checking only the last run passes this: the full list is last and
+		// the median is whatever two instant runs make it.
+		runs := [][]byte{listOf(), listOf(), fakeAndReal(fake)}
+		rejected := 0
+		for i, raw := range runs {
+			if _, err := assessList(raw, fake, real); err != nil {
+				rejected++
+				t.Logf("run %d rejected: %v", i+1, err)
+			}
+		}
+		if rejected != 2 {
+			t.Errorf("%d of the 3 runs were rejected, want 2 (both empty ones)", rejected)
+		}
+	})
+
+	t.Run("a full list beside exit 3", func(t *testing.T) {
+		t.Parallel()
+
+		// The list itself is perfect, so no amount of looking at the nodes
+		// catches this one. The exit code is the whole signal.
+		if _, err := assessList(fakeAndReal(fake), fake, real); err != nil {
+			t.Fatalf("the list was correct, so assessList should pass it: %v", err)
+		}
+		if allows(listExitCodes, 3) {
+			t.Error("list is allowed to exit 3, so a partial read would be timed and reported as a pass")
+		}
+	})
+
+	t.Run("one node listed twice and another missing", func(t *testing.T) {
+		t.Parallel()
+
+		// 22 names, the right total, the wrong lane.
+		names := []string{"kubectl-nv-scale-worker", "kubectl-nv-scale-worker2", "kwok-gpu-1"}
+		for i := 1; i <= fake-1; i++ {
+			names = append(names, fmt.Sprintf("kwok-gpu-%d", i))
+		}
+		raw := listOf(names...)
+
+		census, err := assessList(raw, fake, real)
+		if err == nil {
+			t.Fatalf("assessList accepted a lane with kwok-gpu-1 twice and kwok-gpu-%d missing (census %+v)", fake, census)
+		}
+		t.Logf("rejected: %v", err)
+	})
 }

@@ -1,0 +1,35 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind topology for the scale lane: kind-mokka.yaml, with room in the pod
+# network for two thousand fake nodes.
+#
+# The node IPAM controller hands every node a /24 out of the cluster's pod
+# subnet, including a KWOK node that will never run a real pod. kind's default
+# podSubnet is 10.244.0.0/16, which is 256 of those, so a lane stops being able
+# to admit nodes somewhere around the 253rd and the ones after it come up
+# without a spec.podCIDR. hack/mokka/kwok-nodes.sh fails when that happens
+# rather than reporting a lane it did not build.
+#
+# 10.240.0.0/12 is 4,096 /24s, which covers the 2,000 node lane with room to
+# spare, and stays inside RFC 1918 and clear of 10.96.0.0/12, the default
+# service subnet.
+#
+# Everything else is kind-mokka.yaml verbatim, including the NRI patch, which
+# has to be set before a node starts. The two files are deliberately separate
+# rather than one file plus a patch: a reader of either one can see the whole
+# topology without holding the other in their head.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  podSubnet: "10.240.0.0/12"
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.nri.v1.nri"]
+      disable = false
+      disable_connections = false
+      socket_path = "/var/run/nri/nri.sock"
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

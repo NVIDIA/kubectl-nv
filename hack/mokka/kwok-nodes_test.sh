@@ -92,6 +92,42 @@ case "${args}" in
         exit "${FAKE_KUBECTL_APPLY_RC:-0}"
         ;;
     *"get nodes"*)
+        # Every node query the subject makes has to carry the ownership label
+        # selector. Without it the answer would be the whole cluster, the real
+        # workers included, and a subject that dropped the selector would read
+        # a count that happened to be right and act on the wrong nodes.
+        case "${args}" in
+            *"--selector kubectl-nv.nvidia.com/kwok-node=true"*) ;;
+            *)
+                echo 'shim: get nodes without the ownership selector' >&2
+                exit 1
+                ;;
+        esac
+        n=1
+        case "${args}" in
+            *podCIDR*)
+                # The pod CIDR query: one line per node, name and CIDR. An
+                # empty FAKE_POD_CIDR is a node the IPAM controller had no
+                # room left for.
+                while [ "${n}" -le "${FAKE_READY_COUNT:-0}" ]; do
+                    if [ "${n}" -le "${FAKE_NO_CIDR_NODES:-0}" ]; then
+                        printf 'kwok-gpu-%s \n' "${n}"
+                    else
+                        printf 'kwok-gpu-%s %s\n' "${n}" "${FAKE_POD_CIDR:-10.240.0.0/24}"
+                    fi
+                    n=$((n + 1))
+                done
+                exit 0
+                ;;
+            *"-o name"*)
+                # The census of nodes this script already owns.
+                while [ "${n}" -le "${FAKE_EXISTING_COUNT:-0}" ]; do
+                    printf 'node/kwok-gpu-%s\n' "${n}"
+                    n=$((n + 1))
+                done
+                exit 0
+                ;;
+        esac
         # The readiness query. Each line is one fake node: its allocatable GPU
         # count and its Ready condition.
         n=0
@@ -100,6 +136,18 @@ case "${args}" in
             n=$((n + 1))
         done
         exit 0
+        ;;
+    *"config view"*)
+        printf '%s' "${FAKE_SERVER-https://127.0.0.1:6443}"
+        exit 0
+        ;;
+    *"get stage"*)
+        if [ "${FAKE_KWOK_STAGES:-1}" = "1" ]; then
+            echo "stage.kwok.x-k8s.io/node-initialize"
+            exit 0
+        fi
+        echo 'Error from server (NotFound): stages.kwok.x-k8s.io "node-initialize" not found' >&2
+        exit 1
         ;;
 esac
 exit "${FAKE_KUBECTL_RC:-0}"
@@ -196,6 +244,19 @@ applied() {
         [ -f "${f}" ] || continue
         cat "${f}"
     done
+}
+
+# objects_per_call prints the number of Node objects in each apply call, in
+# call order, space separated.
+objects_per_call() {
+    local n=1 f out=""
+    while :; do
+        f="${MOKKA_STATE_DIR}/applied-${n}.yaml"
+        [ -f "${f}" ] || break
+        out="${out}$(grep -cF 'kind: Node' "${f}" | tr -d ' ') "
+        n=$((n + 1))
+    done
+    printf '%s' "${out% }"
 }
 
 apply_calls() {
@@ -300,7 +361,9 @@ printf 'apiVersion: v1\ncurrent-context: %s\n' "${CONTEXT}" > "${MOKKA_BIN_DIR}/
 reset_fixtures() {
     unset FAKE_KWOK_INSTALLED FAKE_CORRUPT_MANIFEST FAKE_CURL_RC
     unset FAKE_KUBECTL_RC FAKE_KUBECTL_APPLY_RC FAKE_NODE_LINE
-    unset MOKKA_CONTEXT
+    unset MOKKA_CONTEXT FAKE_SERVER FAKE_POD_CIDR FAKE_NO_CIDR_NODES
+    unset FAKE_EXISTING_COUNT FAKE_KWOK_STAGES
+    unset KWOK_GPU_PRODUCT KWOK_GPU_FAMILY KWOK_GPU_MEMORY KWOK_DRIVER_VERSION
     export FAKE_MANIFEST_CACHE="${CACHE_DIR}"
     export FAKE_READY_COUNT=0
     export MOKKA_READY_TIMEOUT=2
@@ -532,6 +595,13 @@ if [ "$(apply_calls)" = "3" ]; then
 else
     nope "25 nodes in batches of 10 took $(apply_calls) apply calls, want 3"
 fi
+# The call count alone cannot tell 10/10/5 from 9/9/7: both are three calls
+# and 25 nodes. The shape of the batches is where an off-by-one lives.
+if [ "$(objects_per_call)" = "10 10 5" ]; then
+    ok "the batches are 10, 10 and 5 objects"
+else
+    nope "the batches are $(objects_per_call) objects, want 10 10 5"
+fi
 
 reset_fixtures
 export FAKE_READY_COUNT=20
@@ -541,6 +611,21 @@ if [ "$(apply_calls)" = "2" ]; then
     ok "20 nodes in batches of 10 take two apply calls"
 else
     nope "20 nodes in batches of 10 took $(apply_calls) apply calls, want 2"
+fi
+if [ "$(objects_per_call)" = "10 10" ]; then
+    ok "an exact multiple makes two full batches and no empty third"
+else
+    nope "the batches are $(objects_per_call) objects, want 10 10"
+fi
+
+# One node is the boundary at the other end: one call holding one object.
+reset_fixtures
+export FAKE_READY_COUNT=1
+KWOK_BATCH_SIZE=10 run_subject 1
+if [ "$(objects_per_call)" = "1" ]; then
+    ok "a single node is one call of one object"
+else
+    nope "a single node made batches of $(objects_per_call), want 1"
 fi
 
 # ---------------------------------------------------------------------------
@@ -566,6 +651,134 @@ run_subject 3
 assert_rc 5 "nodes that advertise GPUs but are not Ready"
 
 # ---------------------------------------------------------------------------
+# Pod CIDRs
+# ---------------------------------------------------------------------------
+#
+# The node IPAM controller gives every node a /24 out of the cluster pod
+# subnet, a KWOK node included. kind's default subnet is a /16, so it runs out
+# somewhere past 253 nodes and the ones after that come up Ready with no
+# spec.podCIDR at all. A lane that is quietly missing its last 1,700 CIDRs is
+# not a lane anybody should be timing against.
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_NO_CIDR_NODES=2
+run_subject 5
+assert_rc 5 "nodes that came up Ready with no pod CIDR"
+assert_says "2 of 5" "the failure says how many nodes have no pod CIDR"
+assert_says "podSubnet" "the failure points at the pod subnet"
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+run_subject 5
+assert_rc 0 "every node has a pod CIDR"
+
+# ---------------------------------------------------------------------------
+# The API server behind the context
+# ---------------------------------------------------------------------------
+#
+# A context is a name somebody chose, and a name can be given to any cluster.
+# A kind lane always answers on the loopback address, so that is checked too:
+# somebody who names a production context kind-kubectl-nv-scale still cannot
+# get this script to create two thousand nodes in it.
+
+reset_fixtures
+export FAKE_SERVER="https://prod.example.com:6443"
+run_subject 5
+assert_rc 7 "a lane context pointed at a server that is not loopback"
+assert_says "https://prod.example.com:6443" "the refusal names the server"
+assert_not_logged "apply -f" "a refused server applies nothing"
+
+reset_fixtures
+export FAKE_SERVER="https://10.0.0.5:6443"
+run_subject 5
+assert_rc 7 "a lane context pointed at a private address that is not loopback"
+
+reset_fixtures
+export FAKE_SERVER="http://127.0.0.1:6443"
+run_subject 5
+assert_rc 7 "a loopback server reached over plain http"
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_SERVER="https://127.0.0.1:51234"
+run_subject 5
+assert_rc 0 "a loopback server on the port kind happened to pick"
+
+# ---------------------------------------------------------------------------
+# A rerun over a lane that already has nodes
+# ---------------------------------------------------------------------------
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_EXISTING_COUNT=5
+run_subject 5
+assert_rc 0 "a rerun at the same count is allowed"
+
+# More nodes than were asked for means an earlier run at a larger count. The
+# extras are invisible to the readiness check, which only counts up to the
+# number wanted, and the suite would then measure a lane of a size nobody
+# chose.
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_EXISTING_COUNT=9
+run_subject 5
+assert_rc 2 "a rerun over more nodes than were asked for"
+assert_says "9 fake node" "the refusal says how many are already there"
+assert_says "--delete" "the refusal says how to clear them"
+assert_not_logged "apply -f -" "a refused rerun creates nothing"
+
+# ---------------------------------------------------------------------------
+# Label values
+# ---------------------------------------------------------------------------
+#
+# These go into a label, and a label value the API server rejects fails the
+# apply of a whole batch with a message about the 100th node. Checking them
+# before the first call costs nothing and names the variable.
+
+reset_fixtures
+export FAKE_READY_COUNT=1
+KWOK_GPU_PRODUCT="NVIDIA T4" run_subject 1
+assert_rc 2 "a product label with a space in it"
+assert_says "KWOK_GPU_PRODUCT" "the bad product value names its variable"
+
+reset_fixtures
+KWOK_GPU_MEMORY="lots" run_subject 1
+assert_rc 2 "a memory label that is not a number"
+
+reset_fixtures
+KWOK_GPU_FAMILY="Turing!" run_subject 1
+assert_rc 2 "a family label with a character a label cannot hold"
+
+reset_fixtures
+export FAKE_READY_COUNT=1
+KWOK_GPU_PRODUCT="NVIDIA-H100-80GB-HBM3" KWOK_GPU_FAMILY=hopper KWOK_GPU_MEMORY=81559 run_subject 1
+assert_rc 0 "a different but legitimate product, family and memory"
+assert_applied "nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3" "the overridden product reaches the label"
+
+# ---------------------------------------------------------------------------
+# KWOK is only installed once, and only when it is really there
+# ---------------------------------------------------------------------------
+#
+# The controller Deployment existing is not the same as KWOK working: the
+# Stage objects are a separate manifest and a run that applied the first and
+# died before the second leaves a lane whose nodes never go Ready.
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_KWOK_INSTALLED=1
+export FAKE_KWOK_STAGES=0
+run_subject 5
+assert_logged "apply --server-side" "a controller without its Stages is reinstalled"
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_KWOK_INSTALLED=1
+export FAKE_KWOK_STAGES=1
+run_subject 5
+assert_not_logged "apply --server-side" "a complete install is left alone"
+
+# ---------------------------------------------------------------------------
 # --delete
 # ---------------------------------------------------------------------------
 
@@ -575,6 +788,11 @@ assert_rc 0 "--delete against an installed KWOK"
 assert_logged "delete nodes --selector ${OWNER_LABEL}=true" "--delete selects exactly the nodes this script labelled"
 assert_not_logged "delete nodes --all" "--delete never asks for every node"
 assert_not_logged "apply -f -" "--delete creates nothing"
+# --wait=false means the API server has accepted the deletions, not that the
+# objects are gone. Saying "are gone" invites a rerun that then trips the
+# leftover-node check for no reason anybody can see.
+assert_says "deletion requested" "--delete says what --wait=false actually promises"
+assert_applied_count 0 "are gone" "--delete does not claim the nodes are already gone"
 
 run_subject --delete "${LANE}"
 assert_rc 0 "--delete takes the lane as its second argument"
