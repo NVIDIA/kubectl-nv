@@ -16,7 +16,9 @@ default location is under `/tmp`, where every account on the machine can look.
 - `--node <name>`: collect one node instead of the whole cluster. The node
   object, the operand pods on it, their logs, its bug report and its device
   usage are collected; the cluster-scoped resources are collected either way,
-  because a node's state cannot be read without them.
+  because a node's state cannot be read without them. A node that carries no
+  NVIDIA PCI label leaves the `gpu_nodes` files out of the bundle, with the
+  reason in the manifest; the rest is still collected.
 - `--since <duration>`: only collect container logs newer than this, for
   instance `2h` or `30m`. The window is not applied to the previous log of a
   container: that log ended when the container died, so a window measured from
