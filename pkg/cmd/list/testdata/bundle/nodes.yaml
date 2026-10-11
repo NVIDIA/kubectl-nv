@@ -1,0 +1,62 @@
+# Kubernetes-native YAML, the shape "kubectl get nodes -o yaml" prints and
+# must-gather writes: json field names, and quantities as the strings the API
+# serves.
+apiVersion: v1
+kind: List
+metadata:
+  resourceVersion: ""
+items:
+- apiVersion: v1
+  kind: Node
+  metadata:
+    name: worker-t4
+    labels:
+      kubernetes.io/os: linux
+      nvidia.com/gpu.present: "true"
+      nvidia.com/gpu.product: NVIDIA-T4
+      nvidia.com/gpu.count: "4"
+      nvidia.com/cuda.driver-version.full: 550.107.02
+      nvidia.com/cuda.runtime-version.full: "12.5"
+  spec: {}
+  status:
+    capacity:
+      cpu: "64"
+      nvidia.com/gpu: "4"
+    allocatable:
+      cpu: "64"
+      nvidia.com/gpu: "4"
+    conditions:
+    - type: Ready
+      status: "True"
+- apiVersion: v1
+  kind: Node
+  metadata:
+    name: worker-dra
+    labels:
+      kubernetes.io/os: linux
+  spec: {}
+  status:
+    capacity:
+      cpu: "64"
+    allocatable:
+      cpu: "64"
+    conditions:
+    - type: Ready
+      status: "True"
+- apiVersion: v1
+  kind: Node
+  metadata:
+    name: control-plane-1
+    labels:
+      kubernetes.io/os: linux
+      node-role.kubernetes.io/control-plane: ""
+      feature.node.kubernetes.io/pci-10de.present: "true"
+  spec: {}
+  status:
+    capacity:
+      cpu: "16"
+    allocatable:
+      cpu: "16"
+    conditions:
+    - type: Ready
+      status: "True"
