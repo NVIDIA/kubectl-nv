@@ -598,3 +598,39 @@ func TestAnUnknownPropertyIsRefused(t *testing.T) {
 		t.Errorf("refusal is %q, want exactly %q", refusal(t, result), want)
 	}
 }
+
+// The hint a client reads is the one the server published, not the field on
+// the Tool struct behind it. A model plans around readOnlyHint, so a host
+// writing tool announced as read-only is a lie it acts on.
+func TestThePublishedReadOnlyHintMatchesWhatTheToolDoes(t *testing.T) {
+	t.Parallel()
+
+	session := connect(t, testTree)
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listing the tools: %v", err)
+	}
+	if len(listed.Tools) == 0 {
+		t.Fatal("the server offered no tools")
+	}
+
+	var sawWriter bool
+	for _, tool := range listed.Tools {
+		if tool.Annotations == nil {
+			t.Errorf("%s carries no annotations", tool.Name)
+			continue
+		}
+		writes := tool.Name == "adm_must-gather"
+		if writes {
+			sawWriter = true
+		}
+		if tool.Annotations.ReadOnlyHint == writes {
+			t.Errorf("%s publishes readOnlyHint=%t, want %t: it %s files on this machine",
+				tool.Name, tool.Annotations.ReadOnlyHint, !writes,
+				map[bool]string{true: "writes", false: "writes no"}[writes])
+		}
+	}
+	if !sawWriter {
+		t.Fatal("no host writing tool was offered, so the hint was not exercised")
+	}
+}

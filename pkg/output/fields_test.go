@@ -797,3 +797,80 @@ func TestAddOutputFlagsRegistersTheWholeOutputInterface(t *testing.T) {
 		t.Errorf("Fields is %v, want %v", o.Bounded.Fields, want)
 	}
 }
+
+// stampedReport is a single kind, not a list, that marshals itself. It is the
+// case the root check is actually about: FieldPaths peels a list to its item
+// type, so a list's own MarshalJSON never reaches the walk, but a report's
+// does, and stopping there leaves the kind with no paths at all.
+type stampedReport struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+
+	Status gpuNodeStatus `json:"status,omitzero"`
+}
+
+// MarshalJSON stamps the envelope, as a kind that guarantees its own identity
+// does.
+func (r stampedReport) MarshalJSON() ([]byte, error) {
+	type reportJSON stampedReport
+
+	out := reportJSON(r)
+	out.TypeMeta = TypeMetaFor(KindHealthReport)
+
+	return json.Marshal(out)
+}
+
+func (r *stampedReport) DeepCopyObject() runtime.Object { clone := *r; return &clone }
+
+func (r *stampedReport) TableColumns(bool) []Column {
+	return []Column{{Header: "NAME", Field: "metadata.name"}}
+}
+
+func (r *stampedReport) TableRows(bool) [][]string { return [][]string{{r.Name}} }
+
+func TestASingleKindThatMarshalsItselfStillHasFields(t *testing.T) {
+	t.Parallel()
+
+	paths, err := FieldPaths(&stampedReport{})
+	if err != nil {
+		t.Fatalf("FieldPaths: %v", err)
+	}
+	want := []string{
+		"apiVersion",
+		"kind",
+		"metadata.annotations",
+		"metadata.creationTimestamp",
+		"metadata.labels",
+		"metadata.name",
+		"metadata.namespace",
+		"status.gpus",
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("paths are %v,\nwant %v: a kind that stamps its own envelope still has fields", paths, want)
+	}
+
+	// And the paths have to be usable, not merely listed.
+	var out, errOut bytes.Buffer
+	streams := genericiooptions.IOStreams{Out: &out, ErrOut: &errOut}
+	report := &stampedReport{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster"},
+		Status:     gpuNodeStatus{GPUs: 8},
+	}
+	if err := PrintBounded(streams, "json", BoundedOptions{Fields: []string{"status.gpus"}}, report); err != nil {
+		t.Fatalf("printing: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("decoding: %v\n%s", err, out.String())
+	}
+	wantObject := map[string]any{
+		"apiVersion": APIVersion,
+		"kind":       KindHealthReport,
+		"metadata":   map[string]any{"name": "cluster"},
+		"status":     map[string]any{"gpus": float64(8)},
+	}
+	if !reflect.DeepEqual(decoded, wantObject) {
+		t.Errorf("projected object is %v,\nwant %v", decoded, wantObject)
+	}
+}
