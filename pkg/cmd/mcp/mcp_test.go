@@ -66,7 +66,7 @@ func TestListToolsPrintsEveryToolTheServerWouldOffer(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := expectedToolNames(testTree(genericiooptions.NewTestIOStreamsDiscard()))
+	want := expectedToolNames(testTree(discardDeps()))
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("--list-tools printed %v,\nwant %v", got, want)
 	}
