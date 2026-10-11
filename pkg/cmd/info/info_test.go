@@ -23,15 +23,18 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/info"
@@ -332,5 +335,95 @@ func TestInfoFromBundle(t *testing.T) {
 
 	if len(node.Operands) != 2 {
 		t.Errorf("operands = %#v, want the two the bundle recorded", node.Operands)
+	}
+}
+
+// TestInfoPartialReadIsNotAUsageError is the difference between "this node has
+// no GPUs" and "I could not see whether it has any".
+//
+// A DRA node is a GPU node only because a ResourceSlice names it. With the
+// slice list denied, the node falls out of the inventory entirely, and
+// reporting that as "node X has no GPUs and no GPU labels" tells the user a
+// fact about their cluster that nobody established. Exit 3 says the run was
+// incomplete, which is what actually happened.
+func TestInfoPartialReadIsNotAUsageError(t *testing.T) {
+	t.Parallel()
+
+	node := "worker-dra"
+	clientset := fake.NewSimpleClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: node},
+		Status: corev1.NodeStatus{
+			Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	})
+	clientset.PrependReactor("list", "resourceslices", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewForbidden(
+			schema.GroupResource{Group: "resource.k8s.io", Resource: "resourceslices"}, "", nil)
+	})
+
+	s := &streams{out: &bytes.Buffer{}, err: &bytes.Buffer{}}
+	io := genericiooptions.IOStreams{In: strings.NewReader(""), Out: s.out, ErrOut: s.err}
+
+	o := &cmd.Options{
+		Streams: io,
+		Factory: &fakeFactory{
+			clientset: clientset,
+			dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
+		},
+		Logger: output.NewLogger(io, output.LoggerOptions{NoColor: true}),
+	}
+
+	c := info.NewCommand(o)
+	c.SetOut(s.out)
+	c.SetErr(s.err)
+	c.SetArgs([]string{node})
+	c.SilenceUsage = true
+	c.SilenceErrors = true
+
+	err := c.Execute()
+	if err == nil {
+		t.Fatal("gpu info returned no error with the slice list denied")
+	}
+
+	if code := output.ExitCodeFor(err); code != output.ExitPartial {
+		t.Errorf("exit code = %d, want %d: %v", code, output.ExitPartial, err)
+	}
+
+	if strings.Contains(err.Error(), "has no GPUs") {
+		t.Errorf("error = %q, want it to report the denied read rather than a fact about the node", err)
+	}
+}
+
+// TestInfoUnknownNodeStillExitsTwoOnACompleteRead pins the other half: when
+// the run saw everything and the node still is not there, the user typed a
+// name the cluster does not have, and that is exit 2.
+func TestInfoUnknownNodeStillExitsTwoOnACompleteRead(t *testing.T) {
+	t.Parallel()
+
+	_, err := runInfo(t, cluster(), "no-such-node")
+	if err == nil {
+		t.Fatal("gpu info returned no error for a node the cluster does not have")
+	}
+
+	if code := output.ExitCodeFor(err); code != output.ExitUsage {
+		t.Errorf("exit code = %d, want %d", code, output.ExitUsage)
+	}
+}
+
+// TestInfoFromBundleTableExitsPartial pins the exit code on the path a person
+// actually uses. The json case below asserts it too, but the table path takes
+// a different branch through the command and would keep its own bug.
+func TestInfoFromBundleTableExitsPartial(t *testing.T) {
+	t.Parallel()
+
+	s, err := runInfo(t, nil, "worker-t4", "--from-bundle", "../list/testdata/bundle")
+	if code := output.ExitCodeFor(err); code != output.ExitPartial {
+		t.Fatalf("exit code = %d, want %d (err: %v)", code, output.ExitPartial, err)
+	}
+
+	// The description still has to be printed: a partial read comes with a
+	// usable answer, and withholding it would make exit 3 mean exit 4.
+	if !strings.Contains(s.out.String(), "worker-t4") {
+		t.Errorf("gpu info printed no description alongside the partial read:\n%s", s.out)
 	}
 }
