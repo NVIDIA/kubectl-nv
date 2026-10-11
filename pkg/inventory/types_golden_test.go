@@ -178,3 +178,92 @@ func TestGoldenRoundTrips(t *testing.T) {
 		t.Errorf("round trip =\n%s\nwant\n%s", raw, goldenNodeJSON)
 	}
 }
+
+// Schema stability is the reason the nested types carry no omitempty: every
+// node has the same field set whatever is set on it, so a consumer can read
+// mig.strategy or operands[].component without first checking whether the key
+// is there.
+//
+// The golden above cannot show that, because every field in it has a value and
+// omitempty only hides an empty one. This is the zero-value half: the exact
+// bytes of each nested type with nothing set.
+func TestNestedTypesHaveTheSameFieldSetWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	node := GPUNode{Operands: []OperandPod{{InitContainers: []InitResult{{}}}}}
+
+	raw, err := json.Marshal(node)
+	if err != nil {
+		t.Fatalf("marshalling: %v", err)
+	}
+
+	var got struct {
+		MIG      json.RawMessage   `json:"mig"`
+		Sharing  json.RawMessage   `json:"sharing"`
+		Operands []json.RawMessage `json:"operands"`
+	}
+
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshalling: %v", err)
+	}
+
+	const (
+		wantMIG     = `{"strategy":"","config":"","configState":"","capable":false,"resources":{}}`
+		wantSharing = `{"strategy":"","replicas":0}`
+		wantOperand = `{"name":"","namespace":"","component":"","phase":"","restarts":0,` +
+			`"images":[],"ready":false,"initContainers":[{"name":"","reason":""}]}`
+	)
+
+	if string(got.MIG) != wantMIG {
+		t.Errorf("mig  = %s\nwant = %s", got.MIG, wantMIG)
+	}
+
+	if string(got.Sharing) != wantSharing {
+		t.Errorf("sharing = %s\nwant    = %s", got.Sharing, wantSharing)
+	}
+
+	if len(got.Operands) != 1 {
+		t.Fatalf("operands = %d, want 1", len(got.Operands))
+	}
+
+	if string(got.Operands[0]) != wantOperand {
+		t.Errorf("operand = %s\nwant    = %s", got.Operands[0], wantOperand)
+	}
+}
+
+// InitResult.ExitCode is the one field whose presence varies, and it varies on
+// purpose: the alternative for a nil pointer is a null. Both halves are pinned
+// so that a change to either is a deliberate one.
+func TestExitCodeIsTheOnlyVaryingKey(t *testing.T) {
+	t.Parallel()
+
+	exitCode := int32(3)
+
+	for name, tc := range map[string]struct {
+		result InitResult
+		want   string
+	}{
+		"unfinished": {InitResult{Name: "toolkit-validation"}, `{"name":"toolkit-validation","reason":""}`},
+		"exited": {
+			InitResult{Name: "toolkit-validation", ExitCode: &exitCode, Reason: "Error"},
+			`{"name":"toolkit-validation","exitCode":3,"reason":"Error"}`,
+		},
+		"exited zero": {
+			InitResult{Name: "toolkit-validation", ExitCode: new(int32), Reason: "Completed"},
+			`{"name":"toolkit-validation","exitCode":0,"reason":"Completed"}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			raw, err := json.Marshal(tc.result)
+			if err != nil {
+				t.Fatalf("marshalling: %v", err)
+			}
+
+			if string(raw) != tc.want {
+				t.Errorf("json = %s, want %s", raw, tc.want)
+			}
+		})
+	}
+}

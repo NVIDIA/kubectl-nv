@@ -64,6 +64,15 @@ func TestVersionInRange(t *testing.T) {
 		{"build suffix", "v25.3.0+build.7", "v25.0.0", "v26.0.0", true},
 		{"suffix on the patch component", "v25.3.0-rc.1", "v25.3.0", "v25.4.0", true},
 
+		// The three above would answer true even if the suffix were never
+		// stripped, because an unparsable version also answers true. These
+		// discriminate: the suffixed version has to land outside the range,
+		// which it can only do once it has been parsed.
+		{"pre-release below min", "v25.2.0-rc.1", "v25.3.0", "", false},
+		{"pre-release at max is outside", "v26.0.0-rc.1", "v25.0.0", "v26.0.0", false},
+		{"build suffix above max", "v26.0.1+build.7", "v25.0.0", "v26.0.0", false},
+		{"build suffix below min", "v24.0.0+build.7", "v25.0.0", "", false},
+
 		// An empty bound is no bound at all.
 		{"no min", "v1.0.0", "", "v26.0.0", true},
 		{"no max", "v99.0.0", "v25.0.0", "", true},
