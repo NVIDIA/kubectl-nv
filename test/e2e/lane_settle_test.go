@@ -49,14 +49,14 @@ import (
 // for those 45 seconds `kubectl nv health` correctly reports NV-DCGM-001 at
 // warning on a lane that is merely still starting.
 
-// settleTimeout bounds the wait. Five minutes: the exporter's initial delay is
+// laneSettleTimeout bounds the wait. Five minutes: the exporter's initial delay is
 // 45 seconds and an image pull on a cold runner is the rest of it. A lane that
 // has not settled by then is not slow, it is broken, and the failure says
 // which workload is holding it up.
-const settleTimeout = 5 * time.Minute
+const laneSettleTimeout = 5 * time.Minute
 
-// settlePoll is how often the lane is asked again.
-const settlePoll = 5 * time.Second
+// laneSettlePoll is how often the lane is asked again.
+const laneSettlePoll = 5 * time.Second
 
 // clusterPolicyGVR is the GPU Operator's own object. It is addressed
 // dynamically because the CRD is not vendored and its schema moves between
@@ -78,7 +78,7 @@ var clusterPolicyGVR = schema.GroupVersionResource{
 func settleLane(t *testing.T) {
 	t.Helper()
 
-	deadline := time.Now().Add(settleTimeout)
+	deadline := time.Now().Add(laneSettleTimeout)
 	var holding []string
 
 	for {
@@ -89,10 +89,10 @@ func settleLane(t *testing.T) {
 		if time.Now().After(deadline) {
 			break
 		}
-		time.Sleep(settlePoll)
+		time.Sleep(laneSettlePoll)
 	}
 
-	t.Fatalf("after %s the lane has not settled:\n  %s", settleTimeout, strings.Join(holding, "\n  "))
+	t.Fatalf("after %s the lane has not settled:\n  %s", laneSettleTimeout, strings.Join(holding, "\n  "))
 }
 
 // unsettledWorkloads names what is still coming up, so that a timeout says
