@@ -49,7 +49,27 @@ type Finding struct {
 	Message string `json:"message,omitempty" yaml:"message,omitempty"`
 	// Evidence is what the finding was concluded from: the label values, the
 	// counts, the exit codes. It is keyed by whatever names the value best,
-	// usually the label or field it came from. It is never null on the wire.
+	// usually the label or the field it came from, verbatim, so that a reader
+	// can go and look at the same thing. It is never null on the wire.
+	//
+	// The values are strings because the keys are not a fixed set and the
+	// types behind them are not uniform, which rules out a typed struct and
+	// makes map[string]any a map whose values a consumer has to type switch
+	// on. So the encodings are fixed instead, and every rule in every track
+	// follows them:
+	//
+	//	integers     base 10, no separators, no units: "7", "0", "-1"
+	//	booleans     "true" or "false", never "True", "yes" or "1"
+	//	lists        sorted, comma joined, no spaces: "a,b,c"
+	//	times        RFC3339 in UTC: "2026-01-02T03:04:05Z"
+	//	durations    Go's form, as time.Duration.String writes it: "1h30m0s"
+	//	quantities   the resource.Quantity string: "16Gi", "250m"
+	//	absent       the key is left out, never set to "" or "<none>"
+	//
+	// Sorted and joined rather than indexed ("node.0", "node.1") because a
+	// finding is one line in a report and a reader compares two of them by
+	// eye. Deterministic for the same reason every other ordering here is: two
+	// runs over the same cluster have to produce the same bytes.
 	Evidence map[string]string `json:"evidence" yaml:"evidence"`
 	// Docs is where to read more: a URL, or a path to a document in this
 	// repository.
