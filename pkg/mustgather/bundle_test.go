@@ -48,7 +48,7 @@ func TestRefusesANonEmptyArtifactDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := Run(&Options{ArtifactDir: dir}, stubFactory{
+	err := Run(&Options{ArtifactDir: dir, FetchPodFile: noopFetcher}, stubFactory{
 		clientset: fake.NewSimpleClientset(twoNodeCluster()...),
 		dynamic:   emptyDynamicClient(),
 		config:    offlineConfig(),
@@ -86,7 +86,7 @@ func TestAnEmptyOrAbsentArtifactDirIsFine(t *testing.T) {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		err := Run(&Options{ArtifactDir: dir}, stubFactory{
+		err := Run(&Options{ArtifactDir: dir, FetchPodFile: noopFetcher}, stubFactory{
 			clientset: fake.NewSimpleClientset(twoNodeCluster()...),
 			dynamic:   emptyDynamicClient(),
 			config:    offlineConfig(),
@@ -125,18 +125,7 @@ func TestDefaultArtifactDirIsUniquePerRun(t *testing.T) {
 // that is not a file. Hashing it either blocks forever on a fifo or fails the
 // index, and either way the manifest is the one file a reader needs most.
 func TestIndexSkipsNonRegularFiles(t *testing.T) {
-	dir, _, err := runGather(t, &Options{}, twoNodeCluster()...)
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-
-	// The index is recomputed here over a directory that has since grown a
-	// symlink, which is the cheapest non-regular file to make portably.
-	link := filepath.Join(dir, "elsewhere.yaml")
-	if lerr := os.Symlink(filepath.Join(dir, "nodes.yaml"), link); lerr != nil {
-		t.Skipf("this filesystem does not do symlinks: %v", lerr)
-	}
-
+	dir := filepath.Join(t.TempDir(), "artifacts")
 	g, gerr := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
 		clientset: fake.NewSimpleClientset(), dynamic: emptyDynamicClient(), config: offlineConfig(),
 	}, discardProgress{})
@@ -145,15 +134,35 @@ func TestIndexSkipsNonRegularFiles(t *testing.T) {
 	}
 	t.Cleanup(g.Close)
 
+	real := filepath.Join(dir, "nodes.yaml")
+	if werr := os.WriteFile(real, []byte("items: []\n"), 0o600); werr != nil {
+		t.Fatal(werr)
+	}
+	// A symlink is the cheapest non-regular file to make portably.
+	if lerr := os.Symlink(real, filepath.Join(dir, "elsewhere.yaml")); lerr != nil {
+		t.Skipf("this filesystem does not do symlinks: %v", lerr)
+	}
+
 	files, ierr := g.indexBundle()
 	if ierr != nil {
 		t.Fatalf("indexBundle: %v", ierr)
 	}
+	indexed := make(map[string]bool, len(files))
 	for _, f := range files {
-		if f.Path == "elsewhere.yaml" {
-			t.Error("the index holds a symlink, which is not a file of the bundle")
-		}
+		indexed[f.Path] = true
 	}
+	if indexed["elsewhere.yaml"] {
+		t.Error("the index holds a symlink, which is not a file of the bundle")
+	}
+	if !indexed["nodes.yaml"] {
+		t.Errorf("the index skipped the regular file too: %v", files)
+	}
+}
+
+// noopFetcher stands in for the live exec-and-copy, for the tests that drive a
+// whole gather but are not about the bug report.
+func noopFetcher(_ context.Context, pod *v1.Pod, destPath string) error {
+	return os.WriteFile(destPath, []byte(pod.Spec.NodeName), 0o600)
 }
 
 // TestUnknownNodeIsAUsageError covers a typo in --node. The gather used to run

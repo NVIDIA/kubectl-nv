@@ -32,11 +32,14 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // Options defines the configurable parameters for the must-gather operation.
@@ -227,6 +230,12 @@ type PodInfo struct {
 // 3. Take the clients from the factory.
 // If any step fails, any opened file resources are closed before returning.
 func NewGatherer(opts *Options, f Clients, progress Progress) (*Gatherer, error) {
+	// Before anything is created: a directory that already holds a bundle
+	// would end up holding two runs' files with nothing to tell them apart.
+	if err := checkArtifactDir(opts.ArtifactDir); err != nil {
+		return nil, err
+	}
+
 	// Create the ARTIFACT_DIR.
 	// The bundle holds cluster data and lands under /tmp, where every account on
 	// the machine can look.
@@ -687,6 +696,13 @@ func writeStringToFile(file *os.File, s string) error {
 func Run(opts *Options, f Clients, progress Progress) error {
 	g, err := NewGatherer(opts, f, progress)
 	if err != nil {
+		// A usage error is the user's to fix and carries its own exit code;
+		// wrapping it as a failed gather would report a typo as a cluster that
+		// could not be read.
+		var usage *output.UsageError
+		if errors.As(err, &usage) {
+			return err
+		}
 		// Nothing was collected, so there is no bundle to send.
 		return &Error{Err: fmt.Errorf("failed to initialize Gatherer: %w", err)}
 	}
@@ -702,12 +718,45 @@ func Run(opts *Options, f Clients, progress Progress) error {
 		}
 	}()
 
+	if err := g.checkNode(); err != nil {
+		return err
+	}
+
 	collectErr := g.collect()
 
 	if collectErr != nil {
 		return g.failed(collectErr)
 	}
 	return nil
+}
+
+// checkNode makes sure --node names a node the cluster has. A typo used to run
+// the whole gather and produce a complete-looking bundle holding nothing about
+// any node, which reads as a cluster with no GPUs rather than as a name that
+// does not exist.
+func (g *Gatherer) checkNode() error {
+	if g.opts.Node == "" {
+		return nil
+	}
+	if !usableInAName(g.opts.Node) {
+		return output.NewUsageError("--node %q is not a usable node name", g.opts.Node)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), customResourceTimeout)
+	defer cancel()
+
+	_, err := g.clientset.CoreV1().Nodes().Get(ctx, g.opts.Node, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsNotFound(err):
+		return output.NewUsageError("--node %s: the cluster has no such node", g.opts.Node)
+	default:
+		// Anything else is the cluster being unreadable, which the collectors
+		// report in their own way; one failed GET must not stop the gather.
+		g.note("could not check that node %s exists: %v", g.opts.Node, err)
+		return nil
+	}
 }
 
 // collect runs every collector of the registry in turn, recording what each

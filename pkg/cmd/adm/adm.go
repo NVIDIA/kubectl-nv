@@ -19,7 +19,6 @@
 package adm
 
 import (
-	"fmt"
 	"os"
 	"time"
 
@@ -63,7 +62,7 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 		RunE: func(c *cobra.Command, _ []string) error {
 			opts.Debug = o.Debug
 			if opts.ArtifactDir == "" {
-				opts.ArtifactDir = defaultArtifactDir(time.Now())
+				opts.ArtifactDir = mustgather.DefaultArtifactDir(time.Now())
 			}
 			// The version is read off the root rather than threaded through
 			// this constructor: the root is where the linker stamps it, and a
@@ -143,10 +142,4 @@ func kubeconfigContext(o *cmd.Options) string {
 		return ""
 	}
 	return raw.CurrentContext
-}
-
-// defaultArtifactDir names the directory the gpu-operator must-gather script
-// also uses, so that a report collected by either tool looks the same.
-func defaultArtifactDir(now time.Time) string {
-	return fmt.Sprintf("/tmp/nvidia-gpu-operator_%s", now.Format("20060102_1504"))
 }

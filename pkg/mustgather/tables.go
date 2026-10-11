@@ -18,12 +18,18 @@ package mustgather
 
 // The .status files of a bundle are what the gpu-operator script gets from
 // "kubectl get -o wide". kubectl renders them from a Table the API server
-// builds, which is a request this plugin cannot make through the typed client
-// it reads everything else with, so the same columns are rendered here. The
-// column sets match kubectl's so that a reader can scan a bundle the way they
-// scan a terminal.
+// builds, and so does this package: writePodStatus asks the server for that
+// Table and prints it, because the server knows pod states that cannot be
+// re-derived correctly from the objects alone.
+//
+// What follows is the fallback for a server that will not serve a Table, and
+// the renderer for the node and daemonset tables. The column sets match
+// kubectl's so a reader can scan a bundle the way they scan a terminal.
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -34,8 +40,11 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/duration"
 	"k8s.io/cli-runtime/pkg/printers"
+	"k8s.io/client-go/rest"
+	"k8s.io/kubectl/pkg/scheme"
 )
 
 // notApplicable is what kubectl prints for a column a resource has no value
@@ -275,4 +284,82 @@ func orNone(value string) string {
 		return notApplicable
 	}
 	return value
+}
+
+// tableAccept is what kubectl sends to ask the API server to render a resource
+// as a Table instead of as objects.
+const tableAccept = "application/json;as=Table;v=v1;g=meta.k8s.io, application/json"
+
+// writePodStatus writes the pod table a .status file carries.
+//
+// The server is asked for the Table and the answer is printed, which is what
+// kubectl does. That matters because the server knows pod states this package
+// would otherwise have to re-derive from the pod's phase and container
+// statuses, and got wrong: an init container in a crash loop reads
+// Init:CrashLoopBackOff from the server and "Pending" from the phase.
+//
+// pods is the fallback, rendered here, for a server that will not serve a
+// Table and for every test that runs against a fake client. An empty .status
+// file is worse than one rendered a little differently.
+func (g *Gatherer) writePodStatus(w io.Writer, namespace, name string, pods []v1.Pod) error {
+	table, err := g.fetchPodTable(namespace, name)
+	if err == nil {
+		return printTable(w, table)
+	}
+
+	if _, lerr := fmt.Fprintf(g.errLogFile,
+		"Falling back to a locally rendered table for %s: %v\n", namespace, err); lerr != nil {
+		return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+	}
+	return writePodTable(w, pods)
+}
+
+// fetchPodTable asks the API server for the pods of a namespace as a Table.
+// An empty name means every pod of the namespace.
+func (g *Gatherer) fetchPodTable(namespace, name string) (*metav1.Table, error) {
+	if g.config == nil {
+		return nil, errors.New("no REST configuration")
+	}
+
+	config := rest.CopyConfig(g.config)
+	config.GroupVersion = &schema.GroupVersion{Group: "", Version: "v1"}
+	config.APIPath = "/api"
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+
+	client, err := rest.RESTClientFor(config)
+	if err != nil {
+		return nil, fmt.Errorf("building a client for the table request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), customResourceTimeout)
+	defer cancel()
+
+	request := client.Get().Namespace(namespace).Resource("pods").SetHeader("Accept", tableAccept)
+	if name != "" {
+		request = request.Name(name)
+	}
+
+	raw, err := request.DoRaw(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("asking for a table of the pods in %s: %w", namespace, err)
+	}
+
+	var table metav1.Table
+	if err := json.Unmarshal(raw, &table); err != nil {
+		return nil, fmt.Errorf("decoding the table of the pods in %s: %w", namespace, err)
+	}
+	if table.Kind != "Table" {
+		return nil, fmt.Errorf("the server answered with a %q, not a Table", table.Kind)
+	}
+	return &table, nil
+}
+
+// printTable renders a server-side Table the way kubectl prints one, with the
+// wide columns the bundle is read for.
+func printTable(w io.Writer, table *metav1.Table) error {
+	printer := printers.NewTablePrinter(printers.PrintOptions{Wide: true})
+	if err := printer.PrintObj(table, w); err != nil {
+		return fmt.Errorf("printing the table: %w", err)
+	}
+	return nil
 }

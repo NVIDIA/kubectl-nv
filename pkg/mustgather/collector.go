@@ -357,8 +357,7 @@ var (
 	hyperConvergedGVR = schema.GroupVersionResource{
 		Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds",
 	}
-	kubeVirtGVR    = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}
-	deviceClassGVR = schema.GroupVersionResource{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}
+	kubeVirtGVR = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}
 )
 
 // customResourceTimeout bounds a single read of a custom resource. The dynamic
@@ -458,13 +457,6 @@ func (g *Gatherer) gatherKubeVirt() error {
 	return g.gatherOptionalCustomResource(kubeVirtGVR, "kubevirt.yaml", "KubeVirt")
 }
 
-// gatherDeviceClasses collects the DRA device classes. They are collected whole
-// rather than narrowed to NVIDIA's, because which classes exist at all is part
-// of why a pod did or did not get a GPU.
-func (g *Gatherer) gatherDeviceClasses() error {
-	return g.gatherOptionalCustomResource(deviceClassGVR, "deviceclasses.yaml", "DeviceClass")
-}
-
 // gatherClusterPolicy collects the ClusterPolicy, the GPU operator's own
 // configuration and the first thing support compares against what the customer
 // says they applied.
@@ -540,7 +532,7 @@ func (g *Gatherer) gatherOperatorPod(s *gatherState) error {
 	}
 
 	return g.writeArtifactFile("gpu_operator_pod.status", func(w io.Writer) error {
-		return writePodTable(w, pods)
+		return g.writePodStatus(w, s.operatorPod.Namespace, s.operatorPod.Name, pods)
 	})
 }
 
@@ -568,7 +560,7 @@ func (g *Gatherer) gatherOperandPods(s *gatherState) error {
 	}
 
 	if err := g.writeArtifactFile("gpu_operand_pods.status", func(w io.Writer) error {
-		return writePodTable(w, s.operandPods)
+		return g.writePodStatus(w, s.operatorNamespace, "", s.operandPods)
 	}); err != nil {
 		return err
 	}

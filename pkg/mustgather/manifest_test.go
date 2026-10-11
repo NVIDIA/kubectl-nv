@@ -27,10 +27,24 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
+
+// draAPIResources is the DRA group as a 1.34 cluster serves it. The gather
+// discovers which version is served before reading device classes, so a fake
+// whose discovery knows nothing reports a cluster without DRA.
+func draAPIResources() []*metav1.APIResourceList {
+	return []*metav1.APIResourceList{{
+		GroupVersion: draGroup + "/v1",
+		APIResources: []metav1.APIResource{
+			{Name: "deviceclasses", Kind: "DeviceClass"},
+			{Name: "resourceslices", Kind: "ResourceSlice"},
+		},
+	}}
+}
 
 // customResourceListKinds names the list kind of every custom resource the
 // gather reads, which the dynamic fake needs before it will serve a List.

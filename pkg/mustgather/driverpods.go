@@ -110,6 +110,16 @@ func collectable(pod *v1.Pod) (bool, string) {
 	if pod.Status.Phase != v1.PodRunning {
 		return false, fmt.Sprintf("pod is %s, not Running", pod.Status.Phase)
 	}
+	// The pod and node names become file names in a bundle somebody else
+	// unpacks. Every name a cluster accepted is a DNS-1123 subdomain, so one
+	// that is not has either been tampered with or come from a confused
+	// reader, and must not be used to build a path.
+	if !usableInAName(pod.Name) {
+		return false, fmt.Sprintf("pod name %q is not a usable name", pod.Name)
+	}
+	if !usableInAName(pod.Spec.NodeName) {
+		return false, fmt.Sprintf("node name %q is not a usable name", pod.Spec.NodeName)
+	}
 	return true, ""
 }
 

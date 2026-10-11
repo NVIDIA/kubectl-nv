@@ -169,7 +169,14 @@ func (g *Gatherer) indexBundle() ([]FileEntry, error) {
 
 	files := make([]FileEntry, 0, len(entries))
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Name() == ManifestFileName {
+		if entry.Name() == ManifestFileName {
+			continue
+		}
+		// Only regular files. A fifo would block the hash forever and a
+		// symlink would index something that is not part of the bundle, and
+		// either way the manifest is the one file a reader needs most.
+		info, serr := entry.Info()
+		if serr != nil || !info.Mode().IsRegular() {
 			continue
 		}
 		size, digest, err := hashFile(filepath.Join(g.opts.ArtifactDir, entry.Name()))

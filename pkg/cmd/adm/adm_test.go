@@ -33,16 +33,33 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// TestDefaultArtifactDir pins the name the gpu-operator must-gather script
-// uses. Support reads these directories by name, and the layout of the
-// timestamp is part of that contract.
-func TestDefaultArtifactDir(t *testing.T) {
-	when := time.Date(2026, time.October, 10, 14, 59, 30, 0, time.UTC)
+// TestDefaultArtifactDirIsUsedWhenNoneIsGiven pins where a gather lands when
+// the user chose nothing. The name itself is the gatherer's, so that the two
+// places that build it cannot drift; what matters here is that the command
+// uses it rather than inventing a second one.
+func TestDefaultArtifactDirIsUsedWhenNoneIsGiven(t *testing.T) {
+	isolateKubeconfig(t)
 
-	got := defaultArtifactDir(when)
+	var got *mustgather.Options
+	o := &cmd.Options{Streams: genericiooptions.NewTestIOStreamsDiscard()}
+	adm := NewCommand(o, func(opts *mustgather.Options) error { got = opts; return nil })
 
-	if want := "/tmp/nvidia-gpu-operator_20261010_1459"; got != want {
-		t.Errorf("got %q, want %q", got, want)
+	parent := &cobra.Command{Use: "kubectl-nv", Version: "v9.9.9"}
+	parent.AddCommand(adm)
+	parent.SetArgs([]string{"adm", "must-gather"})
+	parent.SetOut(io.Discard)
+	parent.SetErr(io.Discard)
+	parent.SilenceUsage = true
+	parent.SilenceErrors = true
+
+	if err := parent.Execute(); err != nil {
+		t.Fatalf("adm must-gather: %v", err)
+	}
+	if !strings.HasPrefix(got.ArtifactDir, "/tmp/nvidia-gpu-operator_") {
+		t.Errorf("ArtifactDir = %q, want the gpu-operator script's prefix", got.ArtifactDir)
+	}
+	if got.ArtifactDir == mustgather.DefaultArtifactDir(time.Now()) {
+		t.Error("two calls produced the same directory, so two runs would share one bundle")
 	}
 }
 

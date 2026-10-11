@@ -104,18 +104,26 @@ func TestResourceSlicesToleratesAClusterWithoutThem(t *testing.T) {
 		name      string
 		err       error
 		wantFile  bool
+		wantSkip  string
 		wantInLog string
 	}{
 		{
+			// No DRA at all is an answer about the cluster, and the empty list
+			// says it the same way a live cluster without DRA would.
 			name:      "the API is not served",
 			err:       apierrors.NewNotFound(gvr.GroupResource(), ""),
 			wantFile:  true,
 			wantInLog: "resourceslices",
 		},
 		{
+			// Being refused is a gap rather than an answer. Writing nothing
+			// and reporting success left the manifest saying ok with no
+			// artifacts, which a reader cannot tell from a cluster that has
+			// no slices.
 			name:      "the user may not list them",
 			err:       apierrors.NewForbidden(gvr.GroupResource(), "", nil),
 			wantFile:  false,
+			wantSkip:  "forbidden",
 			wantInLog: "resourceslices",
 		},
 	}
@@ -128,7 +136,17 @@ func TestResourceSlicesToleratesAClusterWithoutThem(t *testing.T) {
 					return true, nil, c.err
 				})
 
-			if err := g.gatherResourceSlices(); err != nil {
+			err := g.gatherResourceSlices()
+			var skipped errSkipped
+			switch {
+			case c.wantSkip != "":
+				if !errors.As(err, &skipped) {
+					t.Fatalf("gatherResourceSlices returned %v, want it recorded as skipped", err)
+				}
+				if skipped.reason != c.wantSkip {
+					t.Errorf("skip reason = %q, want %q", skipped.reason, c.wantSkip)
+				}
+			case err != nil:
 				t.Fatalf("gatherResourceSlices returned %v, want the gather to carry on", err)
 			}
 

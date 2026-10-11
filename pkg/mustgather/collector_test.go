@@ -386,9 +386,12 @@ func newCustomResourceGatherer(t *testing.T, objects ...runtime.Object) (*Gather
 
 	listKinds := customResourceListKinds()
 
+	clientset := fake.NewSimpleClientset()
+	clientset.Resources = draAPIResources()
+
 	dir := filepath.Join(t.TempDir(), "artifacts")
 	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
-		clientset: fake.NewSimpleClientset(),
+		clientset: clientset,
 		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
 			runtime.NewScheme(), listKinds, objects...),
 		config: offlineConfig(),
