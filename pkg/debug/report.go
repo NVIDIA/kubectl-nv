@@ -41,13 +41,16 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// The prefixes a collector status carries when it did not simply run. They are
-// the gatherer's own spelling; pkg/cmd/debug's tests drive a real gather over
-// a fake cluster, so a change to either one is caught rather than guessed at.
-const (
-	statusSkipped = "skipped:"
-	statusError   = "error:"
-)
+// statusSkipped is the prefix a collector status carries when it did not run.
+// It is the gatherer's own spelling; pkg/cmd/debug's tests drive a real gather
+// over a fake cluster, so a change to it is caught rather than guessed at.
+const statusSkipped = "skipped:"
+
+// statusError is the prefix of a collector that failed. Nothing here depends
+// on it to classify a status, because only mustgather.StatusOK counts as a
+// success and everything else is reported; it is trimmed off the reason when
+// it is there so that a reader is not shown the word twice.
+const statusError = "error:"
 
 // CollectorCounts is how the gather's collectors ended, one count per status.
 // A skipped collector is counted apart from a successful one on purpose: a
@@ -195,20 +198,26 @@ func SummariseBundle(dir string, m *mustgather.Manifest) Bundle {
 	// produce reports that can be diffed against each other.
 	for _, c := range m.Collectors {
 		switch {
+		case c.Status == mustgather.StatusOK:
+			out.Collectors.OK++
 		case strings.HasPrefix(c.Status, statusSkipped):
 			out.Collectors.Skipped++
 			out.Skipped = append(out.Skipped, CollectorOutcome{
 				Name:   c.Name,
 				Reason: strings.TrimPrefix(c.Status, statusSkipped),
 			})
-		case strings.HasPrefix(c.Status, statusError):
+		default:
+			// Anything else is reported rather than counted as a success.
+			// A status this package has never seen belongs to a gatherer that
+			// grew an outcome after this was written, and calling it ok would
+			// turn that into a bundle reporting itself complete. The text is
+			// carried whole, minus the prefix when it has the familiar one, so
+			// that a reader sees what the gather actually said.
 			out.Collectors.Error++
 			out.Errored = append(out.Errored, CollectorOutcome{
 				Name:   c.Name,
 				Reason: strings.TrimPrefix(c.Status, statusError),
 			})
-		default:
-			out.Collectors.OK++
 		}
 	}
 

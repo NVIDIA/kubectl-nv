@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -45,9 +46,14 @@ import (
 
 // options is what the flags fill in.
 type options struct {
-	// gather is the must-gather this command runs. Its flags are registered by
-	// pkg/mustgather, so they are the same flags, with the same names and the
-	// same defaults, as the ones adm must-gather takes.
+	// gather is the must-gather this command runs. Its flags come from
+	// mustgather.AddGatherFlags, which is where the gather declares its own
+	// interface.
+	//
+	// kubectl nv adm must-gather still registers its own copy of the same
+	// four flags: moving it onto this helper is another task's file. Until it
+	// does, the two sets are separate code, and what holds them together is
+	// the parity test in this package rather than the compiler.
 	gather mustgather.Options
 	// gatherFunc is how the gather is executed. It is the seam adm must-gather
 	// is built over, so a test drives this command without a cluster.
@@ -132,9 +138,10 @@ func runDebug(c *cobra.Command, o *cmd.Options, opts *options, name string) erro
 
 	gatherErr := opts.gatherFunc(&opts.gather)
 
-	// A usage error means the gather never started: a directory that already
-	// holds a bundle, or a node name the cluster does not have. There is
-	// nothing to report and the user has something to type differently.
+	// A usage error means the gather never started: the directory already
+	// holds a bundle, or the node name is not one a file can be named after.
+	// There is nothing to report and the user has something to type
+	// differently.
 	var usage *output.UsageError
 	if errors.As(gatherErr, &usage) {
 		return gatherErr
@@ -146,7 +153,11 @@ func runDebug(c *cobra.Command, o *cmd.Options, opts *options, name string) erro
 		return err
 	}
 
-	log.Infof("Please send the contents of %s to NVIDIA support", opts.gather.ArtifactDir)
+	// Only when there is a bundle. Telling the user to send a directory the
+	// gather never managed to write sends an empty one, or nothing at all.
+	if report.Bundle.Manifest != "" {
+		log.Infof("Please send the contents of %s to NVIDIA support", opts.gather.ArtifactDir)
+	}
 
 	// The gather's error wins: it carries the exit code that says whether the
 	// bundle is worth sending at all, which a partial inventory does not.
@@ -154,8 +165,38 @@ func runDebug(c *cobra.Command, o *cmd.Options, opts *options, name string) erro
 		return gatherErr
 	}
 
-	return inventoryErr
+	if inventoryErr != nil {
+		return inventoryErr
+	}
+
+	// Neither read failed outright and the report still says it is
+	// incomplete, which is the bundle that could not be indexed. Exit 0 would
+	// report a bundle nobody can check as a clean run.
+	if report.Status.Partial {
+		return &partialError{what: report.Status.Unreachable}
+	}
+
+	return nil
 }
+
+// partialError reports a run that produced an incomplete report without
+// either read having returned an error of its own.
+type partialError struct {
+	what []output.Unreachable
+}
+
+// Error implements error.
+func (e *partialError) Error() string {
+	parts := make([]string, 0, len(e.what))
+	for _, entry := range e.what {
+		parts = append(parts, entry.Resource+": "+entry.Reason)
+	}
+
+	return "the report is incomplete: " + strings.Join(parts, "; ")
+}
+
+// ExitCode is what output.ExitCodeFor reads off this error.
+func (e *partialError) ExitCode() int { return output.ExitPartial }
 
 // prepare fills in the parts of the gather that do not come from a flag.
 func prepare(c *cobra.Command, o *cmd.Options, opts *options, name string) {
@@ -238,7 +279,9 @@ func buildReport(
 ) *debug.Report {
 	report := debug.NewReport(name)
 	report.Node = *node
-	report.Bundle = debug.SummariseBundle(dir, readManifest(dir))
+
+	manifest, manifestErr := readManifest(dir)
+	report.Bundle = debug.SummariseBundle(dir, manifest)
 
 	// Partial is the report's own claim that it is incomplete, so it is set
 	// from what happened rather than from what was asked for. --no-exec leaves
@@ -271,23 +314,45 @@ func buildReport(
 		})
 	}
 
+	// A bundle whose own index cannot be read is a bundle whose collector
+	// counts describe nothing. Reporting zeroes for them would say the gather
+	// collected nothing when it may have collected everything, so the report
+	// says instead that it does not know.
+	if manifestErr != nil {
+		report.Status.Partial = true
+		report.Status.Unreachable = append(report.Status.Unreachable, output.Unreachable{
+			Resource: mustgather.ManifestFileName,
+			Node:     name,
+			Reason:   manifestErr.Error(),
+		})
+	}
+
 	return report
 }
 
-// readManifest parses the bundle's own index, or returns nil when the gather
-// did not get as far as writing one.
-func readManifest(dir string) *mustgather.Manifest {
-	raw, err := os.ReadFile(filepath.Join(dir, mustgather.ManifestFileName))
-	if err != nil {
-		return nil
+// readManifest parses the bundle's own index. A nil manifest with a nil error
+// is the gather that never wrote one, which is an outcome rather than a
+// failure: the bundle is then as absent as the index, and the gather's own
+// error already says why. Anything else that stopped the index being read is
+// returned, because a bundle whose index is unreadable is one whose contents
+// cannot be checked by whoever receives it.
+func readManifest(dir string) (*mustgather.Manifest, error) {
+	path := filepath.Join(dir, mustgather.ManifestFileName)
+
+	raw, err := os.ReadFile(path)
+	switch {
+	case os.IsNotExist(err):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("reading %s: %w", mustgather.ManifestFileName, err)
 	}
 
 	var m mustgather.Manifest
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil
+		return nil, fmt.Errorf("parsing %s: %w", mustgather.ManifestFileName, err)
 	}
 
-	return &m
+	return &m, nil
 }
 
 // printReport renders the report in the chosen format.
