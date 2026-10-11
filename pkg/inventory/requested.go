@@ -107,17 +107,28 @@ func isRestartable(c *corev1.Container) bool {
 	return c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
 }
 
-// gpuRequest is one container's nvidia.com/gpu request. Only whole GPUs are
-// counted: a MIG profile is a resource of its own and is reported in
-// MIG.Resources rather than folded into this number.
+// gpuRequest is one container's whole-GPU request, summed over the two names
+// a whole GPU is advertised under.
+//
+// nvidia.com/gpu.shared is the only name a workload can ask for on a node
+// configured with renameByDefault, so leaving it out reports every busy node
+// on such a cluster as idle. A MIG profile is not counted: it is a resource of
+// its own and is reported in MIG.Resources rather than folded into this
+// number.
 func gpuRequest(c *corev1.Container) int64 {
-	q, ok := c.Resources.Requests[source.ResourceGPU]
+	return containerRequest(c, source.ResourceGPU) + containerRequest(c, source.ResourceGPUShared)
+}
+
+// containerRequest reads one resource off a container.
+func containerRequest(c *corev1.Container, name corev1.ResourceName) int64 {
+	q, ok := c.Resources.Requests[name]
 	if !ok {
 		// An extended resource may be written as a limit alone, and the
 		// API server then defaults the request to it. A pod admitted before
 		// that defaulting, or one read out of a bundle, can still arrive with
-		// only the limit set.
-		q, ok = c.Resources.Limits[source.ResourceGPU]
+		// only the limit set, and counting it as zero reports an occupied node
+		// as free.
+		q, ok = c.Resources.Limits[name]
 		if !ok {
 			return 0
 		}

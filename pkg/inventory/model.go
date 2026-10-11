@@ -131,8 +131,12 @@ func buildNode(node *corev1.Node, ctx nodeContext) *GPUNode {
 	out.Clique = labels[LabelClique]
 	out.UpgradeState = labels[LabelUpgradeState]
 
-	out.Capacity = quantity(node.Status.Capacity, source.ResourceGPU)
-	out.Allocatable = quantity(node.Status.Allocatable, source.ResourceGPU)
+	// The whole-GPU count is the two names summed. With renameByDefault set
+	// the device plugin advertises the replicas under nvidia.com/gpu.shared
+	// and nvidia.com/gpu not at all, and mid-rollout a node carries both; a
+	// reader wants what the scheduler can place either way.
+	out.Capacity = wholeGPUs(node.Status.Capacity)
+	out.Allocatable = wholeGPUs(node.Status.Allocatable)
 
 	out.Requested, out.RequestedKnown = 0, ctx.requestedKnown
 	if ctx.requestedKnown {
@@ -186,7 +190,9 @@ func mode(node *corev1.Node, hasSlice bool) string {
 	byPlugin := false
 
 	for name, q := range node.Status.Capacity {
-		isGPU := name == source.ResourceGPU || strings.HasPrefix(string(name), source.ResourceMIGPrefix)
+		isGPU := name == source.ResourceGPU ||
+			name == source.ResourceGPUShared ||
+			strings.HasPrefix(string(name), source.ResourceMIGPrefix)
 		if isGPU && q.Sign() > 0 {
 			byPlugin = true
 
@@ -213,6 +219,8 @@ func migResources(node *corev1.Node) map[string]ResourceCount {
 	var out map[string]ResourceCount
 
 	for name, q := range node.Status.Capacity {
+		// Only the MIG profile prefix, which nvidia.com/gpu.shared does not
+		// carry: a shared whole GPU is not a MIG profile.
 		if !strings.HasPrefix(string(name), source.ResourceMIGPrefix) {
 			continue
 		}
@@ -322,6 +330,14 @@ func isReady(node *corev1.Node) bool {
 	}
 
 	return false
+}
+
+// wholeGPUs sums the resources that are a whole GPU, as opposed to a MIG
+// profile: nvidia.com/gpu and the renameByDefault spelling of it. The two are
+// matched exactly, never by prefix, because nvidia.com/gpu is a prefix of
+// every other nvidia.com/gpu* resource there is.
+func wholeGPUs(list corev1.ResourceList) int64 {
+	return quantity(list, source.ResourceGPU) + quantity(list, source.ResourceGPUShared)
 }
 
 // quantity reads one resource off a resource list as a whole number, which is
