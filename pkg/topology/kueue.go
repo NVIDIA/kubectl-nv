@@ -43,14 +43,14 @@ func ParseTopology(obj unstructured.Unstructured) (KueueTopology, error) {
 		return KueueTopology{}, fmt.Errorf("reading spec.levels of Topology %q: %w", name, err)
 	}
 	if !found || len(raw) == 0 {
-		return KueueTopology{}, fmt.Errorf("Topology %q declares no spec.levels", name)
+		return KueueTopology{}, fmt.Errorf("the Topology %q declares no spec.levels", name)
 	}
 
 	levels := make([]string, 0, len(raw))
 	for _, item := range raw {
 		level, ok := item.(map[string]any)
 		if !ok {
-			return KueueTopology{}, fmt.Errorf("Topology %q has a level that is not an object", name)
+			return KueueTopology{}, fmt.Errorf("the Topology %q has a level that is not an object", name)
 		}
 		// A level with no nodeLabel is skipped rather than refused: it groups
 		// nothing, and a group keyed by the empty string would hold every
@@ -66,7 +66,7 @@ func ParseTopology(obj unstructured.Unstructured) (KueueTopology, error) {
 	}
 
 	if len(levels) == 0 {
-		return KueueTopology{}, fmt.Errorf("Topology %q declares no level with a nodeLabel", name)
+		return KueueTopology{}, fmt.Errorf("the Topology %q declares no level with a nodeLabel", name)
 	}
 
 	return KueueTopology{Name: name, Levels: levels}, nil

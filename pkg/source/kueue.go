@@ -56,7 +56,7 @@ var kueueVersions = []string{"v1beta2", "v1beta1"}
 // Like ErrNotInstalled it carries no exit code. A cluster without Kueue is a
 // cluster whose topology levels are the NVIDIA and Topograph labels and
 // nothing else, which is an answer the command prints rather than a failure.
-var ErrKueueNotInstalled = errors.New("Kueue is not installed: the cluster serves no kueue.x-k8s.io topologies")
+var ErrKueueNotInstalled = errors.New("kueue is not installed: the cluster serves no kueue.x-k8s.io topologies")
 
 // listKueue walks one Kueue resource at the newest version the cluster
 // actually serves.
