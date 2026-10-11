@@ -110,7 +110,7 @@ var faultCases = []faultCase{
 		script:       "nv-dcgm-001.sh",
 		severity:     "warning",
 		component:    "nvidia-dcgm-exporter",
-		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter", "operands"},
+		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter", "operands", "pod", "phase", "ready", "restarts"},
 		appear:       6 * time.Minute,
 		clear:        6 * time.Minute,
 	},
@@ -119,7 +119,7 @@ var faultCases = []faultCase{
 		script:       "nv-dp-001.sh",
 		severity:     "error",
 		component:    "nvidia-device-plugin-daemonset",
-		evidenceKeys: []string{"nvidia.com/gpu.deploy.device-plugin", "operands"},
+		evidenceKeys: []string{"nvidia.com/gpu.deploy.device-plugin", "operands", "pod", "phase", "ready", "restarts"},
 		appear:       6 * time.Minute,
 		clear:        6 * time.Minute,
 	},
@@ -128,7 +128,7 @@ var faultCases = []faultCase{
 		script:       "nv-node-001.sh",
 		severity:     "warning",
 		component:    "node",
-		evidenceKeys: []string{"feature.node.kubernetes.io/pci-10de.present"},
+		evidenceKeys: []string{"feature.node.kubernetes.io/pci-10de.present", "operands"},
 		appear:       4 * time.Minute,
 		clear:        4 * time.Minute,
 	},
@@ -137,7 +137,7 @@ var faultCases = []faultCase{
 		script:       "nv-node-002.sh",
 		severity:     "error",
 		component:    "node",
-		evidenceKeys: []string{"nvidia.com/gpu.present", "capacity", "allocatable", "hinted"},
+		evidenceKeys: []string{"nvidia.com/gpu.present", "capacity", "allocatable", "hinted", "operands"},
 		appear:       6 * time.Minute,
 		clear:        6 * time.Minute,
 	},
@@ -165,7 +165,7 @@ var faultCases = []faultCase{
 		severity:      "error",
 		component:     "gpu-operator",
 		clusterScoped: true,
-		evidenceKeys:  []string{"name"},
+		evidenceKeys:  []string{"name", "status.state"},
 		appear:        6 * time.Minute,
 		clear:         6 * time.Minute,
 	},
@@ -339,6 +339,14 @@ func waitForClean(t *testing.T, tc faultCase, since time.Time) {
 	t.Helper()
 
 	deadline := time.Now().Add(tc.clear)
+	// Two clean reports in a row rather than one. A recover that returns
+	// before the operand it disturbed is back leaves a gap of a few seconds in
+	// which the lane looks clean and then does not, and one clean poll inside
+	// that gap would end the wait with the fault still arriving. The scripts
+	// wait for their own operand as well; this is the second lock on the same
+	// door, and it costs one poll interval per case.
+	const cleanRunsWanted = 2
+	cleanRuns := 0
 
 	for {
 		report, code := healthJSON(t, "--fail-on", "warning")
@@ -355,7 +363,12 @@ func waitForClean(t *testing.T, tc faultCase, since time.Time) {
 		}
 
 		if len(left) == 0 && code == 0 {
-			return
+			cleanRuns++
+			if cleanRuns >= cleanRunsWanted {
+				return
+			}
+		} else {
+			cleanRuns = 0
 		}
 
 		if time.Now().After(deadline) {

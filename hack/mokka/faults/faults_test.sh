@@ -99,6 +99,17 @@ case "${args[0]:-} ${args[1]:-}" in
         ;;
 esac
 
+# A jsonpath that escapes the slash of a label key matches nothing in real
+# kubectl: a dot separates path components and a slash does not, so \/ is a
+# literal backslash followed by a slash. Answering such a read with the fixture
+# would let a script that escaped it look as though it had read the label.
+case "$*" in
+    *'\/'*)
+        echo "kubectl: no label key contains a backslash: $*" >&2
+        exit 1
+        ;;
+esac
+
 if [ "${args[0]:-}" = "get" ] && [ "${args[1]:-}" = "node" ]; then
     # `get node <name> -o name` is the existence probe.
     for a in "$@"; do
@@ -114,11 +125,27 @@ if [ "${args[0]:-}" = "get" ] && [ "${args[1]:-}" = "node" ]; then
 fi
 
 if [ "${args[0]:-}" = "get" ] && [ "${args[1]:-}" = "deploy" ]; then
+    # A Deployment readiness read is answered separately from the spec reads,
+    # so that a recover waiting for the operator to come back can be driven
+    # into both outcomes.
+    case "$*" in
+        *readyReplicas*)
+            printf '%s' "${FAKE_READY_REPLICAS:-1}"
+            exit 0
+            ;;
+    esac
     printf '%s' "${FAKE_DEPLOY_FIELD:-}"
     exit 0
 fi
 
 if [ "${args[0]:-}" = "get" ] && [ "${args[1]:-}" = "pod" ]; then
+    # Likewise for a pod's Ready condition.
+    case "$*" in
+        *'type=="Ready"'*)
+            printf '%s' "${FAKE_POD_READY:-True}"
+            exit 0
+            ;;
+    esac
     printf '%s' "${FAKE_POD:-}"
     exit 0
 fi
@@ -213,7 +240,11 @@ NODE="kubectl-nv-faults-worker"
 reset() {
     : > "${FAKE_CALL_LOG}"
     rm -rf "${MOKKA_STATE_DIR}"
-    unset FAKE_LABEL_VALUE FAKE_DEPLOY_FIELD FAKE_POD FAKE_GET FAKE_NODE_EXISTS
+    unset FAKE_LABEL_VALUE FAKE_DEPLOY_FIELD FAKE_GET FAKE_NODE_EXISTS
+    unset FAKE_POD_READY FAKE_READY_REPLICAS FAULTS_READY_TIMEOUT FAULTS_READY_POLL
+    # A recover waits for the operand it disturbed, so the default lane the
+    # cases run against has one, and it is Ready.
+    export FAKE_POD="nvidia-dcgm-exporter-fixture"
     export FAKE_CONTEXT="kind-kubectl-nv-faults"
     export MOKKA_KUBECONFIG="${LANE_KUBECONFIG}"
 }
@@ -443,6 +474,39 @@ assert_rc 1 "nv-node-001.sh fails when the operator will not drain"
 assert_logged "scale deploy/gpu-operator --replicas=0" "nv-node-001.sh scales the operator down"
 assert_not_logged "label node" "nv-node-001.sh clears no label while an operator pod is up"
 unset FAULTS_DRAIN_TIMEOUT FAULTS_DRAIN_POLL
+
+# ---------------------------------------------------------------------------
+# recover waits for the operand it disturbed
+# ---------------------------------------------------------------------------
+#
+# Putting a label back is not the same thing as the lane being well again. The
+# final live run caught exactly that: nv-op-002.sh restored the deploy label and
+# returned while the operator was still recreating the exporter pod, and the
+# healthy gate that runs after the fault suite then reported NV-DCGM-001 on a
+# lane whose faults had all been "recovered".
+
+reset
+export FAKE_LABEL_VALUE="true"
+invoke "nv-op-002.sh" "inject" "${NODE}"
+assert_rc 0 "nv-op-002.sh injects before the readiness case"
+
+: > "${FAKE_CALL_LOG}"
+export FAKE_POD_READY="False"
+export FAULTS_READY_TIMEOUT=0
+export FAULTS_READY_POLL=0
+invoke "nv-op-002.sh" "recover" "${NODE}"
+assert_rc 1 "recover fails when the operand never becomes Ready"
+assert_says "no Ready nvidia-dcgm-exporter pod" "recover says which operand it was waiting for"
+assert_logged "label node ${NODE} nvidia.com/gpu.deploy.dcgm-exporter=true" \
+    "recover restores the label before it waits"
+
+# The saved state survives a recover that could not finish, so the lane can be
+# recovered again once the operand comes back.
+: > "${FAKE_CALL_LOG}"
+unset FAKE_POD_READY FAULTS_READY_TIMEOUT FAULTS_READY_POLL
+invoke "nv-op-002.sh" "recover" "${NODE}"
+assert_rc 0 "recover succeeds once the operand is Ready"
+assert_says "is Ready again" "recover says the operand is back"
 
 # ---------------------------------------------------------------------------
 # Nothing ever reaches the caller's own kubeconfig
