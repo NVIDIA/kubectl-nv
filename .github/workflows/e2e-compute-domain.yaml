@@ -19,8 +19,14 @@
 #
 # Nightly and on demand, not on pull requests. The lane is twice the cluster
 # of the e2e Mokka job and installs a third chart, so it is paid for once a
-# day rather than once a push. A change that needs it before it merges is run
-# with workflow_dispatch against its branch.
+# day rather than once a push.
+#
+# Neither trigger fires from a branch. GitHub reads schedule and
+# workflow_dispatch only from the copy of this file on the DEFAULT branch, so
+# nothing here runs at all until this lands on main, and the pull request that
+# adds it cannot demonstrate it. Once it is on main, workflow_dispatch can be
+# pointed at any branch and will run that branch's code with this file's
+# triggers.
 #
 # Every action is pinned to a commit, not to a tag: a tag is moved by whoever
 # owns the action, and this job has a checkout and a Docker daemon in reach.
@@ -53,15 +59,27 @@ jobs:
     # GPU Operator images on four workers, and Kueue, before the suite starts.
     # The lane's own waits have to fit inside this with room to spare, or the
     # job is killed mid-install and reports a timeout instead of whichever
-    # wait actually ran out:
+    # wait actually ran out.
     #
-    #   2 x 12m helm                                   24m
-    #   2 x 420s ready (operands, then the assertions)  14m
-    #   runner setup, kind create, image pulls          about 8m
-    #   suite, teardown and the diagnostics dump        about 5m
-    #                                                  -----
-    #                                                   51m   against 60m
-    timeout-minutes: 60
+    # MOKKA_READY_TIMEOUT is the budget of ONE wait, and up.sh arms a fresh
+    # deadline for each, so the worst case is the sum of four of them rather
+    # than one shared 420s:
+    #
+    #   helm nvml-mock                                   12m
+    #   helm gpu-operator                                12m
+    #   420s operand DaemonSet rollout                    7m
+    #   420s fabric assertions on four workers            7m
+    #   420s Kueue controller rollout                     7m
+    #   420s Kueue Topology/ResourceFlavor apply retry    7m
+    #   runner setup, kind create, image pulls         about 8m
+    #   suite, teardown and the diagnostics dump       about 5m
+    #                                                   -----
+    #                                                    65m   against 75m
+    #
+    # Every one of those waits is well above what a healthy lane needs. They
+    # are the budget for a lane that is failing slowly, which is the case this
+    # job has to survive long enough to collect diagnostics for.
+    timeout-minutes: 75
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -98,7 +116,10 @@ jobs:
           set -euo pipefail
           workdir="$(mktemp -d)"
           cd "${workdir}"
-          curl -fsSLo kind \
+          # --retry, because a nightly that dies on one flaky release fetch
+          # wastes a whole day. The digest below is what makes retrying safe:
+          # whatever comes back is checked before it is installed.
+          curl -fsSLo kind --retry 5 --retry-delay 5 --retry-all-errors \
             "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
           # The binary creates the cluster everything after it trusts, so it is
           # checked before it is installed, not after.
@@ -125,6 +146,13 @@ jobs:
       - name: Test the lane scripts
         run: bash hack/mokka/compute-domain/up_test.sh
 
+      # Before anything that takes a cluster. The suite is behind two build
+      # tags, so a compile error in it is invisible to every other job in this
+      # repository and would otherwise surface forty minutes from now, with
+      # the lane already up.
+      - name: Vet the compute domain suite
+        run: go vet -tags e2e,computedomain ./test/e2e/...
+
       - name: Build kubectl-nv
         run: make build
 
@@ -145,7 +173,16 @@ jobs:
           KUBECONFIG: ${{ github.workspace }}/hack/mokka/bin/kubeconfig-compute-domain
           KUBECTL_NV_BIN: ${{ github.workspace }}/bin/kubectl-nv
         run: |
-          go test -tags e2e,computedomain -count=1 -timeout 30m ./test/e2e/...
+          # The computedomain tag adds this lane's tests to the suite, it does
+          # not replace it: the must-gather and exit-code tests compile under
+          # the e2e tag alone and belong to the two worker lane, where they are
+          # already run. -run keeps this job to the tests this lane exists for.
+          # hack/mokka/compute-domain/up_test.sh checks that every test in
+          # topology_test.go matches one of these three prefixes, so a test
+          # added there cannot be silently skipped here.
+          go test -tags e2e,computedomain -count=1 -timeout 30m \
+            -run '^(TestTopology|TestJobNeeding|TestKueueLevels)' \
+            ./test/e2e/...
 
       # Collected while the cluster is still up, which is why this runs before
       # the teardown and not after it. Cancelled as well as failed: a run
@@ -168,6 +205,35 @@ jobs:
           kubectl --context "${CONTEXT}" get topologies.kueue.x-k8s.io,resourceflavors.kueue.x-k8s.io \
             -o yaml > "${DIAG}/kueue.yaml" 2>&1 || true
           kubectl --context "${CONTEXT}" get jobs -A -o yaml > "${DIAG}/jobs.yaml" 2>&1 || true
+
+          # The two things that say why a clique label is wrong. GFD does not
+          # write node labels directly: it publishes a NodeFeature and
+          # nfd-master applies it, so the NodeFeature is what GFD actually
+          # reported and the node is only where it ended up. The GFD pod's
+          # environment says whether NRI reached it: NODE_NAME and
+          # MOCK_TOPOLOGY_CONFIG present means it resolved this lane's
+          # cliques, absent means it resolved the gb200 placeholder and
+          # overwrote the kind config's static labels with it.
+          kubectl --context "${CONTEXT}" get nodefeatures.nfd.k8s-sigs.io -A -o yaml \
+            > "${DIAG}/nodefeatures.yaml" 2>&1 || true
+          for pod in $(kubectl --context "${CONTEXT}" -n gpu-operator get pods \
+            -l app=gpu-feature-discovery -o name 2>/dev/null || true); do
+            {
+              echo "=== ${pod} env as the pod spec declares it ==="
+              kubectl --context "${CONTEXT}" -n gpu-operator get "${pod}" \
+                -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{range .env[*]}  {.name}={.value}{"\n"}{end}{end}'
+              echo
+              echo "=== ${pod} env as the process sees it, NRI edits included ==="
+              kubectl --context "${CONTEXT}" -n gpu-operator exec "${pod}" -- env
+            } >> "${DIAG}/gfd-env.txt" 2>&1 || true
+          done
+
+          # Disk and image space. Five kind nodes plus the GPU Operator images
+          # is the usual way a runner runs out, and the failure that produces
+          # reads as an unrelated timeout.
+          df -h > "${DIAG}/df.txt" 2>&1 || true
+          docker system df -v > "${DIAG}/docker-df.txt" 2>&1 || true
+
           kind export logs "${DIAG}/kind" --name kubectl-nv-compute-domain \
             > "${DIAG}/kind-export.txt" 2>&1 || true
 

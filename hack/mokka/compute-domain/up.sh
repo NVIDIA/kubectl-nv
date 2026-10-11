@@ -204,13 +204,16 @@ if [ "${worker_count}" -ne "${CD_WORKER_COUNT}" ]; then
     mokka::die 5 "compute-domain/up.sh: ${CLUSTER} has ${worker_count} worker(s), expected ${CD_WORKER_COUNT}"
 fi
 
-DEADLINE=$(( $(date +%s) + MOKKA_READY_TIMEOUT ))
-
 # ---------------------------------------------------------------------------
 # Wait for the operand DaemonSets
 # ---------------------------------------------------------------------------
+#
+# Every wait below arms its own deadline. MOKKA_READY_TIMEOUT is therefore the
+# budget of one phase, not of all of them together, which is what the
+# workflow's timeout-minutes is reckoned against.
 
 mokka::phase "wait for operand DaemonSets"
+DEADLINE="$(cd::deadline)"
 ds_ready=false
 ds_report=""
 while :; do
@@ -271,6 +274,7 @@ fi
 #     and the kind config disagree about which worker is where.
 
 mokka::phase "assert the fabric on every worker"
+DEADLINE="$(cd::deadline)"
 assert_ok=false
 failures=""
 summary=""
@@ -363,6 +367,7 @@ k --namespace "${KUEUE_NAMESPACE}" rollout status "deployment/${KUEUE_DEPLOYMENT
 # deployment is not yet that, so the apply is retried until the deadline
 # rather than failing on the first rejection.
 mokka::phase "apply the Kueue topology objects"
+DEADLINE="$(cd::deadline)"
 applied=false
 apply_err=""
 while :; do

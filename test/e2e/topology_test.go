@@ -61,20 +61,48 @@ const (
 	// tierZeroLabel is Topograph's closest-to-the-node fabric tier.
 	tierZeroLabel = "fabric.topograph.run/tier-0"
 
+	// hostnameLabel is Kueue's required last level, and the label the node
+	// level of the walk is keyed by.
+	hostnameLabel = "kubernetes.io/hostname"
+
+	// nodeLevel is how the report names the walk's implicit narrowest level.
+	// kubernetes.io/hostname is a Kueue level that repeats it, so its entry
+	// has to point back here rather than be walked a second time.
+	nodeLevel = "node"
+
+	// kueueSource marks a level the report took from a Kueue Topology rather
+	// than from the walk's own list.
+	kueueSource = "kueue"
+
 	// The two cliques, named after the ComputeDomain the lane declares.
 	cliqueZero = "00000000-0000-0000-0000-0000000000ab.0"
 	cliqueOne  = "00000000-0000-0000-0000-0000000000ab.1"
+
+	// domainValue is the accelerator domain that spans both cliques, and so
+	// the group a job needing three of the four workers lands in.
+	domainValue = "nvl-domain-0"
 
 	// gpusPerNode is the gb200 profile's device count. Four workers of four.
 	gpusPerNode = 4
 	// nodesPerClique is two, so a clique holds eight GPUs and cannot hold a
 	// job that needs three nodes.
 	nodesPerClique = 2
+
+	// The lane's cluster, and so the prefix kind derives every worker name
+	// from. Fixed rather than discovered: a test that read the node names out
+	// of the report and then checked the report against them would pass
+	// whatever the report said.
+	laneCluster = "kubectl-nv-compute-domain"
 )
 
-// The Kueue levels the lane declares, widest first, which is the order Kueue
-// itself requires. kubectl nv topology walks them last to first.
-var kueueLevels = []string{cliqueLabel, "kubernetes.io/hostname"}
+// The workers in each clique, by name. kind names the first worker
+// <cluster>-worker and the rest <cluster>-workerN counting from two;
+// hack/mokka/compute-domain/lib.sh puts the first two in clique 0.
+var (
+	cliqueZeroNodes = []string{laneCluster + "-worker", laneCluster + "-worker2"}
+	cliqueOneNodes  = []string{laneCluster + "-worker3", laneCluster + "-worker4"}
+	allWorkerNodes  = append(append([]string{}, cliqueZeroNodes...), cliqueOneNodes...)
+)
 
 // topologyReport is the JSON contract this lane asserts: the Track G brief's
 // description of what "kubectl nv topology -o json" emits. The Go type belongs
@@ -138,11 +166,20 @@ func TestTopologyReportsTwoCliquesOfTwoNodes(t *testing.T) {
 		t.Fatalf("level %s has %d groups, want 2: %+v", cliqueLabel, got, level.Groups)
 	}
 
-	for _, want := range []string{cliqueZero, cliqueOne} {
+	for _, clique := range []struct {
+		value string
+		nodes []string
+	}{
+		{cliqueZero, cliqueZeroNodes},
+		{cliqueOne, cliqueOneNodes},
+	} {
+		want := clique.value
 		group := groupByValue(t, level, want)
-		if len(group.Nodes) != nodesPerClique {
-			t.Errorf("clique %s holds nodes %v, want %d of them",
-				want, group.Nodes, nodesPerClique)
+		// The exact node names, not their count: two workers from the wrong
+		// clique would satisfy a count and would make every fit answer below
+		// mean something other than what it claims.
+		if got := sortedCopy(group.Nodes); !equalStrings(got, clique.nodes) {
+			t.Errorf("clique %s holds nodes %v, want %v", want, got, clique.nodes)
 		}
 		if group.Allocatable != nodesPerClique*gpusPerNode {
 			t.Errorf("clique %s allocatable = %d, want %d",
@@ -204,10 +241,35 @@ func TestJobNeedingEightGPUsFitsInOneClique(t *testing.T) {
 	if !level.Fits {
 		t.Fatalf("level %s does not fit an 8 GPU job: %+v", cliqueLabel, level)
 	}
-	sort.Strings(level.Groups)
 	want := []string{cliqueOne, cliqueZero}
-	if strings.Join(level.Groups, ",") != strings.Join(want, ",") {
-		t.Errorf("clique groups that fit = %v, want %v", level.Groups, want)
+	if got := sortedCopy(level.Groups); !equalStrings(got, want) {
+		t.Errorf("clique groups that fit = %v, want %v", got, want)
+	}
+
+	// An alias is reported, never walked. This is the half the shape of the
+	// report cannot enforce on its own, and it needs a fit answer to check:
+	// a report that listed kubernetes.io/hostname with a correct aliasOf and
+	// still walked it would group every node under its own name and offer a
+	// level nobody can schedule at.
+	for _, walked := range fit.Levels {
+		if walked.Label == hostnameLabel {
+			t.Errorf("the fit walk includes %s, which is an alias of the %s level: %s",
+				hostnameLabel, nodeLevel, formatFitLevels(fit.Levels))
+		}
+	}
+
+	// Each of those groups is the two workers the lane put in it, by name.
+	for _, clique := range []struct {
+		value string
+		nodes []string
+	}{
+		{cliqueZero, cliqueZeroNodes},
+		{cliqueOne, cliqueOneNodes},
+	} {
+		group := groupByValue(t, levelByLabel(t, report, cliqueLabel), clique.value)
+		if got := sortedCopy(group.Nodes); !equalStrings(got, clique.nodes) {
+			t.Errorf("clique %s holds nodes %v, want %v", clique.value, got, clique.nodes)
+		}
 	}
 }
 
@@ -239,12 +301,29 @@ func TestJobNeedingTwelveGPUsFitsAtTheAcceleratorDomain(t *testing.T) {
 		}
 	}
 
+	if fit.Pods != 3 || fit.GPUsPerPod != gpusPerNode {
+		t.Errorf("fit reports %d pods of %d GPUs, want 3 of %d",
+			fit.Pods, fit.GPUsPerPod, gpusPerNode)
+	}
+
 	domain := fitLevelByLabel(t, fit, domainLabel)
 	if !domain.Fits {
 		t.Fatalf("level %s does not fit a 12 GPU job: %+v", domainLabel, domain)
 	}
-	if len(domain.Groups) != 1 {
-		t.Errorf("accelerator domain groups that fit = %v, want exactly one", domain.Groups)
+	// The exact group, not its count: the lane declares one accelerator
+	// domain holding all four workers, and that is the only group that can
+	// hold three pods.
+	if got := sortedCopy(domain.Groups); !equalStrings(got, []string{domainValue}) {
+		t.Errorf("accelerator domain groups that fit = %v, want [%s]", got, domainValue)
+	}
+
+	// And it really is all four workers, so "fits at the domain" is not a
+	// claim about a group that happens to carry a wider name.
+	level := levelByLabel(t, report, domainLabel)
+	group := groupByValue(t, level, domainValue)
+	if got := sortedCopy(group.Nodes); !equalStrings(got, sortedCopy(allWorkerNodes)) {
+		t.Errorf("accelerator domain %s holds nodes %v, want %v",
+			domainValue, got, sortedCopy(allWorkerNodes))
 	}
 }
 
@@ -256,24 +335,52 @@ func TestJobNeedingTwelveGPUsFitsAtTheAcceleratorDomain(t *testing.T) {
 func TestKueueLevelsAppearInTheReport(t *testing.T) {
 	report := topologyJSON(t, "topology", "-o", "json")
 
-	for _, label := range kueueLevels {
-		level := levelByLabel(t, report, label)
-		if level.Source != "kueue" && level.AliasOf == "" {
-			t.Errorf("Kueue level %s is reported with source %q and aliasOf %q; "+
-				"it is neither attributed to Kueue nor marked an alias",
-				label, level.Source, level.AliasOf)
+	// kubernetes.io/hostname repeats the walk's implicit node level, so its
+	// Kueue entry has to point back at that level by name. An entry with an
+	// empty aliasOf is a level the report means to walk.
+	hostname := kueueLevelByLabel(t, report, hostnameLabel)
+	if hostname.AliasOf != nodeLevel {
+		t.Errorf("the Kueue level %s has aliasOf %q, want %q",
+			hostnameLabel, hostname.AliasOf, nodeLevel)
+	}
+
+	// nvidia.com/gpu.clique repeats the walk's own clique level, so its Kueue
+	// entry points at that label.
+	clique := kueueLevelByLabel(t, report, cliqueLabel)
+	if clique.AliasOf != cliqueLabel {
+		t.Errorf("the Kueue level %s has aliasOf %q, want %q",
+			cliqueLabel, clique.AliasOf, cliqueLabel)
+	}
+
+	// How many times each label is WALKED, as against reported as an alias.
+	walked := make(map[string]int)
+	for _, level := range report.Levels {
+		if level.AliasOf == "" {
+			walked[level.Label]++
 		}
 	}
 
-	// Both of the lane's Kueue levels are aliases, so neither may appear
-	// twice in the walk.
-	seen := make(map[string]int)
-	for _, level := range report.Levels {
-		seen[level.Label]++
+	// kubernetes.io/hostname is never a walked level on this lane. It names
+	// the implicit node level, so every entry carrying it has to be an alias.
+	// Counting repeats is not enough here: a report that aliases it correctly
+	// once and also walks it once has one of each, and the walked one is the
+	// bug.
+	if got := walked[hostnameLabel]; got != 0 {
+		t.Errorf("%s is walked %d times; it names the implicit %s level, so it is only ever an alias",
+			hostnameLabel, got, nodeLevel)
 	}
-	for label, count := range seen {
+
+	// The clique label is the opposite case: it is a level of the walk in its
+	// own right, so it is walked exactly once and the Kueue entry aliases it.
+	if got := walked[cliqueLabel]; got != 1 {
+		t.Errorf("%s is walked %d times, want exactly 1", cliqueLabel, got)
+	}
+
+	// And in general a label may be walked once. It may appear again only as
+	// an alias.
+	for label, count := range walked {
 		if count > 1 {
-			t.Errorf("level %s appears %d times; a level that repeats an earlier one is an alias, not a level",
+			t.Errorf("level %s is walked %d times; a level that repeats an earlier one is an alias, not a level",
 				label, count)
 		}
 	}
@@ -283,7 +390,9 @@ func TestKueueLevelsAppearInTheReport(t *testing.T) {
 // A job the caller named and the cluster does not have is a bad argument, not
 // a cluster failure, so it is 2 and not 1 or 4.
 func TestTopologyForAMissingJobIsAUsageError(t *testing.T) {
-	res := run(t, "topology", "--for", "job/no-such-job-on-this-lane",
+	const missing = "no-such-job-on-this-lane"
+
+	res := run(t, "topology", "--for", "job/"+missing,
 		"-n", jobNamespace, "-o", "json")
 
 	if res.code != 2 {
@@ -293,6 +402,29 @@ func TestTopologyForAMissingJobIsAUsageError(t *testing.T) {
 	// A caller parsing stdout must not be handed a partial report.
 	if strings.TrimSpace(res.stdout) != "" {
 		t.Errorf("stdout = %q, want empty", res.stdout)
+	}
+
+	// Exit 2 alone proves nothing here. A binary with no topology command at
+	// all exits 2 on "unknown flag: --for", and so would a binary that lost
+	// --for in a refactor. What has to be true is that the command ran, looked
+	// for this job, and said it was not there.
+	for _, want := range []string{missing, jobNamespace} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr does not name %q; it is:\n%s", want, res.stderr)
+		}
+	}
+	if !strings.Contains(strings.ToLower(res.stderr), "not found") {
+		t.Errorf("stderr does not give the not-found cause; it is:\n%s", res.stderr)
+	}
+
+	// The three ways exit 2 can mean "the command line was wrong" rather than
+	// "the job was not there". Each of these passing the test above is the
+	// failure this check exists to catch.
+	for _, forbidden := range []string{"unknown flag", "unknown command", "Usage:"} {
+		if strings.Contains(res.stderr, forbidden) {
+			t.Errorf("stderr contains %q, so exit 2 is about the command line and not about the job:\n%s",
+				forbidden, res.stderr)
+		}
 	}
 }
 
@@ -325,21 +457,65 @@ func topologyJSON(t *testing.T, args ...string) topologyReport {
 	return report
 }
 
-// levelByLabel returns the level with that label, failing with the labels that
-// are there when it is absent.
+// levelByLabel returns the walked level with that label, failing with the
+// labels that are there when it is absent. An alias entry is skipped: it
+// carries no groups of its own.
 func levelByLabel(t *testing.T, report topologyReport, label string) topologyLevel {
 	t.Helper()
 
 	var labels []string
 	for _, level := range report.Levels {
-		if level.Label == label {
+		if level.Label == label && level.AliasOf == "" {
 			return level
 		}
 		labels = append(labels, level.Label)
 	}
-	t.Fatalf("no level %s in the report; it has %v", label, labels)
+	t.Fatalf("no walked level %s in the report; it has %v", label, labels)
 
 	return topologyLevel{}
+}
+
+// kueueLevelByLabel returns the entry the report took from the lane's Kueue
+// Topology for that label. Both of this lane's Kueue levels repeat a level the
+// walk already has, so each appears beside the walked one rather than instead
+// of it, and the two have to be told apart by source.
+func kueueLevelByLabel(t *testing.T, report topologyReport, label string) topologyLevel {
+	t.Helper()
+
+	var seen []string
+	for _, level := range report.Levels {
+		if level.Label == label && level.Source == kueueSource {
+			return level
+		}
+		seen = append(seen, level.Label+"(source="+level.Source+",aliasOf="+level.AliasOf+")")
+	}
+	t.Fatalf("the report has no level %s attributed to Kueue; it has %v", label, seen)
+
+	return topologyLevel{}
+}
+
+// sortedCopy sorts without reordering the caller's slice, so an assertion
+// cannot change what a later assertion sees.
+func sortedCopy(items []string) []string {
+	out := append([]string{}, items...)
+	sort.Strings(out)
+
+	return out
+}
+
+// equalStrings reports whether two slices hold the same strings in the same
+// order.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
 }
 
 // groupByValue returns the group with that value.

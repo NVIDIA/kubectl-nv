@@ -220,6 +220,15 @@ case "${args}" in
         ;;
     *'gpu\.clique'*)
         node="$(node_of "$@")"
+        # The first N clique queries answer with the profile's placeholder,
+        # whichever node they are about. It is how a fabric that settles after
+        # a few polls is simulated, which is what the assertion phase needs
+        # its own deadline for.
+        n="$(bump clique)"
+        if [ "${n}" -le "${FAKE_CLIQUE_WRONG_CALLS-0}" ]; then
+            printf '00000000-0000-0000-0000-000000000001.0'
+            exit 0
+        fi
         # A per-node override wins, which is what lets one worker be given the
         # wrong clique while the others are right.
         var="FAKE_CLIQUE_${node##*-}"
@@ -242,8 +251,20 @@ case "${args}" in
         echo "${FAKE_GPU_PRODUCT-NVIDIA-GB200}"
         exit 0
         ;;
-    *topograph*)
-        echo "${FAKE_TOPOGRAPH_LABEL-ib-leaf-0}"
+    *'topograph\.run/sub-domain'*)
+        echo "${FAKE_TOPOGRAPH_SUB_DOMAIN-nvl-partition-0}"
+        exit 0
+        ;;
+    *'topograph\.run/domain'*)
+        echo "${FAKE_TOPOGRAPH_DOMAIN-nvl-domain-0}"
+        exit 0
+        ;;
+    *'topograph\.run/tier-0'*)
+        echo "${FAKE_TOPOGRAPH_TIER_0-ib-leaf-0}"
+        exit 0
+        ;;
+    *'topograph\.run/tier-1'*)
+        echo "${FAKE_TOPOGRAPH_TIER_1-ib-spine-0}"
         exit 0
         ;;
     *"rollout status"*)
@@ -338,6 +359,15 @@ make_tool_dir() {
 # run_subject <script> <args...>
 # Runs the subject with an isolated PATH, with HOME pointed at a throwaway
 # directory holding a sentinel kubeconfig. Sets RC, OUT and ERR.
+#
+# The sentinel is checked here rather than in a case of its own, so that EVERY
+# invocation is covered rather than the two a reader happened to think of. The
+# path that clobbers a developer's kubeconfig is a kind or helm call that lost
+# its --kubeconfig, and which argument list triggers that is exactly what
+# nobody can predict in advance: a check placed on the happy path says nothing
+# about the refusal paths, the timeout paths, or the digest failure, each of
+# which exits through different code.
+SENTINEL_CHECKS=0
 run_subject() {
     local script="$1"
     shift
@@ -352,6 +382,18 @@ run_subject() {
     RC=$?
     OUT="$(cat "${WORK}/out")"
     ERR="$(cat "${WORK}/err")"
+
+    SENTINEL_CHECKS=$((SENTINEL_CHECKS + 1))
+    local after
+    after="$(sentinel_hash)"
+    if [ "${after}" != "${SENTINEL_BEFORE}" ]; then
+        nope "${script##*/} $* touched the default kubeconfig" \
+            "before: ${SENTINEL_BEFORE}" "after:  ${after}"
+        # Put it back, or every later run would report the same failure and
+        # the first one would be lost in the noise.
+        printf '%s\n' 'SENTINEL do not touch the default kubeconfig' \
+            > "${FAKE_HOME}/.kube/config"
+    fi
 }
 
 sentinel_hash() {
@@ -462,11 +504,14 @@ SENTINEL_BEFORE="$(sentinel_hash)"
 
 reset_fixtures() {
     unset FAKE_KIND_CLUSTERS FAKE_KIND_RC FAKE_HELM_RELEASES FAKE_HELM_RC
-    unset FAKE_WORKERS FAKE_ALLOCATABLE FAKE_GPU_PRODUCT FAKE_TOPOGRAPH_LABEL
+    unset FAKE_WORKERS FAKE_ALLOCATABLE FAKE_GPU_PRODUCT
+    unset FAKE_TOPOGRAPH_SUB_DOMAIN FAKE_TOPOGRAPH_DOMAIN
+    unset FAKE_TOPOGRAPH_TIER_0 FAKE_TOPOGRAPH_TIER_1
     unset FAKE_DS_STATUS FAKE_DS_NOTREADY_CALLS FAKE_DS_NOTREADY_STATUS
     unset FAKE_CLIQUE_ALL FAKE_CLIQUE_worker FAKE_CLIQUE_worker2
     unset FAKE_CLIQUE_worker3 FAKE_CLIQUE_worker4
     unset FAKE_CURL_BODY FAKE_CURL_RC FAKE_KUEUE_ROLLOUT_RC FAKE_KUEUE_APPLY_REJECTS
+    unset FAKE_CLIQUE_WRONG_CALLS
     unset FAKE_NAMESPACE_EXISTS FAKE_NAMESPACE_RC
     export KUEUE_SHA256="${FAKE_BODY_SHA256}"
     export FAKE_CURL_BODY="${FAKE_BODY}"
@@ -730,18 +775,71 @@ assert_says "worker3: label nvidia.com/gpu.clique is '00000000-0000-0000-0000-00
     "up.sh names the worker that is in the wrong clique"
 unset FAKE_CLIQUE_worker3
 
-export FAKE_TOPOGRAPH_LABEL=""
+# One case per Topograph label, each with that label alone made absent. A
+# single fixture that blanked all four would be satisfied by a subject that
+# checks only one of them, and would say nothing about the other three.
+for pair in \
+    "FAKE_TOPOGRAPH_SUB_DOMAIN:accelerator.topograph.run/sub-domain" \
+    "FAKE_TOPOGRAPH_DOMAIN:accelerator.topograph.run/domain" \
+    "FAKE_TOPOGRAPH_TIER_0:fabric.topograph.run/tier-0" \
+    "FAKE_TOPOGRAPH_TIER_1:fabric.topograph.run/tier-1"; do
+    var="${pair%%:*}"
+    label="${pair#*:}"
+    export "${var}="
+    run_subject "${UP}"
+    assert_rc 5 "up.sh fails when ${label} alone is absent"
+    assert_says "${label} is absent" "up.sh names ${label} as the absent one"
+    # And it must name THAT label, not merely some label. A subject that
+    # reported a fixed label whatever was missing would pass the line above.
+    for other in \
+        accelerator.topograph.run/sub-domain \
+        accelerator.topograph.run/domain \
+        fabric.topograph.run/tier-0 \
+        fabric.topograph.run/tier-1; do
+        if [ "${other}" = "${label}" ]; then
+            continue
+        fi
+        if printf '%s\n%s\n' "${OUT}" "${ERR}" | grep -qF -- "${other} is absent"; then
+            nope "with only ${label} absent, up.sh also reported ${other} absent" \
+                "stderr: ${ERR}"
+        else
+            ok "with ${label} absent, up.sh does not also report ${other}"
+        fi
+    done
+    unset "${var}"
+done
+
+export FAKE_GPU_PRODUCT=""
 run_subject "${UP}"
-assert_rc 5 "up.sh fails when a Topograph label is absent"
-assert_says "accelerator.topograph.run/domain is absent" \
-    "up.sh names the Topograph label that is absent"
-unset FAKE_TOPOGRAPH_LABEL
+assert_rc 5 "up.sh fails when nvidia.com/gpu.product is absent"
+assert_says "label nvidia.com/gpu.product is absent" \
+    "up.sh names the product label as the absent one"
+unset FAKE_GPU_PRODUCT
 
 export FAKE_ALLOCATABLE=8
 run_subject "${UP}"
 assert_rc 5 "up.sh fails when a worker advertises the wrong GPU count"
 assert_says "expected 4 for profile gb200" "up.sh names the count it expected"
 unset FAKE_ALLOCATABLE
+
+# The operand DaemonSets settle, but on three nodes rather than four. Nothing
+# is unready and nothing is mid-update, so only the desired-equals-workers
+# half of the rollout check can catch it.
+export FAKE_DS_STATUS="3 3 3"
+run_subject "${UP}"
+assert_rc 5 "up.sh fails when an operand DaemonSet is scheduled on three of the four workers"
+assert_says "desired=3 ready=3 updated=3, want desired=ready=updated=4" \
+    "up.sh prints the rollout numbers it saw against the ones it wanted"
+unset FAKE_DS_STATUS
+
+# Everything desired is ready, but one pod is still on the old spec. A check
+# that compared only desired against ready would call this rolled out.
+export FAKE_DS_STATUS="4 4 3"
+run_subject "${UP}"
+assert_rc 5 "up.sh fails when an operand DaemonSet has a pod still on the old spec"
+assert_says "desired=4 ready=4 updated=3, want desired=ready=updated=4" \
+    "up.sh names the lagging update rather than only the count"
+unset FAKE_DS_STATUS
 
 export FAKE_WORKERS="kubectl-nv-compute-domain-worker kubectl-nv-compute-domain-worker2"
 run_subject "${UP}"
@@ -752,6 +850,50 @@ unset FAKE_WORKERS
 export FAKE_DS_NOTREADY_CALLS=1000
 run_subject "${UP}"
 assert_rc 5 "up.sh fails when the operand DaemonSets never roll out"
+unset FAKE_DS_NOTREADY_CALLS
+
+reset_fixtures
+
+# ---------------------------------------------------------------------------
+# Each wait gets its own deadline
+# ---------------------------------------------------------------------------
+#
+# A slow but healthy operand rollout must not spend the budget the fabric
+# assertion then needs.
+#
+# Checked on what the subject announces rather than by racing it. Timing a
+# phase out is a coin toss on a loaded machine; the deadline each phase armed
+# is a fact it prints. Three waits means three armed deadlines, and the second
+# has to be LATER than the first, which is only true if it was armed after the
+# first wait finished rather than beside it.
+#
+# The rollout is made to take a couple of seconds so that "later" is a
+# difference the one-second resolution of the clock can carry. Nothing here
+# depends on anything finishing within a deadline: the timeout is generous and
+# every wait converges.
+export MOKKA_READY_TIMEOUT=30
+export MOKKA_POLL_INTERVAL=1
+export FAKE_DS_NOTREADY_CALLS=2
+run_subject "${UP}"
+assert_rc 0 "the lane comes up when every wait converges"
+
+armed="$(printf '%s\n' "${ERR}" | sed -n 's/^\[mokka\] deadline armed at \([0-9]*\).*/\1/p')"
+armed_count="$(printf '%s\n' "${armed}" | grep -c '[0-9]')"
+if [ "${armed_count}" -eq 3 ]; then
+    ok "up.sh arms a deadline for each of its three waits"
+else
+    nope "up.sh armed ${armed_count} deadline(s), want 3 (operand rollout, fabric assertions, Kueue apply)" \
+        "armed: $(printf '%s' "${armed}" | tr '\n' ' ')"
+fi
+
+first="$(printf '%s\n' "${armed}" | sed -n '1p')"
+second="$(printf '%s\n' "${armed}" | sed -n '2p')"
+if [ -n "${first}" ] && [ -n "${second}" ] && [ "${second}" -gt "${first}" ]; then
+    ok "the fabric assertions' deadline is armed after the rollout wait ends, not beside it"
+else
+    nope "the second deadline (${second:-<none>}) is not later than the first (${first:-<none>})" \
+        "a wait that inherits an earlier wait's deadline starts with whatever that one left"
+fi
 unset FAKE_DS_NOTREADY_CALLS
 
 reset_fixtures
@@ -809,28 +951,50 @@ assert_rc 2 "down.sh does not mistake ${CLUSTER}-old for ${CLUSTER}"
 unset FAKE_KIND_CLUSTERS
 
 # ---------------------------------------------------------------------------
-# Neither script touches the default kubeconfig
+# Neither script touches the default kubeconfig, on any path
 # ---------------------------------------------------------------------------
+#
+# run_subject checked the sentinel after every single invocation above and
+# called nope on the spot for any that moved it. All that is left here is to
+# say how many invocations that was, because a counter at zero would mean the
+# check never ran and every line above it was free.
 
-reset_fixtures
-run_subject "${UP}"
-if [ "$(sentinel_hash)" = "${SENTINEL_BEFORE}" ]; then
-    ok "up.sh leaves the default kubeconfig byte-identical"
+if [ "${SENTINEL_CHECKS}" -ge 30 ]; then
+    ok "the default kubeconfig is byte-identical after all ${SENTINEL_CHECKS} subject runs"
 else
-    nope "up.sh modified the default kubeconfig" \
-        "before: ${SENTINEL_BEFORE}" "after:  $(sentinel_hash)"
+    nope "only ${SENTINEL_CHECKS} subject runs were checked against the sentinel; expected at least 30" \
+        "a run_subject that stopped checking would make every path above unguarded"
 fi
 
-FAKE_KIND_CLUSTERS="$(printf '%s\n' "${CLUSTER}")"
-export FAKE_KIND_CLUSTERS
-run_subject "${DOWN}"
-if [ "$(sentinel_hash)" = "${SENTINEL_BEFORE}" ]; then
-    ok "down.sh leaves the default kubeconfig byte-identical"
+# ---------------------------------------------------------------------------
+# The workflow's -run pattern reaches every test in the suite file
+# ---------------------------------------------------------------------------
+#
+# .github/workflows/e2e-compute-domain.yaml runs this lane's tests with
+# -run '^(TestTopology|TestJobNeeding|TestKueueLevels)', because the suite also
+# holds the two worker lane's tests under the e2e tag alone. A test added to
+# topology_test.go with a name outside those prefixes would be skipped in CI
+# and would look like it passed. This is the guard against that.
+
+SUITE_FILE="${SCRIPT_DIR}/../../../test/e2e/topology_test.go"
+if [ -f "${SUITE_FILE}" ]; then
+    unmatched="$(grep -E '^func Test' "${SUITE_FILE}" |
+        sed -E 's/^func (Test[A-Za-z0-9_]*).*/\1/' |
+        grep -Ev '^Test(Topology|JobNeeding|KueueLevels)' || true)"
+    if [ -z "${unmatched}" ]; then
+        matched="$(grep -cE '^func Test' "${SUITE_FILE}")"
+        if [ "${matched}" -gt 0 ]; then
+            ok "all ${matched} tests in topology_test.go match the workflow's -run pattern"
+        else
+            nope "topology_test.go declares no tests, so the -run guard proves nothing"
+        fi
+    else
+        nope "these tests in topology_test.go are outside the workflow's -run pattern and would be skipped in CI" \
+            "${unmatched}"
+    fi
 else
-    nope "down.sh modified the default kubeconfig" \
-        "before: ${SENTINEL_BEFORE}" "after:  $(sentinel_hash)"
+    nope "the suite file is not where this guard expects it: ${SUITE_FILE}"
 fi
-unset FAKE_KIND_CLUSTERS
 
 # ---------------------------------------------------------------------------
 # Static analysis of the scripts under test

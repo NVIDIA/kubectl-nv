@@ -56,10 +56,14 @@ CD_DOMAIN_NAME="kubectl-nv-compute-domain"
 # Kueue
 # ---------------------------------------------------------------------------
 #
-# v0.18.11, released 2026-10-01, the newest patch of the newest release line
-# that still serves kueue.x-k8s.io/v1beta1 beside v1beta2. Both served
-# versions are what the topology command reads; main has already dropped
-# v1beta1, so a lane pinned there would stop covering it.
+# v0.18.11, released 2026-10-01. It serves both kueue.x-k8s.io/v1beta1 and
+# v1beta2, which are the two versions the topology command reads.
+#
+# It is NOT the only release that does. Every line from 0.15 through 0.19
+# serves both, 0.19 included, so a bump to the newest of those stays correct;
+# only kueue's main has dropped v1beta1 so far. This pin is a known-good
+# release of a line that is still maintained, not a ceiling, and moving it
+# forward needs nothing more than the CRD check below.
 #
 # The digest is of the release's manifests.yaml, written out here rather than
 # fetched beside it. A checksum served from the same place as the file it
@@ -111,6 +115,21 @@ cd::worker_clique() {
     else
         printf '1'
     fi
+}
+
+# cd::deadline
+# Prints the wall clock second a phase starting now must finish by. Each phase
+# calls this for itself: one deadline shared by several waits means the last of
+# them inherits whatever the earlier ones spent, so a slow but healthy operand
+# rollout turns into a Kueue timeout that says nothing about Kueue.
+cd::deadline() {
+    local at
+    at=$(( $(date +%s) + MOKKA_READY_TIMEOUT ))
+    # Announced, because a run that ends in a timeout has to say WHICH wait ran
+    # out and when it started counting. The announcement goes to stderr so that
+    # the command substitution this is called in still gets only the number.
+    printf '[mokka] deadline armed at %s (+%ss)\n' "${at}" "${MOKKA_READY_TIMEOUT}" >&2
+    printf '%s' "${at}"
 }
 
 # cd::sha256 <file>
