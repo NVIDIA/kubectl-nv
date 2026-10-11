@@ -357,7 +357,12 @@ func (g *Gatherer) writeDeviceUsage(driver *driverTarget, fileName string) error
 	if err != nil {
 		return g.logError(fmt.Sprintf("error creating %s: %%v", fileName), err)
 	}
-	defer file.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			file.discard()
+		}
+	}()
 
 	for _, step := range deviceUsageCommands {
 		if _, werr := fmt.Fprintf(file, "# %s output from %s\n", step.heading, node); werr != nil {
@@ -375,6 +380,10 @@ func (g *Gatherer) writeDeviceUsage(driver *driverTarget, fileName string) error
 		}
 	}
 
+	if cerr := file.commit(); cerr != nil {
+		return g.logError(fmt.Sprintf("error writing %s: %%v", fileName), cerr)
+	}
+	committed = true
 	return nil
 }
 

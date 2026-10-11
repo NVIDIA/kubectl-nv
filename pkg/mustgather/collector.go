@@ -417,16 +417,10 @@ func (g *Gatherer) writeCustomResources(list *unstructured.UnstructuredList, fil
 		return g.logError(fmt.Sprintf("error marshalling %s: %%v", what), err)
 	}
 
-	file, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, fileName))
-	if err != nil {
-		return g.logError(fmt.Sprintf("error creating %s: %%v", fileName), err)
-	}
-	defer file.Close()
-
-	if _, err := file.Write(data); err != nil {
-		return g.logError(fmt.Sprintf("error writing %s: %%v", fileName), err)
-	}
-	return nil
+	return g.writeArtifactFile(fileName, func(w io.Writer) error {
+		_, werr := w.Write(data)
+		return werr
+	})
 }
 
 // noteAbsent records that a kind is not there. It is an answer about the

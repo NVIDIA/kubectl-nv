@@ -108,7 +108,19 @@ func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container
 	if err != nil {
 		return g.logError(fmt.Sprintf("error creating %s: %%v", fileName), err)
 	}
-	defer logFile.Close()
+	committed := false
+	defer func() {
+		if !committed {
+			logFile.discard()
+		}
+	}()
+	commit := func(cause error) error {
+		if cerr := logFile.commit(); cerr != nil {
+			return g.logError(fmt.Sprintf("error writing %s: %%v", fileName), cerr)
+		}
+		committed = true
+		return cause
+	}
 
 	podLogOpts := v1.PodLogOptions{
 		Container:  container,
@@ -134,9 +146,9 @@ func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container
 			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 		}
 		if previous {
-			return writeStringToFile(logFile, "No previous logs available\n")
+			return commit(writeStringToFile(logFile, "No previous logs available\n"))
 		}
-		return writeStringToFile(logFile, fmt.Sprintf("No logs available: %v\n", err))
+		return commit(writeStringToFile(logFile, fmt.Sprintf("No logs available: %v\n", err)))
 	}
 	defer stream.Close()
 
@@ -149,5 +161,5 @@ func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container
 	if err := writer.Flush(); err != nil {
 		return g.logError(fmt.Sprintf("error flushing %s: %%v", fileName), err)
 	}
-	return nil
+	return commit(nil)
 }

@@ -320,22 +320,11 @@ func (g *Gatherer) gatherOpenShiftVersion() error {
 		// Construct the file path for the OpenShift version file.
 		versionFilePath := filepath.Join(g.opts.ArtifactDir, "openshift_version.yaml")
 		// Create the file.
-		file, err := g.createArtifact(versionFilePath)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating openshift_version.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer file.Close() // Ensure the file is closed when done.
-
-		// Write the OpenShift version information into the file.
-		if _, err := file.WriteString(oversion); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing openshift_version.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+		_ = versionFilePath
+		return g.writeArtifactFile("openshift_version.yaml", func(w io.Writer) error {
+			_, werr := io.WriteString(w, oversion)
+			return werr
+		})
 	}
 	return nil
 }
@@ -356,22 +345,10 @@ func (g *Gatherer) gatherNodeInfo() error {
 			return err
 		}
 
-		// Create machines.yaml file.
-		machinesFile, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, "machines.yaml"))
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating machines.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer machinesFile.Close() // Ensure file closure.
-
-		if _, err = machinesFile.Write(machines); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing machines.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+		return g.writeArtifactFile("machines.yaml", func(w io.Writer) error {
+			_, werr := w.Write(machines)
+			return werr
+		})
 	} else {
 		listFunc := func(opts metav1.ListOptions) (v1.NodeList, string, error) {
 			nl, err := g.clientset.CoreV1().Nodes().List(context.Background(), opts)
@@ -392,34 +369,18 @@ func (g *Gatherer) gatherNodeInfo() error {
 		}
 		nodes.Items = g.nodesWanted(nodes.Items)
 
-		// Create nodes.yaml file.
-		nodesFile, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, "nodes.yaml"))
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating nodes.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer nodesFile.Close() // Ensure file closure.
-
 		// Marshal nodes into YAML format.
 		stampNodeList(&nodes)
-		data, err := yaml.Marshal(nodes)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling nodes: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
+		data, merr := yaml.Marshal(nodes)
+		if merr != nil {
+			return g.logError("error marshalling nodes: %v", merr)
 		}
 
-		if _, err = nodesFile.Write(data); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing nodes.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+		return g.writeArtifactFile("nodes.yaml", func(w io.Writer) error {
+			_, werr := w.Write(data)
+			return werr
+		})
 	}
-	return nil
 }
 
 // gatherOperatorNamespace retrieves the namespace of the operator pods
@@ -529,14 +490,6 @@ func (g *Gatherer) gatherGPUNodes() error {
 		return skip("no GPU nodes")
 	}
 
-	// Create the file to store the GPU node information.
-	gpuNodesFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_nodes.yaml")
-	gpuNodesFile, err := g.createArtifact(gpuNodesFilePath)
-	if err != nil {
-		return g.logError("error creating gpu_nodes.yaml: %v", err)
-	}
-	defer gpuNodesFile.Close()
-
 	// Marshal the collected GPU nodes into YAML.
 	stamped := gpuNodes
 	stampNodeList(&stamped)
@@ -545,8 +498,11 @@ func (g *Gatherer) gatherGPUNodes() error {
 		return g.logError("error marshalling gpuNodes: %v", err)
 	}
 
-	if _, err = gpuNodesFile.Write(data); err != nil {
-		return g.logError("error writing gpu_nodes.yaml: %v", err)
+	if werr := g.writeArtifactFile("gpu_nodes.yaml", func(w io.Writer) error {
+		_, e := w.Write(data)
+		return e
+	}); werr != nil {
+		return werr
 	}
 
 	return g.gatherGPUNodeText(gpuNodes.Items)
@@ -637,10 +593,13 @@ func (g *Gatherer) writeArtifactFile(name string, write func(io.Writer) error) e
 	if err != nil {
 		return g.logError(fmt.Sprintf("error creating %s: %%v", name), err)
 	}
-	defer file.Close()
 
-	if err := write(file); err != nil {
-		return g.logError(fmt.Sprintf("error writing %s: %%v", name), err)
+	if werr := write(file); werr != nil {
+		file.discard()
+		return g.logError(fmt.Sprintf("error writing %s: %%v", name), werr)
+	}
+	if cerr := file.commit(); cerr != nil {
+		return g.logError(fmt.Sprintf("error writing %s: %%v", name), cerr)
 	}
 	return nil
 }
@@ -682,8 +641,9 @@ func writePrefixedLines(dst io.Writer, src io.Reader, podName, container string)
 	}
 }
 
-// writeStringToFile is a helper function that writes a string to the provided file.
-func writeStringToFile(file *os.File, s string) error {
+// writeStringToFile is a helper function that writes a string to the provided
+// writer.
+func writeStringToFile(file io.StringWriter, s string) error {
 	if _, err := file.WriteString(s); err != nil {
 		return fmt.Errorf("error writing string to file: %w", err)
 	}
@@ -887,15 +847,61 @@ func stampDaemonSetList(l *appsv1.DaemonSetList) {
 	}
 }
 
-// createArtifact makes one collected artifact and records that the bundle now
-// holds something.
-func (g *Gatherer) createArtifact(path string) (*os.File, error) {
-	file, err := createArtifactFile(path)
+// artifactTempSuffix marks a file that is still being written. A reader of a
+// bundle never sees one: it is renamed into place when the write finishes and
+// removed when it does not.
+const artifactTempSuffix = ".part"
+
+// artifactFile is one artifact being written.
+//
+// It lands under a temporary name and is renamed into place by commit. A
+// collector that starts writing and then fails used to leave a half-written
+// file behind, and the manifest, written afterwards, indexed it with the
+// digest it actually had: the bundle was self-consistent and a reader took a
+// truncated YAML for the cluster's whole state.
+type artifactFile struct {
+	file  *os.File
+	final string
+	g     *Gatherer
+}
+
+// Write implements io.Writer.
+func (a *artifactFile) Write(p []byte) (int, error) { return a.file.Write(p) }
+
+// WriteString implements io.StringWriter.
+func (a *artifactFile) WriteString(s string) (int, error) { return a.file.WriteString(s) }
+
+// commit puts the artifact in place under its own name and records it.
+func (a *artifactFile) commit() error {
+	if err := a.file.Close(); err != nil {
+		_ = os.Remove(a.file.Name())
+		return fmt.Errorf("closing %s: %w", filepath.Base(a.final), err)
+	}
+	if err := os.Rename(a.file.Name(), a.final); err != nil {
+		_ = os.Remove(a.file.Name())
+		return fmt.Errorf("putting %s in place: %w", filepath.Base(a.final), err)
+	}
+	a.g.recordArtifact(a.final)
+	return nil
+}
+
+// discard throws away a write that did not finish.
+func (a *artifactFile) discard() {
+	_ = a.file.Close()
+	if err := os.Remove(a.file.Name()); err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(a.g.errLogFile,
+			"Error removing the unfinished artifact %s: %v\n", filepath.Base(a.file.Name()), err)
+	}
+}
+
+// createArtifact starts one artifact of the bundle. The caller commits it or
+// discards it; nothing is recorded until it commits.
+func (g *Gatherer) createArtifact(path string) (*artifactFile, error) {
+	file, err := createArtifactFile(path + artifactTempSuffix)
 	if err != nil {
 		return nil, err
 	}
-	g.recordArtifact(path)
-	return file, nil
+	return &artifactFile{file: file, final: path, g: g}, nil
 }
 
 // recordArtifact notes that the bundle now holds one more file, and which
