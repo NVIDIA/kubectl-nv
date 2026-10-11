@@ -334,3 +334,240 @@ func TestBuildWithoutTheOperatorIsNotAnError(t *testing.T) {
 		t.Errorf("operands = %#v, want none without a GPU Operator", operands)
 	}
 }
+
+// draPod is a pod carrying one of the DRA driver's identifying labels and
+// nothing else, which is what the standalone charts produce: they label by
+// component rather than with an "app" key.
+func draPod(name, namespace, node string, labels map[string]string) corev1.Pod {
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
+		Spec: corev1.PodSpec{
+			NodeName:   node,
+			Containers: []corev1.Container{{Name: "plugin", Image: "nvcr.io/nvidia/dra-driver:v25.3.0"}},
+		},
+		Status: corev1.PodStatus{
+			Phase:             corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "plugin", Ready: true}},
+		},
+	}
+}
+
+// TestDRAComponentLabelVariants pins the three label spellings the DRA
+// kubelet plugin has shipped under, and the one the IMEX daemon uses.
+//
+// A node whose kubelet plugin is not running advertises nothing under DRA
+// however healthy every GPU Operator pod on it looks, so a spelling this
+// package does not recognise hides exactly the pod a reader needs.
+func TestDRAComponentLabelVariants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{
+			name:   "operator managed, app label",
+			labels: map[string]string{"app": "nvidia-dra-driver-kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "standalone chart v25.x",
+			labels: map[string]string{"nvidia-dra-driver-gpu-component": "kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "renamed chart, v0.4.x",
+			labels: map[string]string{"dra-driver-nvidia-gpu-component": "kubelet-plugin"},
+			want:   ComponentDRADriver,
+		},
+		{
+			name:   "IMEX daemon, keyed by the compute domain",
+			labels: map[string]string{"resource.nvidia.com/computeDomain": "0b1d7a1e-dead-beef-cafe-000000000001"},
+			want:   ComponentIMEXDaemon,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pod := draPod("dra-abc", "nvidia-dra-driver-gpu", "worker-1", tt.labels)
+			if got := operandFromPod(&pod).Component; got != tt.want {
+				t.Errorf("Component = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDRAComponentLabelsAreExact pins that the match is on the exact keys and
+// values. A prefix or substring match would claim every pod of an unrelated
+// chart that happens to use a "-component" key.
+func TestDRAComponentLabelsAreExact(t *testing.T) {
+	t.Parallel()
+
+	for _, labels := range []map[string]string{
+		{"nvidia-dra-driver-gpu-component": "controller"},
+		{"some-other-chart-component": "kubelet-plugin"},
+		{"nvidia-dra-driver-gpu-component-extra": "kubelet-plugin"},
+		{"resource.nvidia.com/computeDomain.cliqueID": "1"},
+	} {
+		pod := draPod("not-dra", "elsewhere", "worker-1", labels)
+		if got := operandFromPod(&pod).Component; got == ComponentDRADriver || got == ComponentIMEXDaemon {
+			t.Errorf("labels %v were read as %q, want no DRA classification", labels, got)
+		}
+	}
+}
+
+// TestOperandsByNodeReachesDRAOutsideTheOperatorNamespace is the whole point
+// of classifying by label: the standalone DRA driver installs into its own
+// namespace, so a namespace filter alone drops it.
+func TestOperandsByNodeReachesDRAOutsideTheOperatorNamespace(t *testing.T) {
+	t.Parallel()
+
+	pods := []corev1.Pod{
+		operandPod("device-plugin-1", "gpu-operator", "worker-1", ComponentDevicePlugin),
+		draPod("dra-in-operator-ns", "gpu-operator", "worker-1",
+			map[string]string{"app": "nvidia-dra-driver-kubelet-plugin"}),
+		draPod("dra-standalone", "nvidia-dra-driver-gpu", "worker-1",
+			map[string]string{"nvidia-dra-driver-gpu-component": "kubelet-plugin"}),
+		draPod("dra-sigs", "dra-driver", "worker-1",
+			map[string]string{"dra-driver-nvidia-gpu-component": "kubelet-plugin"}),
+		draPod("imex-daemon", "nvidia-dra-driver-gpu", "worker-1",
+			map[string]string{"resource.nvidia.com/computeDomain": "0b1d7a1e"}),
+		// Somebody else's pod, in somebody else's namespace, with no DRA and
+		// no operator label: not an operand.
+		draPod("training-job", "team-ml", "worker-1", map[string]string{"app.kubernetes.io/name": "trainer"}),
+	}
+
+	got := make([]string, 0, 5)
+	for _, o := range operandsByNode(pods, "gpu-operator")["worker-1"] {
+		got = append(got, o.Name)
+	}
+
+	want := []string{"device-plugin-1", "dra-in-operator-ns", "dra-sigs", "dra-standalone", "imex-daemon"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("operands = %v, want %v", got, want)
+	}
+}
+
+// TestDRAOperandsWithoutAnOperator pins that a cluster running the standalone
+// DRA driver and no GPU Operator still reports its operands.
+func TestDRAOperandsWithoutAnOperator(t *testing.T) {
+	t.Parallel()
+
+	pods := []corev1.Pod{
+		draPod("dra-standalone", "nvidia-dra-driver-gpu", "worker-1",
+			map[string]string{"nvidia-dra-driver-gpu-component": "kubelet-plugin"}),
+		draPod("training-job", "team-ml", "worker-1", nil),
+	}
+
+	operands := operandsByNode(pods, operatorNamespace(pods))["worker-1"]
+	if len(operands) != 1 || operands[0].Component != ComponentDRADriver {
+		t.Fatalf("operands = %#v, want the one kubelet plugin", operands)
+	}
+}
+
+// TestComponentPrecedence pins the order the component name is resolved in.
+// Every operand has to get a non-empty one: a pod reported with an empty
+// component is a pod a reader cannot act on.
+func TestComponentPrecedence(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		owners []metav1.OwnerReference
+		want   string
+	}{
+		{
+			name: "app wins over every other label",
+			labels: map[string]string{
+				"app":                         ComponentDCGM,
+				"app.kubernetes.io/component": "something-else",
+				"app.kubernetes.io/name":      "another-thing",
+			},
+			want: ComponentDCGM,
+		},
+		{
+			name: "app.kubernetes.io/component when there is no app",
+			labels: map[string]string{
+				"app.kubernetes.io/component": "nvidia-something-new",
+				"app.kubernetes.io/name":      "another-thing",
+			},
+			want: "nvidia-something-new",
+		},
+		{
+			name:   "app.kubernetes.io/name when there is neither",
+			labels: map[string]string{"app.kubernetes.io/name": "node-feature-discovery"},
+			want:   "node-feature-discovery",
+		},
+		{
+			name: "the controlling owner when there is no label at all",
+			owners: []metav1.OwnerReference{
+				{Kind: "ReplicaSet", Name: "not-the-controller"},
+				{Kind: "DaemonSet", Name: "nvidia-node-status-exporter", Controller: ptrTo(true)},
+			},
+			want: "nvidia-node-status-exporter",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pod := draPod("p", "gpu-operator", "worker-1", tt.labels)
+			pod.OwnerReferences = tt.owners
+
+			if got := operandFromPod(&pod).Component; got != tt.want {
+				t.Errorf("Component = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestEveryOperandHasAComponent is the guarantee behind the precedence: a pod
+// with nothing to go on at all still reports something a reader can name.
+func TestEveryOperandHasAComponent(t *testing.T) {
+	t.Parallel()
+
+	pods := []corev1.Pod{
+		draPod("bare-pod", "gpu-operator", "worker-1", nil),
+		draPod("named-pod", "gpu-operator", "worker-1", map[string]string{"app.kubernetes.io/name": "nfd-worker"}),
+	}
+
+	for _, o := range operandsByNode(pods, "gpu-operator")["worker-1"] {
+		if o.Component == "" {
+			t.Errorf("operand %s has an empty component", o.Name)
+		}
+	}
+}
+
+// TestValidatorInitResultRunning pins the third state an init container can be
+// in. "Running" is not "exited 0" and not "waiting", and a validation in
+// flight must not read as one that passed.
+func TestValidatorInitResultRunning(t *testing.T) {
+	t.Parallel()
+
+	pod := operandPod("nvidia-operator-validator-xyz", "gpu-operator", "worker-1", ComponentOperatorValidator)
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{{
+		Name:  "cuda-validation",
+		State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+	}}
+
+	results := operandFromPod(&pod).InitContainers
+	if len(results) != 1 {
+		t.Fatalf("InitContainers = %#v, want one result", results)
+	}
+
+	if results[0].ExitCode != nil {
+		t.Errorf("ExitCode = %d, want none: the container is still running", *results[0].ExitCode)
+	}
+
+	if results[0].Reason != "Running" {
+		t.Errorf("Reason = %q, want Running", results[0].Reason)
+	}
+}
+
+// ptrTo is the one-line helper the owner reference fixtures need.
+func ptrTo[T any](v T) *T { return &v }
