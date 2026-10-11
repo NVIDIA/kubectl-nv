@@ -231,7 +231,7 @@ ds_report=""
 while :; do
     ds_report=""
     all_ok=true
-    for ds in ${MOKKA_OPERAND_DAEMONSETS}; do
+    for ds in ${MOKKA_GATE_DAEMONSETS}; do
         status="$(k --namespace "${GPU_OPERATOR_NAMESPACE}" get daemonset "${ds}" \
             -o 'jsonpath={.status.desiredNumberScheduled} {.status.numberReady} {.status.updatedNumberScheduled}' \
             2> /dev/null || true)"

@@ -65,22 +65,32 @@ GPU_OPERATOR_VERSION="v26.3.3"
 GPU_OPERATOR_RELEASE="gpu-operator"
 GPU_OPERATOR_NAMESPACE="gpu-operator"
 
-# The operand DaemonSets whose rollout decides whether the lane is usable.
+# The operand DaemonSets that make a node a GPU node: these two put
+# nvidia.com/gpu into node allocatable and the nvidia.com/* labels onto it. The
+# validator and the exporter do neither.
 #
-# The first two put nvidia.com/gpu into node allocatable and the nvidia.com/*
-# labels onto the node. The exporter does neither, and it is here because of
-# what reads the lane next rather than because of what it writes: its readiness
-# probe carries a 45 second initialDelaySeconds, so for three quarters of a
-# minute after the other two are ready it is a GPU Operator operand that the
-# ClusterPolicy enables and that is not Ready. `kubectl nv health` reports that
-# as NV-DCGM-001 at warning, and the healthy gate that runs straight after this
-# script then fails on a lane that is merely still starting.
+# Every lane that builds on this file reads this list, the compute domain lane
+# included, so it holds only what is true of all of them. What one lane
+# additionally waits for belongs in that lane's own list.
+MOKKA_OPERAND_DAEMONSETS="nvidia-device-plugin-daemonset gpu-feature-discovery"
+
+# What hack/mokka/up.sh waits for before it calls its lane ready, which is more
+# than the list above.
+#
+# The exporter is here because of what reads the lane next rather than because
+# of what it writes. Its readiness probe carries a 45 second
+# initialDelaySeconds, so for three quarters of a minute after the other two
+# are ready it is a GPU Operator operand that the ClusterPolicy enables and
+# that is not Ready; `kubectl nv health` reports that as NV-DCGM-001 at
+# warning, and the healthy gate that runs straight after this script then fails
+# on a lane that is merely still starting.
 #
 # A lane whose values file disabled the exporter would wait here for the whole
 # ready timeout and then fail, because an absent DaemonSet is read as "not
-# yet". That is deliberate: this list is the definition of a usable lane, and
-# hack/mokka/gpu-operator-values.yaml enables the exporter.
-MOKKA_OPERAND_DAEMONSETS="nvidia-device-plugin-daemonset gpu-feature-discovery nvidia-dcgm-exporter"
+# yet". That is why this is the Mokka lane's own list and not the shared one:
+# hack/mokka/gpu-operator-values.yaml enables the exporter, and
+# hack/mokka/compute-domain has its own values and its own answer.
+MOKKA_GATE_DAEMONSETS="${MOKKA_OPERAND_DAEMONSETS} nvidia-dcgm-exporter"
 
 # ---------------------------------------------------------------------------
 # Timings, all overridable for tests
