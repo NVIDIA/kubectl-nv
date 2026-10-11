@@ -427,3 +427,55 @@ func TestBuildNodeRequested(t *testing.T) {
 		t.Error("RequestedKnown = true, want false when the pods were not listed")
 	}
 }
+
+// TestBuildNodeSharedResource pins what a time sliced node with
+// renameByDefault reports. The device plugin moves every replica onto
+// nvidia.com/gpu.shared and leaves nvidia.com/gpu absent, so a model that
+// reads only the whole-GPU name reports a node serving sixteen replicas as
+// having no GPUs at all.
+func TestBuildNodeSharedResource(t *testing.T) {
+	t.Parallel()
+
+	node := testNode("ts-1",
+		map[string]string{
+			"nvidia.com/gpu.sharing-strategy": "time-slicing",
+			"nvidia.com/gpu.replicas":         "4",
+		},
+		map[string]string{"nvidia.com/gpu.shared": "16"},
+		map[string]string{"nvidia.com/gpu.shared": "12"})
+
+	got := buildNode(node, nodeContext{})
+
+	equal(t, "Capacity", got.Capacity, int64(16))
+	equal(t, "Allocatable", got.Allocatable, int64(12))
+	equal(t, "Mode", got.Mode, ModeDevicePlugin)
+	equal(t, "Sharing.Strategy", got.Sharing.Strategy, "time-slicing")
+}
+
+// TestBuildNodeSharedAndWholeAreSummed pins the mid-migration shape: a node
+// can advertise both names at once while the plugin's configuration rolls out,
+// and a reader wants the total the scheduler can place.
+func TestBuildNodeSharedAndWholeAreSummed(t *testing.T) {
+	t.Parallel()
+
+	node := testNode("mixed-1", nil,
+		map[string]string{"nvidia.com/gpu": "2", "nvidia.com/gpu.shared": "8"},
+		map[string]string{"nvidia.com/gpu": "1", "nvidia.com/gpu.shared": "4"})
+
+	got := buildNode(node, nodeContext{})
+
+	equal(t, "Capacity", got.Capacity, int64(10))
+	equal(t, "Allocatable", got.Allocatable, int64(5))
+}
+
+// TestBuildNodeSharedIsNotAMIGProfile pins that the shared name does not leak
+// into MIG.Resources, which is only ever about MIG profiles.
+func TestBuildNodeSharedIsNotAMIGProfile(t *testing.T) {
+	t.Parallel()
+
+	node := testNode("ts-2", nil, map[string]string{"nvidia.com/gpu.shared": "16"}, nil)
+
+	if resources := buildNode(node, nodeContext{}).MIG.Resources; len(resources) != 0 {
+		t.Errorf("MIG.Resources = %#v, want none", resources)
+	}
+}

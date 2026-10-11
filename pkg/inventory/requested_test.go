@@ -262,3 +262,34 @@ func TestGPUNodeRequestedComesFromThePods(t *testing.T) {
 		t.Errorf("GPUNode.Requested = %d, want 4 (2 + (1 + 1), with the Succeeded pod left out)", got.Requested)
 	}
 }
+
+// TestPodGPURequestCountsSharedReplicas pins that a pod asking for a time
+// sliced replica is counted. Under renameByDefault that is the only name a
+// workload can ask for, so ignoring it reports every busy node as idle.
+func TestPodGPURequestCountsSharedReplicas(t *testing.T) {
+	t.Parallel()
+
+	shared := func(n int64) corev1.Container {
+		return corev1.Container{
+			Name: "app",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					"nvidia.com/gpu.shared": *resource.NewQuantity(n, resource.DecimalSI),
+				},
+			},
+		}
+	}
+
+	pod := testPod("ts-workload", "n1", corev1.PodRunning, nil, []corev1.Container{shared(2)})
+	if got := podGPURequest(&pod); got != 2 {
+		t.Errorf("podGPURequest = %d, want 2", got)
+	}
+
+	// A pod asking for both names at once gets both counted, the same way the
+	// node's capacity sums them.
+	both := testPod("both", "n1", corev1.PodRunning, nil,
+		[]corev1.Container{shared(2), gpuContainer("whole", 1)})
+	if got := podGPURequest(&both); got != 3 {
+		t.Errorf("podGPURequest = %d, want 3", got)
+	}
+}
