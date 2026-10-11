@@ -121,6 +121,38 @@ func UsageArgs(validate cobra.PositionalArgs) cobra.PositionalArgs {
 	}
 }
 
+// The client side rate limits kubectl-nv asks for.
+//
+// client-go's defaults are DefaultQPS 5 and DefaultBurst 10 (rest/config.go:48
+// in the vendored tree). They are sized for a controller, which makes a few
+// calls and then watches; this is a diagnostic tool that reads whole
+// collections, paginated at 500, and whose must-gather then reads logs per
+// container per pod. At 5 queries per second a cluster large enough to need
+// the tool spends most of a run asleep in the client's own throttle, and the
+// symptom a user reports is that kubectl-nv is slow, which looks exactly like
+// a slow cluster.
+//
+// The numbers are kubectl-nv's own: there is no exported upstream constant for
+// a command line client's main configuration to copy. They are chosen against
+// two references in the vendored tree. cli-runtime raises the discovery burst
+// to 300 for a kubectl shaped client, reasoning that "with a burst of 300, we
+// will not be rate-limiting for most clusters but the safeguard will still be
+// here" (genericclioptions/config_flags.go:507), which is the same reasoning
+// for the same kind of client. Against that, this tool is pointed at clusters
+// that are already unhappy, and a diagnostic that adds load to a struggling
+// API server makes the incident worse, so the burst stays well under
+// kubectl's discovery figure.
+//
+// Ten times the default rate, with ten times the default burst, clears the
+// throttle for every collection kubectl-nv reads and leaves the safeguard in
+// place.
+const (
+	// clientQPS is the sustained request rate.
+	clientQPS = 50
+	// clientBurst is how far above it a short run may go.
+	clientBurst = 100
+)
+
 // NewFactory returns the Factory that talks to the cluster the configuration
 // flags point at. The REST configuration and the clients are built once and
 // reused, so a command that needs two of them does not read the kubeconfig
@@ -158,6 +190,17 @@ func (f *configFlagsFactory) restConfig() (*rest.Config, error) {
 	if err := setKubernetesDefaults(config); err != nil {
 		return nil, fmt.Errorf("applying kubernetes client defaults: %w", err)
 	}
+	// Only when the user has not asked for something else: a kubeconfig can
+	// carry these, and an administrator who throttled this client on purpose
+	// outranks a default.
+	if config.QPS == 0 {
+		config.QPS = clientQPS
+	}
+	if config.Burst == 0 {
+		config.Burst = clientBurst
+	}
+	// Built once and reused, so that every client made from this factory
+	// throttles against one bucket rather than one each.
 	f.config = config
 	return config, nil
 }
