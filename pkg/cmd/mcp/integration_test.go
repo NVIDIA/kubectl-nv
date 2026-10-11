@@ -347,8 +347,8 @@ func TestTheRealMustGatherIsNeverServedWithExecAvailable(t *testing.T) {
 		if !result.IsError {
 			t.Fatal("must-gather has no --no-exec flag and was served anyway")
 		}
-		if resultText(result) != want {
-			t.Errorf("refusal is %q,\nwant exactly %q", resultText(result), want)
+		if refusalText(result) != want {
+			t.Errorf("refusal is %q,\nwant exactly %q", refusalText(result), want)
 		}
 		if len(recorder.seen()) != 0 {
 			t.Error("a refused call still ran a gather")
@@ -422,6 +422,14 @@ func callTool(t *testing.T, session *sdk.ClientSession, name string) *sdk.CallTo
 	}
 
 	return result
+}
+
+// refusalText is the exact message a refused call carries, without the exit
+// code line every result ends with.
+func refusalText(result *sdk.CallToolResult) string {
+	message, _, _ := strings.Cut(resultText(result), "\n\nexit code ")
+
+	return message
 }
 
 // resultText returns the text content of a result.
