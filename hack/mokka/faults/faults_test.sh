@@ -301,8 +301,15 @@ if [ "${verb}" = "delete" ] && [ "${kind}" = "pod" ]; then
     # The DaemonSet controller replaces a deleted pod, and the replacement is a
     # different object. Counting the deletions is how the fixture gives it a
     # different UID.
-    printf '%s' "$(( $(cat "${FAKE_POD_GEN_FILE}" 2> /dev/null || echo 1) + 1 ))" \
-        > "${FAKE_POD_GEN_FILE}"
+    #
+    # FAKE_POD_STICKY models the window before that: the API server has
+    # accepted the delete and still lists the same pod, with the same UID and
+    # no deletionTimestamp yet. A caller that trusted the listing would take
+    # the pod it had just deleted for the replacement.
+    if [ -z "${FAKE_POD_STICKY:-}" ]; then
+        printf '%s' "$(( $(cat "${FAKE_POD_GEN_FILE}" 2> /dev/null || echo 1) + 1 ))" \
+            > "${FAKE_POD_GEN_FILE}"
+    fi
     exit 0
 fi
 
@@ -434,7 +441,7 @@ reset() {
     unset FAKE_NODE_EXISTS FAKE_CAPACITY FAKE_ALLOCATABLE FAKE_STANDIN \
         FAKE_OPERATOR_PODS FAKE_POD_READY FAKE_DEPLOY_READY FAKE_PODS \
         FAKE_TEMPLATE_IMAGE FAKE_POD_NODE FAKE_POD_UID FAKE_SERVER \
-        FAKE_APPLIED FAKE_POLICY_VERSION FAKE_POLICY_STATE
+        FAKE_APPLIED FAKE_POLICY_VERSION FAKE_POLICY_STATE FAKE_POD_STICKY
     export FAULTS_READY_TIMEOUT=10
     export FAULTS_READY_POLL=1
     export FAULTS_TEMPLATE_TIMEOUT=10
@@ -886,6 +893,26 @@ export FAKE_PODS="dying-pod pod-uid-9 2026-10-11T19:00:00Z"
 invoke "nv-node-003.sh" "inject" "${NODE}"
 assert_rc 2 "a terminating pod does not count as the pod on the node"
 assert_no_call "delete pod dying-pod --wait=false" "a terminating pod is not deleted again"
+
+# The pod a script just deleted is not its own replacement. For a moment the
+# API server still lists it, with the same UID and no deletionTimestamp, and a
+# recover that took it for the new pod would report the operand Ready when
+# nothing had restarted. The wait is given two seconds here, which is plenty
+# for a fixture that answers at once: a script that accepted the old pod
+# returns 0 inside them.
+reset
+export FAKE_POD_STICKY=1
+invoke "nv-node-003.sh" "inject" "${NODE}"
+assert_rc 0 "nv-node-003.sh injects before the sticky-pod check"
+
+: > "${FAKE_CALL_LOG}"
+: > "${FAKE_SCOPED_LOG}"
+export FAULTS_READY_TIMEOUT=2
+export FAULTS_READY_POLL=1
+invoke "nv-node-003.sh" "recover" "${NODE}"
+assert_rc 1 "recover does not take the pod it just deleted for the replacement"
+assert_says "no Ready nvidia-device-plugin-daemonset pod" \
+    "recover says it never saw a new pod"
 
 # ---------------------------------------------------------------------------
 # recover is idempotent, for every script

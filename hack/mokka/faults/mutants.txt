@@ -19,11 +19,14 @@ M06	nv-node-001.sh	k --namespace "${FAULTS_OPERATOR_NAMESPACE}" delete pod "${ST
 M07	nv-node-004.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${now}"
 M08	nv-node-001.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved_label}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "true"
 M09	nv-dp-001.sh	faults::save "version" "${before}"	: not saved
+M10	nv-node-002.sh	faults::save "label" "${before}"	: not saved
 M11	nv-node-004.sh	faults::save "label" "${before}"	: not saved
+M12	lib.sh	rm -rf "${FAULTS_STATE}"	:
 M13	nv-node-003.sh	faults::forget	: not forgotten
 M14	nv-node-001.sh	faults::forget	: not forgotten
 M15	lib.sh	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}/${FAULTS_NODE}"	FAULTS_STATE="${state_root}/${FAULTS_CODE}/${FAULTS_NODE}"
 M16	lib.sh	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}/${FAULTS_NODE}"	FAULTS_STATE="${state_root}/${lane}/${FAULTS_NODE}"
+M17	lib.sh	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}/${FAULTS_NODE}"	FAULTS_STATE="${state_root}/${lane}/${FAULTS_CODE}"
 M18	lib.sh	--field-selector "spec.nodeName=${node}" \	\
 M19	nv-dp-001.sh	faults::wait_for_template "nvidia-device-plugin-daemonset" present "${FAULTS_ABSENT_VERSION}"\n    faults::restart_operand "nvidia-device-plugin-daemonset" "${FAULTS_NODE}"	faults::wait_for_template "nvidia-device-plugin-daemonset" present "${FAULTS_ABSENT_VERSION}"\n    faults::restart_operand "nvidia-device-plugin-daemonset" "kubectl-nv-faults-worker2"
 M20	nv-node-003.sh	pod="$(faults::pod_on_node "${FAULTS_MOKKA_NAMESPACE}" "${FAULTS_MOKKA_SELECTOR}" "${FAULTS_NODE}")"	pod="$(k --namespace "${FAULTS_MOKKA_NAMESPACE}" get pod -l "${FAULTS_MOKKA_SELECTOR}" -o "jsonpath={.items[0].metadata.name}")"
@@ -38,11 +41,13 @@ M28	nv-node-003.sh	nvml-mock-ctl fail --gpu "${GPU_INDEX}" --mode "${mode}" --xi
 M29	nv-dcgm-001.sh	if [ "${before}" = "${FAULTS_ABSENT_VERSION}" ]; then	if false; then
 M30	nv-node-001.sh	faults::plant_standin "${image}"	: no stand-in
 M31	lib.sh	absent:*"${needle}"*) ;;	# no absent-with-needle branch
+M32	nv-node-004.sh	local wrong=$((before + 1))	local wrong=$((before + 0))
+M33	lib.sh	value="${FAULTS_ABSENT_SENTINEL}"	:
 M34	nv-op-001.sh	faults::forget	: not forgotten
 M35	nv-dcgm-001.sh	faults::wait_for_operand_ready "nvidia-dcgm-exporter" "${FAULTS_NODE}"\n\n    faults::forget	faults::forget
 M36	lib.sh	k label node "${node}" "${label}=${value}" --overwrite > /dev/null	kubectl label node "${node}" "${label}=${value}" --overwrite > /dev/null
 M37	nv-node-001.sh	k --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" --replicas=0 > /dev/null	kubectl --namespace "${FAULTS_OPERATOR_NAMESPACE}" scale "deploy/${DEPLOYMENT}" --replicas=0 > /dev/null
-M38	lib.sh	faults::check_lane_stamp	: no stamp check
+M38	lib.sh	if faults::injected; then\n        faults::check_lane_stamp	if faults::injected; then\n        : no stamp check
 M39	lib.sh	faults::die 1 "saved state for ${FAULTS_CODE} on ${FAULTS_NODE} has no '$1' key (looked in ${FAULTS_STATE})"	printf '%s' "${FAULTS_ABSENT_SENTINEL}"; return
 M40	lib.sh	if ! [[ ${lane_suffix} =~ ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ ]]; then	if false; then
 M41	lib.sh	https://127.0.0.1:*) ;;	*) ;;
