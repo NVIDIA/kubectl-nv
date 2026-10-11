@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -221,9 +222,14 @@ func TestRunFiltersByNode(t *testing.T) {
 	}
 }
 
-// --node also narrows what the rules see, so that a rule which walks the whole
-// node list cannot report on a node the user filtered out.
-func TestRunNarrowsTheInputToTheFilteredNode(t *testing.T) {
+// --node filters the findings and not the input the rules see.
+//
+// A rule that answers a question about the cluster, rather than about one node
+// at a time, has to see the whole cluster to answer it at all: Track E2's
+// topology rule compares a node against its peers, and a node handed that rule
+// on its own looks consistent with itself. So the rules run over everything
+// and the filter is applied afterwards, to the findings.
+func TestRunShowsRulesTheWholeClusterUnderANodeFilter(t *testing.T) {
 	t.Parallel()
 
 	var seen []string
@@ -249,8 +255,45 @@ func TestRunNarrowsTheInputToTheFilteredNode(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if want := []string{"worker-2"}; !reflect.DeepEqual(seen, want) {
-		t.Errorf("the rule saw %v, want %v", seen, want)
+	want := []string{"worker-1", "worker-2", "control-plane"}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("the rule saw %v, want the whole cluster %v", seen, want)
+	}
+}
+
+// The rule that needs the whole cluster still has to report through the
+// filter: a cross-node rule that concluded something about worker-2 by looking
+// at worker-1 is answering the question the user asked.
+func TestRunKeepsACrossNodeFindingUnderANodeFilter(t *testing.T) {
+	t.Parallel()
+
+	rules := []health.Rule{fakeRule{code: "NV-TOPO-001", evaluate: func(in health.Input) []output.Finding {
+		// The shape of a cross-node rule: it concludes nothing until it has
+		// seen more than one node.
+		if len(in.Nodes) < 2 {
+			return nil
+		}
+
+		var out []output.Finding
+		for _, n := range in.Nodes {
+			out = append(out, output.Finding{
+				Code: "NV-TOPO-001", Node: n.Name, Severity: output.SeverityWarning,
+			})
+		}
+
+		return out
+	}}}
+
+	in := health.Input{Nodes: []inventory.GPUNode{node("worker-1"), node("worker-2")}}
+
+	report, err := engine.Run(rules, in, engine.Options{Node: "worker-2"})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := [][2]string{{"worker-2", "NV-TOPO-001"}}
+	if got := nodeCodes(report.Findings); !reflect.DeepEqual(got, want) {
+		t.Errorf("findings are %v, want %v", got, want)
 	}
 }
 
@@ -271,13 +314,21 @@ func TestRunAcceptsAHintedNodeFilter(t *testing.T) {
 	}
 }
 
-// A typo in --node must not report clean. The node list is a primary read, so
-// a name missing from it is missing from the cluster, and that is a usage
-// mistake the user can fix by typing something else: exit 2.
-func TestRunRejectsAnUnknownNode(t *testing.T) {
+// A name --node does not match must not report clean.
+//
+// The message matters as much as the exit code. gpu health only ever looks at
+// GPU nodes and the nodes hinted as ones, so a name it cannot match is either
+// a typo or a node of the cluster that has no GPUs at all, and it cannot tell
+// which. Saying "no node named X" would be a claim about the cluster that this
+// command never checked, so it says what it does know and lists what it did
+// look at.
+func TestRunRejectsANodeItDidNotLookAt(t *testing.T) {
 	t.Parallel()
 
-	in := health.Input{Nodes: []inventory.GPUNode{node("worker-1")}}
+	in := health.Input{
+		Nodes:  []inventory.GPUNode{node("worker-1")},
+		Hinted: []inventory.GPUNode{node("control-plane")},
+	}
 
 	report, err := engine.Run(nil, in, engine.Options{Node: "wroker-1"})
 	if err == nil {
@@ -290,7 +341,62 @@ func TestRunRejectsAnUnknownNode(t *testing.T) {
 
 	var usage *output.UsageError
 	if !errors.As(err, &usage) {
-		t.Errorf("Run returned %T, want an *output.UsageError", err)
+		t.Fatalf("Run returned %T, want an *output.UsageError", err)
+	}
+
+	want := `gpu health looked at no node named "wroker-1": it checks GPU nodes and nodes ` +
+		`labelled as having GPUs, and this run found control-plane and worker-1`
+	if err.Error() != want {
+		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)
+	}
+}
+
+// The same with nothing to list at all. "This run found none" is a different
+// thing to tell a user from a list of names, and it is the case they hit when
+// their kubeconfig points at the wrong cluster.
+func TestRunRejectsANodeWhenItFoundNoneAtAll(t *testing.T) {
+	t.Parallel()
+
+	_, err := engine.Run(nil, health.Input{}, engine.Options{Node: "worker-1"})
+	if err == nil {
+		t.Fatal("Run returned no error over an empty cluster")
+	}
+
+	want := `gpu health looked at no node named "worker-1": it checks GPU nodes and nodes ` +
+		`labelled as having GPUs, and this run found none`
+	if err.Error() != want {
+		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)
+	}
+}
+
+// An unmatched --node on a run that could not read everything is not a usage
+// mistake to report as one: the node may be in the half of the cluster that
+// was denied. Exit 3 says "conclude nothing from this", which is true, where
+// exit 2 would send the user off to check their spelling.
+func TestRunRejectsAnUnknownNodeAsPartialWhenTheReadWasPartial(t *testing.T) {
+	t.Parallel()
+
+	inputErr := &source.PartialError{Resource: "nodes/worker-9/proxy", Err: errors.New("forbidden")}
+
+	in := health.Input{Nodes: []inventory.GPUNode{node("worker-1")}}
+
+	_, err := engine.Run(nil, in, engine.Options{Node: "worker-9", InputErr: inputErr})
+	if err == nil {
+		t.Fatal("Run returned no error")
+	}
+
+	if got := output.ExitCodeFor(err); got != output.ExitPartial {
+		t.Errorf("the error exits %d, want %d (partial): %v", got, output.ExitPartial, err)
+	}
+
+	// The cause has to travel with it, or the user is told their node is
+	// missing and never told why the run could not see it.
+	if !errors.Is(err, inputErr) {
+		t.Errorf("the error does not wrap the partial cause: %v", err)
+	}
+
+	if !strings.Contains(err.Error(), "nodes/worker-9/proxy") {
+		t.Errorf("the message does not name what could not be read: %v", err)
 	}
 }
 
@@ -518,6 +624,81 @@ func TestRunRefusesANonPartialInputError(t *testing.T) {
 				t.Errorf("the error exits %d, want %d", got, output.ExitError)
 			}
 		})
+	}
+}
+
+// The error the builder returns is a tree, and the walk over it has to be by
+// type rather than by shape. fmt.Errorf wraps a join in something whose own
+// Unwrap returns one error, so a walk that only knew about Unwrap() []error
+// stopped at the wrapper, found a PartialError underneath it through
+// errors.As, and called the whole thing partial. That turns "the API server is
+// unreachable" into "here are some incomplete findings", which is exit 3 over
+// a run that checked nothing.
+func TestRunWalksAWrappedErrorTree(t *testing.T) {
+	t.Parallel()
+
+	hard := errors.New("the API server is unreachable")
+	partial := &source.PartialError{Resource: "pods", Err: errors.New("forbidden")}
+
+	_, err := engine.Run(nil, health.Input{}, engine.Options{
+		InputErr: fmt.Errorf("building the inventory: %w", errors.Join(partial, hard)),
+	})
+	if err == nil {
+		t.Fatal("Run returned no error for a wrapped join holding a hard failure")
+	}
+
+	if got := output.ExitCodeFor(err); got != output.ExitError {
+		t.Errorf("the error exits %d, want %d: %v", got, output.ExitError, err)
+	}
+
+	if !errors.Is(err, hard) {
+		t.Errorf("the error does not wrap the cause: %v", err)
+	}
+}
+
+// The same tree with nothing hard in it is partial, and every resource in it
+// has to come out: a report that lost one tells the reader to guess which part
+// of the cluster is missing from the findings.
+func TestRunWalksAWrappedJoinOfPartials(t *testing.T) {
+	t.Parallel()
+
+	first := &source.PartialError{Resource: "resourceslices", Err: errors.New("forbidden")}
+	second := &source.PartialError{Resource: "clusterpolicies", Err: errors.New("not found")}
+
+	report, err := engine.Run(nil, health.Input{}, engine.Options{
+		InputErr: fmt.Errorf("building the inventory: %w", errors.Join(first, second)),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []output.Unreachable{
+		{Resource: "clusterpolicies", Reason: "not found"},
+		{Resource: "resourceslices", Reason: "forbidden"},
+	}
+	if !reflect.DeepEqual(report.Unreachable, want) {
+		t.Errorf("Unreachable is\n%+v\nwant\n%+v", report.Unreachable, want)
+	}
+}
+
+// A PartialError reached through a single-error wrapper is still partial: the
+// builder wraps its reads with context, and a walk that only recognised a bare
+// one would call every wrapped denial a hard failure.
+func TestRunWalksASinglyWrappedPartial(t *testing.T) {
+	t.Parallel()
+
+	partial := &source.PartialError{Resource: "pods", Err: errors.New("forbidden")}
+
+	report, err := engine.Run(nil, health.Input{}, engine.Options{
+		InputErr: fmt.Errorf("listing the operand pods: %w", partial),
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	want := []output.Unreachable{{Resource: "pods", Reason: "forbidden"}}
+	if !reflect.DeepEqual(report.Unreachable, want) {
+		t.Errorf("Unreachable is %+v, want %+v", report.Unreachable, want)
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/health"
 	"github.com/NVIDIA/kubectl-nv/pkg/health/rules"
@@ -27,8 +28,8 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// gpuNodeWithExporter is a GPU node whose operator says dcgm-exporter belongs
-// on it: the starting point for every case below.
+// gpuNodeWithExporter is a GPU node whose deploy label names the exporter and
+// whose ClusterPolicy is ready: the starting point for every case below.
 func gpuNodeWithExporter(opts ...nodeOption) health.Input {
 	base := []nodeOption{
 		withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
@@ -38,6 +39,7 @@ func gpuNodeWithExporter(opts ...nodeOption) health.Input {
 
 	return health.Input{
 		Nodes:             []inventory.GPUNode{buildNode("worker-1", append(base, opts...)...)},
+		ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("ready"))},
 		OperatorInstalled: true,
 	}
 }
@@ -61,7 +63,11 @@ func TestDCGMExporterNotReady(t *testing.T) {
 		t.Parallel()
 
 		f := only(t, evaluate(rule, gpuNodeWithExporter()))
-		checkCommonFields(t, rule, f, inventory.ComponentDCGMExporter)
+
+		checkFinding(t, rule, f, inventory.ComponentDCGMExporter,
+			"the node runs no dcgm-exporter pod and the ClusterPolicy enables it",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.dcgm-exporter": "true",
@@ -82,6 +88,11 @@ func TestDCGMExporterNotReady(t *testing.T) {
 
 		f := only(t, evaluate(rule, in))
 
+		checkFinding(t, rule, f, inventory.ComponentDCGMExporter,
+			"the dcgm-exporter pod on the node is not ready",
+			"kubectl nv info worker-1",
+		)
+
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.dcgm-exporter": "true",
 			"operands":                            inventory.ComponentDCGMExporter,
@@ -98,21 +109,47 @@ func TestDCGMExporterNotReady(t *testing.T) {
 		wantNone(t, evaluate(rule, gpuNodeWithExporter(withOperand(inventory.ComponentDCGMExporter, true))))
 	})
 
-	// This is the difference from NV-DP-001, and it is deliberate.
-	// dcgm-exporter is optional: plenty of installs switch it off in the chart
-	// values, and this repository's own Mokka lane switches off the standalone
-	// host engine, the container toolkit, the mig-manager and the node status
-	// exporter that way. An operand nobody asked for must not produce a
-	// warning, so the rule needs the label to say it belongs here. The device
-	// plugin does not need that, because it is what makes a GPU node a GPU
-	// node.
-	t.Run("no deploy label means the exporter was never asked for", func(t *testing.T) {
+	// The deploy label says nothing about whether the operand was asked for:
+	// the operator writes it true on every node with the NVIDIA PCI label
+	// whatever the chart values said. This repository's own lane switches four
+	// operands off that way, so without reading the policy the rule would warn
+	// on every node of a cluster that chose not to run an exporter.
+	t.Run("the ClusterPolicy decides whether the operand should run", func(t *testing.T) {
 		t.Parallel()
 
-		in := gpuNodeWithExporter()
-		in.Nodes[0].Deploy = nil
+		for _, tc := range []struct {
+			name      string
+			policy    unstructured.Unstructured
+			wantCount int
+		}{
+			{
+				name:      "disabled in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready"), withOperandEnabled("dcgmExporter", false)),
+				wantCount: 0,
+			},
+			{
+				name:      "enabled in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready"), withOperandEnabled("dcgmExporter", true)),
+				wantCount: 1,
+			},
+			{
+				name:      "not mentioned in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready")),
+				wantCount: 1,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
 
-		wantNone(t, evaluate(rule, in))
+				in := gpuNodeWithExporter()
+				in.ClusterPolicies = []unstructured.Unstructured{tc.policy}
+
+				got := evaluate(rule, in)
+				if len(got) != tc.wantCount {
+					t.Errorf("got %d findings, want %d: %+v", len(got), tc.wantCount, got)
+				}
+			})
+		}
 	})
 
 	t.Run("the exporter switched off for the node", func(t *testing.T) {

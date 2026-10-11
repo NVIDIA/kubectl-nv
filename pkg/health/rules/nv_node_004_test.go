@@ -44,12 +44,16 @@ func TestNodeCountDiffersFromCapacity(t *testing.T) {
 		node := buildNode("worker-1", withCount(8), withGPUs(4, 4))
 
 		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
-		checkCommonFields(t, rule, f, rules.ComponentNode)
+
+		checkFinding(t, rule, f, rules.ComponentNode,
+			"the "+rules.LabelGPUCount+" label and the node's GPU capacity disagree",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
-			"nvidia.com/gpu.count": "8",
-			"capacity":             "4",
-			"expectedCapacity":     "8",
+			rules.LabelGPUCount: "8",
+			"capacity":          "4",
+			"expectedCapacity":  "8",
 		})
 	})
 
@@ -89,11 +93,11 @@ func TestNodeCountDiffersFromCapacity(t *testing.T) {
 		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
 
 		checkEvidence(t, f.Evidence, map[string]string{
-			"nvidia.com/gpu.count":            "4",
-			"capacity":                        "12",
-			"expectedCapacity":                "16",
-			"nvidia.com/gpu.replicas":         "4",
-			"nvidia.com/gpu.sharing-strategy": "time-slicing",
+			rules.LabelGPUCount:        "4",
+			"capacity":                 "12",
+			"expectedCapacity":         "16",
+			rules.LabelGPUReplicas:     "4",
+			rules.LabelSharingStrategy: "time-slicing",
 		})
 	})
 
@@ -106,6 +110,33 @@ func TestNodeCountDiffersFromCapacity(t *testing.T) {
 		node := buildNode("worker-1", withGPUs(4, 4))
 
 		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+	})
+
+	// A node advertising its GPUs through dynamic resource allocation alone
+	// has no nvidia.com/gpu capacity to compare the count against, so the
+	// comparison would report every healthy DRA node in the cluster.
+	t.Run("mode decides whether the capacity is comparable", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			mode      string
+			wantCount int
+		}{
+			{mode: inventory.ModeDRA, wantCount: 0},
+			{mode: inventory.ModeBoth, wantCount: 1},
+			{mode: inventory.ModeNone, wantCount: 1},
+		} {
+			t.Run(tc.mode, func(t *testing.T) {
+				t.Parallel()
+
+				node := buildNode("worker-1", withCount(8), withGPUs(4, 4), withMode(tc.mode))
+
+				got := evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}})
+				if len(got) != tc.wantCount {
+					t.Errorf("mode %q produced %d findings, want %d: %+v", tc.mode, len(got), tc.wantCount, got)
+				}
+			})
+		}
 	})
 
 	// A mixed-strategy MIG node advertises one resource per profile and no
@@ -137,6 +168,7 @@ func TestNodeCountDiffersFromCapacity(t *testing.T) {
 
 		node := mokkaControlPlane()
 		node.Count, node.Capacity, node.Allocatable, node.Hinted = 8, 4, 4, false
+		node.Mode = inventory.ModeDevicePlugin
 
 		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
 	})

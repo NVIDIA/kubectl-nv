@@ -199,6 +199,26 @@ func TestHealthReportExitCode(t *testing.T) {
 			findings: []output.Finding{{Code: "NV-NODE-002", Severity: output.SeverityError}},
 			want:     output.ExitFindings,
 		},
+		// An info finding is the one severity that ranks below the default
+		// and below a warning threshold, so it is the only one that can tell
+		// a threshold that reads the rank from one that compares strings.
+		{
+			name:     "an info finding does not fail a warning threshold",
+			findings: []output.Finding{{Code: "NV-OP-002", Severity: output.SeverityInfo}},
+			failOn:   output.SeverityWarning,
+			want:     output.ExitOK,
+		},
+		{
+			name:     "an info finding fails an info threshold",
+			findings: []output.Finding{{Code: "NV-OP-002", Severity: output.SeverityInfo}},
+			failOn:   output.SeverityInfo,
+			want:     output.ExitFindings,
+		},
+		{
+			name:     "an info finding does not fail the default threshold",
+			findings: []output.Finding{{Code: "NV-OP-002", Severity: output.SeverityInfo}},
+			want:     output.ExitOK,
+		},
 		{name: "partial and clean exits three", partial: true, want: output.ExitPartial},
 		{
 			name:     "findings win over partial",

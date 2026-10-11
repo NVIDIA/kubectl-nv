@@ -19,6 +19,8 @@ package rules_test
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/NVIDIA/kubectl-nv/pkg/health"
 	"github.com/NVIDIA/kubectl-nv/pkg/health/rules"
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
@@ -42,22 +44,26 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			hinted(),
 		)
 
 		f := only(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
-		checkCommonFields(t, rule, f, rules.ComponentNode)
+
+		checkFinding(t, rule, f, rules.ComponentNode,
+			"the node reports GPUs present and advertises none the scheduler can place",
+			"kubectl nv info worker-1",
+		)
 
 		if f.Node != "worker-1" {
 			t.Errorf("Node is %q, want worker-1", f.Node)
 		}
 
 		checkEvidence(t, f.Evidence, map[string]string{
-			"nvidia.com/gpu.present": "true",
-			"capacity":               "0",
-			"allocatable":            "0",
-			"hinted":                 "true",
+			rules.LabelGPUPresent: "true",
+			"capacity":            "0",
+			"allocatable":         "0",
+			"hinted":              "true",
 		})
 	})
 
@@ -68,7 +74,7 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			withGPUs(4, 0),
 			withOperand(inventory.ComponentDevicePlugin, false),
 		)
@@ -76,11 +82,11 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
 
 		checkEvidence(t, f.Evidence, map[string]string{
-			"nvidia.com/gpu.present": "true",
-			"capacity":               "4",
-			"allocatable":            "0",
-			"hinted":                 "false",
-			"operands":               inventory.ComponentDevicePlugin,
+			rules.LabelGPUPresent: "true",
+			"capacity":            "4",
+			"allocatable":         "0",
+			"hinted":              "false",
+			"operands":            inventory.ComponentDevicePlugin,
 		})
 	})
 
@@ -88,8 +94,23 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			withGPUs(4, 4),
+		)
+
+		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+	})
+
+	// A node short of some of its GPUs still places work on the rest, which is
+	// NV-NODE-003's warning rather than this rule's error. The two partition
+	// the space on allocatable being zero, and a rule that fired here as well
+	// would report the same node twice at two severities.
+	t.Run("a node short of some GPUs belongs to NV-NODE-003", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+			withGPUs(8, 6),
 		)
 
 		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
@@ -109,7 +130,7 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "false"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "false"}),
 			hinted(),
 		)
 
@@ -125,16 +146,116 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		wantNone(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{mokkaControlPlane()}}))
 	})
 
+	// A GPU node behind a taint the operands do not tolerate has had them
+	// evicted: the hint labels are stale and nothing is coming back. That is
+	// the same exclusion the control plane gets, on a node that does have
+	// hardware.
+	t.Run("a GPU node tainted nvidia.com/gpu NoSchedule with no operands", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+			withTaints(corev1.Taint{Key: "example.com/dedicated", Effect: corev1.TaintEffectNoSchedule}),
+			hinted(),
+		)
+
+		wantNone(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
+	})
+
+	// The same node with the taint the operands do tolerate is still a node
+	// the operator targets, so the finding stands. Without this case the one
+	// above would pass against a gate that excluded every tainted node.
+	t.Run("a GPU node tainted nvidia.com/gpu NoSchedule is still evaluated", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+			withTaints(corev1.Taint{Key: "nvidia.com/gpu", Effect: corev1.TaintEffectNoSchedule}),
+			hinted(),
+		)
+
+		only(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
+	})
+
 	t.Run("a node whose operands were all switched off", func(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			withDeploy(map[string]string{"driver": "false", "device-plugin": "false"}),
 			hinted(),
 		)
 
 		wantNone(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
+	})
+
+	// A node that advertises its GPUs through dynamic resource allocation
+	// publishes a ResourceSlice and no extended resource, so its allocatable
+	// nvidia.com/gpu is legitimately zero. This rule covers the DRA node that
+	// publishes no slice, and pkg/source classifies such a node as hinted with
+	// mode none, which the case below keeps firing on.
+	t.Run("mode decides whether a zero allocatable is a fault", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			mode      string
+			wantCount int
+		}{
+			{mode: inventory.ModeDRA, wantCount: 0},
+			{mode: inventory.ModeBoth, wantCount: 1},
+			{mode: inventory.ModeNone, wantCount: 1},
+		} {
+			t.Run(tc.mode, func(t *testing.T) {
+				t.Parallel()
+
+				node := buildNode("worker-1",
+					withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+					withMode(tc.mode),
+					hinted(),
+				)
+
+				got := evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}})
+				if len(got) != tc.wantCount {
+					t.Errorf("mode %q produced %d findings, want %d: %+v", tc.mode, len(got), tc.wantCount, got)
+				}
+			})
+		}
+	})
+
+	// A node set up to pass its GPUs through to virtual machines advertises
+	// nothing to the container scheduler by design. Reporting it would make
+	// the check useless on every cluster running the operator's sandbox
+	// workloads.
+	t.Run("a node configured for virtual machine workloads", func(t *testing.T) {
+		t.Parallel()
+
+		for _, workload := range []string{"vm-passthrough", "vm-vgpu"} {
+			t.Run(workload, func(t *testing.T) {
+				t.Parallel()
+
+				node := buildNode("worker-1",
+					withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+					withWorkloadConfig(workload),
+					hinted(),
+				)
+
+				wantNone(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
+			})
+		}
+	})
+
+	// The container workload config is the default and must not silence the
+	// rule, or the exclusion above would be excluding every node.
+	t.Run("a node configured for container workloads is evaluated", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+			withWorkloadConfig("container"),
+			hinted(),
+		)
+
+		only(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
 	})
 
 	// A mixed-strategy MIG node advertises one extended resource per profile
@@ -145,7 +266,7 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			withMixedMIG(map[string]inventory.ResourceCount{
 				"nvidia.com/mig-1g.10gb": {Capacity: 7, Allocatable: 7},
 			}),
@@ -161,7 +282,7 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"nvidia.com/gpu.present": "true"}),
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
 			withMixedMIG(map[string]inventory.ResourceCount{
 				"nvidia.com/mig-1g.10gb": {Capacity: 7, Allocatable: 0},
 			}),

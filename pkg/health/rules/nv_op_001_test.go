@@ -44,12 +44,20 @@ func TestOperatorClusterPolicyNotReady(t *testing.T) {
 		t.Parallel()
 
 		in := health.Input{
-			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", "notReady")},
+			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("notReady"))},
 			OperatorInstalled: true,
 		}
 
 		f := only(t, evaluate(rule, in))
-		checkCommonFields(t, rule, f, inventory.ComponentOperator)
+
+		checkFinding(t, rule, f, inventory.ComponentOperator,
+			"the ClusterPolicy is not ready",
+			"kubectl describe clusterpolicy cluster-policy",
+		)
+
+		if f.Severity != output.SeverityError {
+			t.Errorf("Severity is %q, want error", f.Severity)
+		}
 
 		// A ClusterPolicy is cluster scoped, so the finding names no node and
 		// survives a --node filter: a node reported clean while the policy it
@@ -68,7 +76,7 @@ func TestOperatorClusterPolicyNotReady(t *testing.T) {
 		t.Parallel()
 
 		in := health.Input{
-			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", "ready")},
+			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("ready"))},
 			OperatorInstalled: true,
 		}
 
@@ -83,7 +91,7 @@ func TestOperatorClusterPolicyNotReady(t *testing.T) {
 
 		for _, state := range []string{"ready", "Ready", "READY"} {
 			in := health.Input{
-				ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", state)},
+				ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState(state))},
 				OperatorInstalled: true,
 			}
 
@@ -93,18 +101,23 @@ func TestOperatorClusterPolicyNotReady(t *testing.T) {
 		}
 	})
 
-	// A policy with no status yet is a policy the operator has not reconciled,
-	// which is exactly what this rule is about. The evidence leaves the key
-	// out rather than writing an empty string, as the encodings require.
-	t.Run("a policy with no status at all", func(t *testing.T) {
+	// The only ClusterPolicy on the cluster having no status is a policy the
+	// operator has not reconciled at all, which is this rule's error. The
+	// evidence leaves the key out rather than writing an empty string, as the
+	// encodings require.
+	t.Run("the only policy has no status at all", func(t *testing.T) {
 		t.Parallel()
 
 		in := health.Input{
-			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", "")},
+			ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy")},
 			OperatorInstalled: true,
 		}
 
 		f := only(t, evaluate(rule, in))
+
+		if f.Severity != output.SeverityError {
+			t.Errorf("Severity is %q, want error", f.Severity)
+		}
 
 		if _, ok := f.Evidence["status.state"]; ok {
 			t.Errorf("evidence carries status.state = %q, want the key left out", f.Evidence["status.state"])
@@ -113,14 +126,69 @@ func TestOperatorClusterPolicyNotReady(t *testing.T) {
 		checkEvidence(t, f.Evidence, map[string]string{"name": "cluster-policy"})
 	})
 
+	// The operator reconciles one ClusterPolicy and marks the rest ignored,
+	// and it does that in memory: the ignored objects never get a status. So a
+	// statusless policy alongside a ready one is a duplicate somebody left
+	// behind rather than an operator that failed, and reporting it at error
+	// would fail a run over a cluster that is working.
+	t.Run("a statusless duplicate alongside a ready policy", func(t *testing.T) {
+		t.Parallel()
+
+		in := health.Input{
+			ClusterPolicies: []unstructured.Unstructured{
+				clusterPolicy("cluster-policy", withState("ready")),
+				clusterPolicy("left-over-policy"),
+			},
+			OperatorInstalled: true,
+		}
+
+		f := only(t, evaluate(rule, in))
+
+		if f.Severity != output.SeverityWarning {
+			t.Errorf("Severity is %q, want warning: the cluster is working", f.Severity)
+		}
+
+		checkFinding(t, rule, f, inventory.ComponentOperator,
+			"the ClusterPolicy is ignored: the operator is reconciling another one",
+			"kubectl describe clusterpolicy left-over-policy",
+		)
+
+		checkEvidence(t, f.Evidence, map[string]string{
+			"name":          "left-over-policy",
+			"reconciling":   "cluster-policy",
+			"ignoredPolicy": "true",
+		})
+	})
+
+	// A duplicate that does carry a state the operator does not call ready is
+	// a real failure, so the duplicate exclusion has to be about the absent
+	// status rather than about there being more than one policy.
+	t.Run("a duplicate with a failed state is still an error", func(t *testing.T) {
+		t.Parallel()
+
+		in := health.Input{
+			ClusterPolicies: []unstructured.Unstructured{
+				clusterPolicy("cluster-policy", withState("ready")),
+				clusterPolicy("second-policy", withState("notReady")),
+			},
+			OperatorInstalled: true,
+		}
+
+		f := only(t, evaluate(rule, in))
+
+		if f.Severity != output.SeverityError {
+			t.Errorf("Severity is %q, want error", f.Severity)
+		}
+	})
+
 	t.Run("one finding per policy", func(t *testing.T) {
 		t.Parallel()
 
 		in := health.Input{
 			ClusterPolicies: []unstructured.Unstructured{
-				clusterPolicy("cluster-policy", "notReady"),
-				clusterPolicy("second-policy", "ready"),
-				clusterPolicy("third-policy", "notReady"),
+				clusterPolicy("cluster-policy", withState("notReady")),
+				clusterPolicy("second-policy", withState("ready")),
+				clusterPolicy("third-policy", withState("notReady")),
 			},
 			OperatorInstalled: true,
 		}

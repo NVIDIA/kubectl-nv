@@ -42,57 +42,89 @@ func TestNodePCIWithoutGPULabel(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"feature.node.kubernetes.io/pci-10de.present": "true"}),
+			withLabels(map[string]string{rules.LabelPCIVendor: "true"}),
 			hinted(),
 		)
 
-		f := only(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
-		checkCommonFields(t, rule, f, rules.ComponentNode)
+		f := only(t, evaluate(rule, health.Input{
+			Hinted:            []inventory.GPUNode{node},
+			OperatorInstalled: true,
+		}))
+
+		checkFinding(t, rule, f, rules.ComponentNode,
+			"the GPU Operator is not reconciling this node: it has an NVIDIA PCI device and no "+
+				rules.LabelGPUPresent+" label",
+			"kubectl nv info worker-1",
+		)
 
 		if f.Node != "worker-1" {
 			t.Errorf("Node is %q, want worker-1", f.Node)
 		}
 
-		checkEvidence(t, f.Evidence, map[string]string{
-			"feature.node.kubernetes.io/pci-10de.present": "true",
-		})
+		checkEvidence(t, f.Evidence, map[string]string{rules.LabelPCIVendor: "true"})
 	})
 
 	t.Run("the operands it did find are the proof", func(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1",
-			withLabels(map[string]string{"feature.node.kubernetes.io/pci-10de.present": "true"}),
+			withLabels(map[string]string{rules.LabelPCIVendor: "true"}),
 			withOperand(inventory.ComponentDevicePlugin, true),
 			withOperand(inventory.ComponentOperatorValidator, true),
 		)
 
-		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+		f := only(t, evaluate(rule, health.Input{
+			Nodes:             []inventory.GPUNode{node},
+			OperatorInstalled: true,
+		}))
 
 		checkEvidence(t, f.Evidence, map[string]string{
-			"feature.node.kubernetes.io/pci-10de.present": "true",
+			rules.LabelPCIVendor: "true",
 			// Sorted and comma joined, as the evidence encodings say.
 			"operands": inventory.ComponentDevicePlugin + "," + inventory.ComponentOperatorValidator,
 		})
+	})
+
+	// nvidia.com/gpu.present is written, and retracted, by the operator's own
+	// ClusterPolicy controller. Its absence is a statement about the operator,
+	// so on a cluster that has no operator it is a statement about nothing: a
+	// node with four working GPUs and a device plugin installed by hand would
+	// otherwise be reported as broken.
+	t.Run("no operator installed", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelPCIVendor: "true"}),
+			withGPUs(4, 4),
+		)
+
+		wantNone(t, evaluate(rule, health.Input{
+			Nodes:             []inventory.GPUNode{node},
+			OperatorInstalled: false,
+		}))
 	})
 
 	t.Run("a node with both labels is fine", func(t *testing.T) {
 		t.Parallel()
 
 		node := buildNode("worker-1", withLabels(map[string]string{
-			"feature.node.kubernetes.io/pci-10de.present": "true",
-			"nvidia.com/gpu.present":                      "true",
+			rules.LabelPCIVendor:  "true",
+			rules.LabelGPUPresent: "true",
 		}))
 
-		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+		wantNone(t, evaluate(rule, health.Input{
+			Nodes:             []inventory.GPUNode{node},
+			OperatorInstalled: true,
+		}))
 	})
 
 	t.Run("a node with no PCI label at all is not this rule's business", func(t *testing.T) {
 		t.Parallel()
 
-		node := buildNode("worker-1")
-
-		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+		wantNone(t, evaluate(rule, health.Input{
+			Nodes:             []inventory.GPUNode{buildNode("worker-1")},
+			OperatorInstalled: true,
+		}))
 	})
 
 	// The label is only a claim when it says "true". Node feature discovery
@@ -100,11 +132,12 @@ func TestNodePCIWithoutGPULabel(t *testing.T) {
 	t.Run("the PCI label only counts at true", func(t *testing.T) {
 		t.Parallel()
 
-		node := buildNode("worker-1", withLabels(map[string]string{
-			"feature.node.kubernetes.io/pci-10de.present": "false",
-		}))
+		node := buildNode("worker-1", withLabels(map[string]string{rules.LabelPCIVendor: "false"}))
 
-		wantNone(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
+		wantNone(t, evaluate(rule, health.Input{
+			Nodes:             []inventory.GPUNode{node},
+			OperatorInstalled: true,
+		}))
 	})
 
 	t.Run("the Mokka control plane is left alone", func(t *testing.T) {
@@ -114,9 +147,12 @@ func TestNodePCIWithoutGPULabel(t *testing.T) {
 		// the GPU label so that only the operator-targets gate can keep this
 		// rule quiet: a test whose node fails two conditions proves neither.
 		node := mokkaControlPlane()
-		delete(node.Labels, "nvidia.com/gpu.present")
+		delete(node.Labels, rules.LabelGPUPresent)
 
-		wantNone(t, evaluate(rule, health.Input{Hinted: []inventory.GPUNode{node}}))
+		wantNone(t, evaluate(rule, health.Input{
+			Hinted:            []inventory.GPUNode{node},
+			OperatorInstalled: true,
+		}))
 	})
 
 	t.Run("a declared range excludes an out-of-range version", func(t *testing.T) {

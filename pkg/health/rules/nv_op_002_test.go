@@ -56,7 +56,10 @@ func TestOperatorOperandDisabled(t *testing.T) {
 		// the pods, not the deploy key: a report that said "device-plugin"
 		// where every other finding says "nvidia-device-plugin-daemonset"
 		// would be presenting two vocabularies as one.
-		checkCommonFields(t, rule, f, inventory.ComponentDevicePlugin)
+		checkFinding(t, rule, f, inventory.ComponentDevicePlugin,
+			"the operator is not running this operand on the node",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.device-plugin": "false",
@@ -71,7 +74,10 @@ func TestOperatorOperandDisabled(t *testing.T) {
 		}))
 
 		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
-		checkCommonFields(t, rule, f, inventory.ComponentDCGMExporter)
+		checkFinding(t, rule, f, inventory.ComponentDCGMExporter,
+			"the operator is not running this operand on the node",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.dcgm-exporter": "paused-for-driver-upgrade",

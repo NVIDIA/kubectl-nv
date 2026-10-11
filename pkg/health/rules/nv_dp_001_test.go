@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/health"
 	"github.com/NVIDIA/kubectl-nv/pkg/health/rules"
@@ -27,8 +28,13 @@ import (
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
-// gpuNodeWithOperator is a GPU node on a cluster that has the operator: the
-// starting point for every device plugin case below.
+// gpuNodeWithOperator is a GPU node on a cluster that has the operator, with a
+// ClusterPolicy that enables nothing in particular: the starting point for
+// every device plugin case below.
+//
+// The deploy label is true because the operator writes it true on every node
+// with the NVIDIA PCI label, whatever the ClusterPolicy enables. That is the
+// point of the enablement cases further down.
 func gpuNodeWithOperator(opts ...nodeOption) health.Input {
 	base := []nodeOption{
 		withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
@@ -38,6 +44,7 @@ func gpuNodeWithOperator(opts ...nodeOption) health.Input {
 
 	return health.Input{
 		Nodes:             []inventory.GPUNode{buildNode("worker-1", append(base, opts...)...)},
+		ClusterPolicies:   []unstructured.Unstructured{clusterPolicy("cluster-policy", withState("ready"))},
 		OperatorInstalled: true,
 	}
 }
@@ -61,7 +68,11 @@ func TestDevicePluginNotReady(t *testing.T) {
 		in := gpuNodeWithOperator(withOperand(inventory.ComponentGFD, true))
 
 		f := only(t, evaluate(rule, in))
-		checkCommonFields(t, rule, f, inventory.ComponentDevicePlugin)
+
+		checkFinding(t, rule, f, inventory.ComponentDevicePlugin,
+			"the node runs no device plugin pod",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.device-plugin": "true",
@@ -83,6 +94,14 @@ func TestDevicePluginNotReady(t *testing.T) {
 
 		f := only(t, evaluate(rule, in))
 
+		// A different message from the missing case on purpose. "Runs no
+		// device plugin pod" sends a reader looking for a pod that is right
+		// there and crash-looping, which is the wrong place to start.
+		checkFinding(t, rule, f, inventory.ComponentDevicePlugin,
+			"the device plugin pod on the node is not ready",
+			"kubectl nv info worker-1",
+		)
+
 		checkEvidence(t, f.Evidence, map[string]string{
 			"nvidia.com/gpu.deploy.device-plugin": "true",
 			"operands":                            inventory.ComponentDevicePlugin,
@@ -97,6 +116,51 @@ func TestDevicePluginNotReady(t *testing.T) {
 		t.Parallel()
 
 		wantNone(t, evaluate(rule, gpuNodeWithOperator(withOperand(inventory.ComponentDevicePlugin, true))))
+	})
+
+	// The deploy label is not consent. The operator writes
+	// nvidia.com/gpu.deploy.device-plugin=true on every node carrying the
+	// NVIDIA PCI label whatever the ClusterPolicy enables, so the label alone
+	// would make this rule fire on every cluster that turned the device plugin
+	// off in its chart values.
+	t.Run("the ClusterPolicy decides whether the operand should run", func(t *testing.T) {
+		t.Parallel()
+
+		for _, tc := range []struct {
+			name      string
+			policy    unstructured.Unstructured
+			wantCount int
+		}{
+			{
+				name:      "disabled in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready"), withOperandEnabled("devicePlugin", false)),
+				wantCount: 0,
+			},
+			{
+				name:      "enabled in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready"), withOperandEnabled("devicePlugin", true)),
+				wantCount: 1,
+			},
+			{
+				// The CRD's own default is enabled, so a policy that never
+				// mentions the field means the operand should run.
+				name:      "not mentioned in the policy",
+				policy:    clusterPolicy("cluster-policy", withState("ready")),
+				wantCount: 1,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				in := gpuNodeWithOperator()
+				in.ClusterPolicies = []unstructured.Unstructured{tc.policy}
+
+				got := evaluate(rule, in)
+				if len(got) != tc.wantCount {
+					t.Errorf("got %d findings, want %d: %+v", len(got), tc.wantCount, got)
+				}
+			})
+		}
 	})
 
 	// The operator writes the deploy labels, so a cluster without it has none,
@@ -134,9 +198,7 @@ func TestDevicePluginNotReady(t *testing.T) {
 	t.Run("a DRA node runs no device plugin", func(t *testing.T) {
 		t.Parallel()
 
-		in := gpuNodeWithOperator(withMode(inventory.ModeDRA))
-
-		wantNone(t, evaluate(rule, in))
+		wantNone(t, evaluate(rule, gpuNodeWithOperator(withMode(inventory.ModeDRA))))
 	})
 
 	// A node mid-migration runs both, so the device plugin still has to be
@@ -144,9 +206,7 @@ func TestDevicePluginNotReady(t *testing.T) {
 	t.Run("a node running both modes still needs the device plugin", func(t *testing.T) {
 		t.Parallel()
 
-		in := gpuNodeWithOperator(withMode(inventory.ModeBoth))
-
-		only(t, evaluate(rule, in))
+		only(t, evaluate(rule, gpuNodeWithOperator(withMode(inventory.ModeBoth))))
 	})
 
 	// Hinted nodes have no GPUs to advertise, so a missing device plugin there

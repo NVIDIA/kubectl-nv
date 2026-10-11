@@ -131,6 +131,15 @@ func TestExplainRejectsAnUnknownCode(t *testing.T) {
 		t.Errorf("explain returned %T, want an *output.UsageError", err)
 	}
 
+	// Exact, not "contains a code". The message is what a user reads after
+	// mistyping, so it has to name what they typed and list every code in the
+	// order explain prints them.
+	want := `no finding catalogued as "NV-NODE-999": the codes are ` +
+		"NV-DCGM-001, NV-DP-001, NV-NODE-001, NV-NODE-002, NV-NODE-003, NV-NODE-004, NV-OP-001, NV-OP-002"
+	if err.Error() != want {
+		t.Errorf("the message is\n  %q\nwant\n  %q", err.Error(), want)
+	}
+
 	for _, rule := range rules.All() {
 		if !strings.Contains(err.Error(), rule.Code()) {
 			t.Errorf("the error does not list %s: %v", rule.Code(), err)

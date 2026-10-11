@@ -44,7 +44,11 @@ func TestNodeAllocatableBelowCapacity(t *testing.T) {
 		node := buildNode("worker-1", withGPUs(8, 6))
 
 		f := only(t, evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}))
-		checkCommonFields(t, rule, f, rules.ComponentNode)
+
+		checkFinding(t, rule, f, rules.ComponentNode,
+			"the node has fewer allocatable GPUs than its capacity",
+			"kubectl nv info worker-1",
+		)
 
 		checkEvidence(t, f.Evidence, map[string]string{
 			"capacity":    "8",
