@@ -59,7 +59,7 @@ func TestGPUNodeDeepCopyIsDeep(t *testing.T) {
 	original := populated()
 	copied := original.DeepCopy()
 
-	copied.ObjectMeta.Labels["nvidia.com/gpu.present"] = "false"
+	copied.Labels["nvidia.com/gpu.present"] = "false"
 	copied.Deploy["driver"] = "false"
 	copied.Topology["fabric.topograph.run/tier-1"] = "block-9"
 	copied.Taints[0].Key = "mutated"
@@ -77,7 +77,7 @@ func TestGPUNodeDeepCopyIsDeep(t *testing.T) {
 		got   any
 		want  any
 	}{
-		{"labels", original.ObjectMeta.Labels["nvidia.com/gpu.present"], want.ObjectMeta.Labels["nvidia.com/gpu.present"]},
+		{"labels", original.Labels["nvidia.com/gpu.present"], want.Labels["nvidia.com/gpu.present"]},
 		{"deploy", original.Deploy["driver"], want.Deploy["driver"]},
 		{"topology", original.Topology["fabric.topograph.run/tier-1"], want.Topology["fabric.topograph.run/tier-1"]},
 		{"taints", original.Taints[0].Key, want.Taints[0].Key},
