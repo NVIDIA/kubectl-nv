@@ -276,6 +276,22 @@ fi
 # lifecycle Stage in stage-fast.yaml fills allocatable and capacity only when
 # the node does not already carry them, so what is written here is what the
 # node keeps, and two thousand status patches is a pass this does not need.
+#
+# Nothing below is a comment: every line of this heredoc is sent to the API
+# server, two thousand times over, so the reasons live out here.
+#
+# The taint is NoSchedule and not NoExecute. It is what keeps the GPU
+# Operator's operands off these nodes, which matters: the operator's state
+# labeller does adopt them, writing nvidia.com/gpu.deploy.* within seconds of
+# a node appearing, and without the taint every operand DaemonSet would
+# follow it.
+#
+# It has no answer to a DaemonSet that tolerates everything with a bare
+# "operator: Exists". A 20 node smoke on 2026-10-11 found exactly three such
+# pods per fake node and no others: kube-system/kindnet,
+# kube-system/kube-proxy and mokka/nvml-mock, 60 across 20 nodes, all Running.
+# Those are fakes too, answered for by KWOK's pod Stages, so each costs an API
+# object and no compute. Budget three pods per fake node when sizing a lane.
 
 node_yaml() {
     local n="$1"
@@ -322,12 +338,6 @@ metadata:
     nvidia.com/cuda.runtime.major: "${KWOK_CUDA_MAJOR}"
     nvidia.com/cuda.runtime.minor: "${KWOK_CUDA_MINOR}"
 spec:
-  # NoSchedule and not NoExecute. It keeps an ordinary pod off a node that
-  # cannot run one, which is the point. What it does not do is keep off a
-  # DaemonSet whose toleration is "operator: Exists" and nothing else:
-  # kube-proxy and the CNI both ship that way, and a taint has no answer to
-  # it. Those pods are fakes too, marked Running by KWOK's pod Stages, so
-  # they cost an API object each and no compute.
   taints:
     - key: ${KWOK_NODE_ANNOTATION}
       value: fake
@@ -403,8 +413,8 @@ mokka::phase
 printf '\n'
 printf 'lane %s: %d fake nodes (kwok-gpu-1 .. kwok-gpu-%d), %s simulated GPUs each, KWOK %s\n' \
     "${LANE}" "${COUNT}" "${COUNT}" "${KWOK_GPU_COUNT}" "${KWOK_VERSION}"
-printf 'they carry the %s=fake taint, which keeps ordinary pods off them.\n' "${KWOK_NODE_ANNOTATION}"
-printf 'it does NOT keep off a DaemonSet that tolerates everything: kube-proxy and\n'
-printf 'the CNI do, and a 20 node smoke on 2026-10-11 found 26 pods on the fake nodes.\n'
+printf 'they carry the %s=fake taint, which keeps the GPU Operator operands off.\n' "${KWOK_NODE_ANNOTATION}"
+printf 'three DaemonSets tolerate everything and land anyway (kindnet, kube-proxy,\n'
+printf 'nvml-mock), so expect three fake pods per fake node.\n'
 printf 'remove them with\n'
 printf '  hack/mokka/kwok-nodes.sh --delete %s\n' "${LANE}"
