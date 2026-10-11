@@ -147,7 +147,6 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 	var errs []error
 	denied := false
 	collected := 0
-	reachable := 0
 
 	for _, driver := range s.driverPods {
 		pod := driver.pod
@@ -158,8 +157,6 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 			}
 			continue
 		}
-
-		reachable++
 
 		// The report is named after the node the pod runs on, as the script does.
 		// A node already collected from, because it runs a second driver pod
@@ -198,14 +195,12 @@ func (g *Gatherer) gatherBugReportFromDaemonSet(s *gatherState) error {
 	case denied:
 		s.execDenied = append(s.execDenied, "bug-report")
 		return skip("forbidden: %v", errors.Join(errs...))
-	case reachable == 0:
+	case collected == 0 && len(errs) == 0:
 		// Every driver pod was passed over, because none of them is running on
 		// a node yet. The bundle holds no report and the reason belongs in the
 		// manifest rather than only in the error log: "this cluster runs no
 		// driver" and "its driver pods could not be asked" are different
 		// clusters.
-		return skip("no driver pod could be reached")
-	case collected == 0 && len(errs) == 0:
 		return skip("no driver pod could be reached")
 	}
 	return errors.Join(errs...)
@@ -287,7 +282,6 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 	var withoutSMI []string
 	collected := 0
 	denied := false
-	reachable := 0
 	taken := make(map[string]bool)
 
 	for _, driver := range s.driverPods {
@@ -298,7 +292,6 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 			}
 			continue
 		}
-		reachable++
 
 		ctx, cancel, timeout := g.execContext()
 		_, probeErr := g.execInPod(ctx, &pod, driver.container, nvidiaSMIProbe)
@@ -341,8 +334,6 @@ func (g *Gatherer) gatherDeviceUsage(s *gatherState) error {
 		return skip("forbidden: %v", errors.Join(errs...))
 	case collected == 0 && len(withoutSMI) > 0 && len(errs) == 0:
 		return skip("no nvidia-smi in %s", strings.Join(withoutSMI, ", "))
-	case reachable == 0:
-		return skip("no driver pod could be reached")
 	case collected == 0 && len(errs) == 0:
 		return skip("no driver pod could be reached")
 	}

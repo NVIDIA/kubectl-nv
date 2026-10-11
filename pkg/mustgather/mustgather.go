@@ -176,17 +176,10 @@ func (g *Gatherer) execAndCopyBugReport(ctx context.Context, pod *v1.Pod, destPa
 		Out:    outpipe,
 		ErrOut: os.Stderr,
 	}
-	container := execContainer(pod)
-
-	o := NewCopyOptions(iostream)
+	o := copyOptionsFor(iostream, pod)
 	o.Clientset = g.clientset
 	o.ClientConfig = g.config
-	// The copy is a second exec, running tar. It has to land in the container
-	// the bug report was written in: a driver pod carrying a sidecar would
-	// otherwise have the report written in one container and looked for in
-	// another, and the copy fails with "file not found" on a report that is
-	// there.
-	o.Container = container
+	container := o.Container
 
 	// Execute remote command to run the bug report script.
 	outLog, errLog, err := executeRemoteCommand(

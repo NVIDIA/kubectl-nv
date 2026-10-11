@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -230,5 +231,47 @@ func TestPerContainerLogsContinuePastAFailure(t *testing.T) {
 	errLog := readArtifact(t, dir, "must-gather.stderr.log")
 	if !strings.Contains(errLog, "broken") {
 		t.Errorf("the error log does not record the failing container:\n%s", errLog)
+	}
+}
+
+// TestATimedOutProbeIsNotReportedAsNoNvidiaSMI separates two answers that look
+// the same at the call site and mean opposite things.
+//
+// "command -v nvidia-smi" failing because the container has no nvidia-smi is a
+// fact about the driver: the device usage section cannot run and the manifest
+// says so. The same call failing because the pod never answered says nothing
+// about the driver at all, and recording it as "no nvidia-smi" tells a support
+// engineer the driver is not installed on a node where it may well be.
+func TestATimedOutProbeIsNotReportedAsNoNvidiaSMI(t *testing.T) {
+	pod := driverPodWith("driver-a", "node-a", map[string]string{"app": "nvidia-driver-daemonset"})
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{
+		ArtifactDir: dir,
+		ExecTimeout: 50 * time.Millisecond,
+		RunInPod: func(ctx context.Context, _ *v1.Pod, _, _ string) (string, error) {
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+	}, stubFactory{clientset: fake.NewSimpleClientset(pod), config: offlineConfig()}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	cerr := g.gatherDeviceUsage(&gatherState{operatorNamespace: "gpu-operator", prepared: true})
+	if cerr == nil {
+		t.Fatal("the device usage collector returned nil, want the pod that never answered reported")
+	}
+
+	var skipped errSkipped
+	if errors.As(cerr, &skipped) {
+		t.Fatalf("the collector was recorded %q, want the timeout reported rather than a skip", skipped.reason)
+	}
+	if !strings.Contains(cerr.Error(), "timeout") {
+		t.Errorf("error = %v, want it to say the probe ran out of time", cerr)
+	}
+	if strings.Contains(cerr.Error(), "no nvidia-smi") {
+		t.Errorf("error = %v, want it not to claim the container has no nvidia-smi", cerr)
 	}
 }

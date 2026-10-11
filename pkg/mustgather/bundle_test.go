@@ -305,6 +305,13 @@ func TestAFailedWriteLeavesNoArtifact(t *testing.T) {
 		if _, werr := io.WriteString(w, "apiVersion: v1\nitems:\n"); werr != nil {
 			return werr
 		}
+		// Mid-write, nothing under the artifact's own name. This is what the
+		// temporary file buys that removing the file afterwards does not: the
+		// manifest is built by reading the directory, and a gather killed here
+		// would otherwise leave a file that indexes as a complete artifact.
+		if _, serr := os.Stat(filepath.Join(dir, "nodes.yaml")); !os.IsNotExist(serr) {
+			t.Errorf("nodes.yaml exists while it is still being written (stat: %v)", serr)
+		}
 		return halfway
 	})
 	if !errors.Is(err, halfway) {
@@ -324,6 +331,9 @@ func TestASucceededWriteLeavesNoTemporaryFile(t *testing.T) {
 	g, dir := newTestGatherer(t)
 
 	if err := g.writeArtifactFile("nodes.yaml", func(w io.Writer) error {
+		if _, serr := os.Stat(filepath.Join(dir, "nodes.yaml")); !os.IsNotExist(serr) {
+			t.Errorf("nodes.yaml exists while it is still being written (stat: %v)", serr)
+		}
 		_, werr := io.WriteString(w, "apiVersion: v1\n")
 		return werr
 	}); err != nil {
