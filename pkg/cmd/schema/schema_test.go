@@ -30,6 +30,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
@@ -260,5 +261,22 @@ func TestNewCommandReadsTheDefaultRegistry(t *testing.T) {
 	}
 	if out.String() != string(want) {
 		t.Error("the command did not print what the default registry generates")
+	}
+}
+
+// --write-dir writes files. It is the generator behind "make schema", not
+// something a model should be handed, so the command marks it for the MCP
+// server to leave out.
+func TestWriteDirIsMarkedForTheMCPServerToSuppress(t *testing.T) {
+	t.Parallel()
+
+	o := &cmd.Options{Streams: genericiooptions.NewTestIOStreamsDiscard()}
+	flag := NewCommand(o).Flags().Lookup("write-dir")
+	if flag == nil {
+		t.Fatal("--write-dir is not registered")
+	}
+	if values := flag.Annotations[mcp.SuppressAnnotation]; len(values) == 0 {
+		t.Errorf("--write-dir carries no %q annotation, so the MCP server would offer it",
+			mcp.SuppressAnnotation)
 	}
 }

@@ -74,6 +74,10 @@ func testTree(streams genericiooptions.IOStreams) *cobra.Command {
 		},
 	}
 	explain.Flags().StringP("output", "o", "table", "Output format")
+	explain.Flags().String("write-dir", "", "Write the explanations into this directory")
+	if err := explain.Flags().SetAnnotation("write-dir", SuppressAnnotation, []string{"true"}); err != nil {
+		panic(err)
+	}
 	root.AddCommand(explain)
 
 	adm := &cobra.Command{Use: "adm", Short: "Admin level operations"}
@@ -296,5 +300,21 @@ func TestOnlyTheExecCapableToolsAreGated(t *testing.T) {
 		if tool.ForceNoExec != gated {
 			t.Errorf("%s has ForceNoExec=%t, want %t", tool.Name, tool.ForceNoExec, gated)
 		}
+	}
+}
+
+// A flag that writes to the local filesystem is not something a model should
+// be handed, even though it touches no cluster. A command marks such a flag
+// itself, and the server leaves it out and refuses it if asked for anyway.
+func TestASuppressedFlagIsNeitherOfferedNorAccepted(t *testing.T) {
+	t.Parallel()
+
+	tool := toolByName(t, Tools(testTree(genericiooptions.NewTestIOStreamsDiscard())), "explain")
+	if _, offered := schemaProperties(t, tool)["write-dir"]; offered {
+		t.Error("the explain tool offers --write-dir, which the command marked as suppressed")
+	}
+
+	if _, err := commandLine(tool, map[string]any{"write-dir": "/tmp/anywhere"}); err == nil {
+		t.Error("a suppressed flag was accepted when asked for by name")
 	}
 }
