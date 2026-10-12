@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
@@ -42,6 +41,11 @@ func TestThisPackageRegistersItsKinds(t *testing.T) {
 		}
 	}
 }
+
+// exitedCleanly is the exit code of an init container that finished. It is a
+// variable because the field is a pointer: "has not finished" and "exited 0"
+// are different facts, and the schema has to be checked against the second.
+var exitedCleanly = int32(0)
 
 // populatedNode is a node with every field of the kind set to something, so
 // that the schema is checked against a full instance rather than against the
@@ -102,7 +106,7 @@ func populatedNode(name string) GPUNode {
 			LastTermination: Termination{Observed: true, ExitCode: 1, Reason: "Error", FinishedAt: "2026-10-01T00:00:00Z"},
 			InitContainers: []InitResult{{
 				Name:            "toolkit-validation",
-				ExitCode:        ptr.To(int32(0)),
+				ExitCode:        &exitedCleanly,
 				Reason:          "Completed",
 				LastTermination: Termination{Observed: true, Reason: "Completed", FinishedAt: "2026-10-01T00:00:00Z"},
 			}},

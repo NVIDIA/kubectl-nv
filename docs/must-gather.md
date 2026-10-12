@@ -42,6 +42,9 @@ default location is under `/tmp`, where every account on the machine can look.
   copy out of it, may take. Defaults to 2m. A pod that accepts the connection
   and never answers then costs one artifact rather than the whole bundle; it is
   recorded as `error:timeout after <duration>` and the gather moves on.
+- `--redact`: rewrite the identities and the secret material out of the bundle
+  before it is indexed. What it covers is below. `kubectl nv debug` takes it
+  too: both commands run the same gather and register the same flags.
 
 `--since` and `--exec-timeout` are rejected below one second, exit 2: a window
 that short collects nothing and a deadline that short cannot finish a bug
@@ -82,8 +85,10 @@ Written last, in every bundle, whichever way the gather ended. It carries:
 - `toolVersion`, the kubectl-nv that produced the bundle.
 - `context`, the kubeconfig context it was collected through.
 - `timestamp`, RFC3339 in UTC.
-- `flags`: `node`, `since` and `noExec`, so that a bundle missing a node's
-  evidence can be read as narrowed rather than as incomplete.
+- `flags`: `node`, `since`, `noExec` and `redacted`, so that a bundle missing a
+  node's evidence can be read as narrowed rather than as incomplete, and a
+  bundle whose nodes are called `node-3f91c2a7b4` is not read as a cluster
+  whose nodes are genuinely called that.
 - `collectors`: one entry per collector, with `name`, `status` and the
   `artifacts` it wrote. The status is `ok`, `skipped:<reason>` or
   `error:<text>`.
@@ -94,6 +99,67 @@ The digests are what a bundle is checked against after it has been through an
 archive and an upload. A file that arrived truncated and a collector that was
 never allowed to run look the same from the outside without them: a file that
 is not there.
+
+## Redaction
+
+`--redact` rewrites every file of the bundle after the last collector has
+finished and before the manifest is written, so the digests in the manifest are
+the redacted files'.
+
+### What is rewritten
+
+- **Node names and hostnames.** Every node name in `nodes.yaml`, every
+  `kubernetes.io/hostname` label value, and every `Hostname`, `InternalDNS` and
+  `ExternalDNS` address, wherever they appear in the bundle: the node objects,
+  the pod specs that name a node, the descriptions and the logs. File names are
+  not rewritten, so a log file named after a pod keeps its name.
+- **IP addresses.** Every IPv4 and IPv6 address, in any file.
+- **Credential values.** The value of an environment variable, a Secret key, a
+  kubeconfig field or any `name: value` line whose name contains `pass`,
+  `secret`, `token`, `key`, `credential`, `cred`, `auth`, `licence`, `license`,
+  `signature` or `session`, case insensitively. The key is kept and the value
+  becomes `REDACTED`.
+- **The whole value map of a `Secret`**, that is, everything under `data:` or
+  `stringData:`.
+- **Bearer tokens**, as `Authorization: Bearer <token>` in a log.
+- **PEM blocks**, from `-----BEGIN` to `-----END`, private keys and
+  certificates alike.
+
+An identity becomes a pseudonym rather than a blank: `node-3f91c2a7b4`,
+`host-...`, `ip-...`. Secret material becomes `REDACTED`, because nothing is
+gained by being able to tell two passwords apart.
+
+### Consistent within a bundle, not across bundles
+
+The pseudonym is an HMAC of the value under a key drawn at random for that one
+run and never written anywhere. So the same node name is the same pseudonym in
+every file of one bundle, which is what lets a reader follow a node from the
+node list to the pods on it; and the same node name in two bundles is two
+different pseudonyms, so nobody holding both can line them up or confirm a
+guess at a name. Nothing in or alongside the bundle can undo it, including for
+whoever produced it.
+
+### What is not rewritten
+
+- **Container images**, registry hostname included. The driver image is the
+  single most useful line in a bundle, and a bundle that will not say which
+  driver it ran is a bundle nobody can answer from.
+- **Namespaces, pod names, DaemonSet names, labels and annotations other than
+  the hostname.** A pod name carries the node it is on only by accident, and
+  these are what a reader navigates by.
+- **Versions, conditions, events, exit codes and log text** other than the
+  addresses and credentials in it.
+- **Hostnames the node list does not name.** A hostname is only recognised when
+  the cluster reported it as a node identity; one that appears in a log alone is
+  left.
+- **A four part dotted number that is a valid IP address but means something
+  else**, such as a version written `1.2.3.4`, is rewritten as an address.
+  Redacting a version is harmless; leaving an address is not.
+
+The rules are shapes rather than schemas, because the files of a bundle are not
+one format. `--redact` reduces what a bundle discloses; it is not a guarantee
+that nothing identifying survives, and a bundle leaving a regulated environment
+should still be read before it is sent.
 
 ## Parity with the gpu-operator script
 

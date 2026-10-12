@@ -53,6 +53,10 @@ func AddGatherFlags(fs *pflag.FlagSet, opts *Options) {
 			"The default collects the whole log")
 	fs.BoolVar(&opts.NoExec, "no-exec", false,
 		"never exec into a driver pod: no nvidia-bug-report and no GPU device usage")
+	fs.BoolVar(&opts.Redact, "redact", false,
+		"rewrite the node names, hostnames, addresses and credential values out of "+
+			"the bundle before it is indexed. See docs/must-gather.md for what is and "+
+			"is not redacted")
 	fs.DurationVar(&opts.ExecTimeout, "exec-timeout", DefaultExecTimeout,
 		"how long one command inside a driver pod, or one copy out of it, may take "+
 			"before that pod is recorded as having timed out and the gather moves on")

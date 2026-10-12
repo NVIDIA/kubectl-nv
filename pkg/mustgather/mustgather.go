@@ -61,6 +61,12 @@ type Options struct {
 	// device usage, and the manifest records both as skipped by flag.
 	NoExec bool
 
+	// Redact rewrites the identities and the secret material out of every file
+	// of the bundle once the collectors have finished and before it is
+	// indexed, so that the checksums are the redacted files'. The manifest
+	// records that it was done; pkg/mustgather/redact.go says what it covers.
+	Redact bool
+
 	// ExecTimeout bounds one exec or one copy out of a driver pod. Zero means
 	// DefaultExecTimeout. A pod that accepted the connection and never answers
 	// costs one file rather than the whole bundle.
