@@ -360,6 +360,12 @@ prints a Markdown catalog entry, not an object of this contract.
 `explain`, `schema`, `mcp` and `version` read nothing from a cluster and need
 no kubeconfig.
 
+`--redact` is about the bundle on disk and not about what a command prints.
+`kubectl nv debug --redact` writes a redacted bundle and prints a `DebugReport`
+naming the real node, because that report is for the person who ran it. Over
+MCP the flag is offered like any other flag and is not forced on, so a tool
+call that wants a redacted bundle asks for one.
+
 `adm must-gather` and `debug` are the two commands that write on the machine
 `kubectl-nv` runs on. `must-gather` prints no object at all: it writes a
 directory and reports progress on stderr, and the `BundleManifest` kind is the
