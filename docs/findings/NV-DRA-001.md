@@ -78,3 +78,8 @@ E3 scripts both halves as
 `gpu.nvidia.com` ResourceSlice naming a node that already advertises
 `nvidia.com/gpu`, so the node reads as mode `both`, and deletes the
 slice again on recover.
+
+Measured on a t4 lane on 2026-10-12: the finding appears within 1 second
+and clears within 3. Nothing owns the slice, because the lane runs no
+DRA driver, so it stays exactly as applied until the recovery deletes
+it.

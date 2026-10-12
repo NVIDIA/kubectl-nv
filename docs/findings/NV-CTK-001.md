@@ -107,3 +107,24 @@ E3 scripts both halves as
 `hack/mokka/faults/nv-ctk-001.sh inject|recover <node>`: it places a
 validator pod on the node whose `toolkit-validation` init container
 exits non-zero, and deletes it again on recover.
+
+Two details decide whether it reproduces anything at all.
+
+The pod runs with `restartPolicy: Always`, which is what the operator's
+own validator uses: the init container then sits Waiting in
+`CrashLoopBackOff` with the exit code in its last termination, which is
+the state this rule reads. A pod that simply terminated would be a
+different shape.
+
+The image is borrowed off the lane, and from the device plugin rather
+than from the validator. The validator runs the operator image, which
+carries no shell, so a command of `/bin/sh -c "exit 1"` there fails with
+`RunContainerError` and a last termination whose reason is `StartError`.
+The rule reads a last termination only under `CrashLoopBackOff`, so that
+injection produced no finding at all: observed on a t4 lane on
+2026-10-12, where the pod restarted twice and `kubectl nv health`
+reported nothing.
+
+With the device plugin's image the finding appears within 16 seconds to
+1 minute 32, the spread being how long the kubelet takes to back off far
+enough to call it a crash loop, and clears within 6 seconds.

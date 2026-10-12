@@ -134,6 +134,18 @@ kubectl nv info <node>
 
 E3 scripts both halves as
 `hack/mokka/faults/nv-drv-001.sh inject|recover <node>`: it puts a
-driver DaemonSet on the lane whose image tag does not exist, so the pod
-lands on the node and never reaches ready while the deploy label still
-says the driver belongs there, and takes it away again on recover.
+driver POD on the node, not a DaemonSet, pointed at an image that cannot
+be pulled, so it stays Pending and never reaches ready. A DaemonSet
+would put a second broken pod on the other worker for no extra
+coverage.
+
+The deploy label is part of the injection. The lane runs with
+`driver.enabled=false`, so the operator may be telling the node not to
+run a driver at all, and this rule reads that as consent. The script
+saves whatever the label held, sets it to `true` only if it said the
+operand was off, and puts the saved value back on recover.
+
+Measured on a t4 lane on 2026-10-12: the finding appears within 1 second
+and clears within 5. It is at error because the node is not
+mid-upgrade; on a node the operator is upgrading the same pod reports at
+info.

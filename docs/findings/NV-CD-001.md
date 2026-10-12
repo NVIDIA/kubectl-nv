@@ -122,3 +122,13 @@ as `hack/mokka/faults/nv-cd-001.sh inject|recover <node>`: it applies the
 ComputeDomain CRD, one ComputeDomain whose `status.nodes` names the node
 at `NotReady`, and a not-ready IMEX daemon pod fixture on it, and deletes
 all three on recover.
+
+The status is a subresource, so it is patched rather than applied: an
+apply never writes one, and a ComputeDomain created without a status
+names no node at all.
+
+Measured on a t4 lane on 2026-10-12: the finding appears within 5
+seconds of the status patch and clears within 3 seconds of the CRD being
+deleted. Two findings come out of it, both at info: this one, and the
+one about a node no domain recorded a clique for, because the lane has
+no NVLink partition to name.

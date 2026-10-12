@@ -131,5 +131,10 @@ node `nvidia.com/mig.config` with a profile and
 `nvidia.com/mig.config.state=failed`, and restores the labels it saved
 on recover.
 
+Measured on a t4 lane on 2026-10-12: the finding appears within 1 second
+and clears within 3. It is at error rather than the rule's own warning,
+because a config state of `failed` is the mig-manager saying it gave up;
+`pending` is a change still in flight and reports at warning.
+
 E4 runs the other direction on the MIG lane: a real partitioned node,
 which must give no finding at all.

@@ -98,3 +98,12 @@ E3 scripts both halves as
 `hack/mokka/faults/nv-upg-001.sh inject|recover <node>`: it labels the
 node `nvidia.com/gpu-driver-upgrade-state=upgrade-failed` and removes
 the label again on recover.
+
+`upgrade-failed` and not one of the stuck states. That value is reported
+at error and needs nothing dated, where the stuck states are measured
+against `--upgrade-stuck-after` and an event saying when the node
+entered them, and a lane that runs no upgrade controller writes no such
+event.
+
+Measured on a t4 lane on 2026-10-12: the finding appears within 1 second
+and clears within 3.

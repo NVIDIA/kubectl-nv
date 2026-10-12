@@ -88,3 +88,13 @@ E3 scripts both halves as
 `fabric.topograph.run/tier-0` on one worker of the lane and not on the
 named node, so the named node is missing a tier its peer carries, and
 removes the label again on recover.
+
+The node the script is given is the node that ends up REPORTED, which is
+the opposite of every other script in that directory and is what the
+rule means: a tier counts as in use because the rest of the cluster
+carries it. tier-0 and not a higher one, because the tiers are a
+hierarchy with 0 nearest the node, so a cluster using any of them uses
+that one.
+
+Measured on a t4 lane on 2026-10-12: one finding, on the node without
+the label, appearing within 1 second and clearing within 3.

@@ -117,3 +117,20 @@ E3 scripts both halves as
 node and patches its status with a `GPUXidError` condition at `True`
 whose reason is `GPUXidErrorIsNotHealthy`, then uncordons it and removes
 the condition on recover.
+
+The condition is a STRATEGIC merge patch against the status
+subresource, and both words carry weight. A plain merge patch replaces
+the whole conditions list, taking `Ready` with it, and the kubelet would
+evict the lane's pods before putting it back; conditions are keyed by
+type under a strategic merge, so one is added and the rest are left
+alone.
+
+Observed on a t4 lane on 2026-10-12: after the patch the node carried
+`GPUXidError`, `MemoryPressure`, `DiskPressure`, `PIDPressure` and
+`Ready`; the new condition was still there two minutes later across six
+readings, so nothing reconciles it away; and a `$patch: delete` took it
+off again leaving the other four. The finding appears within 1 second
+and clears within 3.
+
+Both halves produce a finding, both at info on the same node: one for
+the condition and one for the cordon.
