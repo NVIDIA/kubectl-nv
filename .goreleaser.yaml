@@ -50,14 +50,48 @@ sboms:
   - id: archive
     artifacts: archive
 
+# github-native asks GitHub to generate the notes from the pull requests merged
+# since the previous tag, grouped by .github/release.yml. main takes pull
+# requests as merge commits, so one line per pull request reads far better than
+# one line per commit. GoReleaser calls the release notes API with the same
+# GITHUB_TOKEN it uses to create the release, and the release job already
+# grants contents: write. Grouping, sorting and filtering happen on GitHub's
+# side with this setting, so none of them are configured here.
 changelog:
-  use: git
-  sort: asc
+  use: github-native
 
 # Carlos reviews and publishes every release by hand, so the workflow only ever
 # creates a draft.
+#
+# prerelease: auto marks the release as a prerelease when the tag carries a
+# semver prerelease part, so vX.Y.0-rc.N is published as one and vX.Y.Z is not.
+#
+# The header goes above the generated notes. A minor or major release opens
+# with the sections a maintainer fills in while reviewing the draft; a patch
+# release says what it is. GoReleaser renders this with text/template, where
+# .Major, .Minor and .Patch come from the tag.
 release:
   github:
     owner: NVIDIA
     name: kubectl-nv
   draft: true
+  prerelease: auto
+  header: |
+    {{ if eq .Patch 0 -}}
+    ## Highlights
+
+    <!-- What this release is for, in two or three sentences. -->
+
+    ## Breaking changes
+
+    <!-- Anything a user has to change, and what to change it to. Write "None." if
+    there is nothing. -->
+
+    ## Upgrade notes
+
+    <!-- What to do when moving up from the previous release. Write "None." if
+    there is nothing. -->
+    {{- else -}}
+    This is a patch release of {{ .Major }}.{{ .Minor }}. It carries fixes only: no new features and
+    no breaking changes.
+    {{- end }}

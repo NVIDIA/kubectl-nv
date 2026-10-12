@@ -1,0 +1,47 @@
+# Copyright 2026 NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GitHub reads this file when it generates release notes from the pull requests
+# merged since the previous tag. GoReleaser asks for those notes on every tag
+# (changelog.use: github-native in .goreleaser.yaml), so this file is what
+# groups a release page.
+#
+# Categories are matched top down and the first match wins, which is why
+# "Other changes" carries "*" and sits last: a pull request that matched none
+# of the categories above still appears. The labels are documented in
+# RELEASING.md together with the one time commands that create them.
+
+changelog:
+  exclude:
+    labels:
+      - skip-changelog
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Features
+      labels:
+        - feature
+    - title: Fixes
+      labels:
+        - bug
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
