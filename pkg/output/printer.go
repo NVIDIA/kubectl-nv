@@ -166,9 +166,17 @@ type TablePrinter struct {
 	// Wide turns on the columns the kind marks as wide.
 	Wide bool
 	// Fields, when it is not empty, restricts the table to the columns whose
-	// Field it names, plus the ones no projection drops. It is how --fields
+	// Fields it names, plus the ones no projection drops. It is how --fields
 	// reaches a format that has no nested structure to project.
 	Fields []string
+	// Unrendered, when it is not nil, is where a note goes naming the
+	// requested paths that no column of this table renders.
+	//
+	// A path a kind has and a table does not show is not an error: the caller
+	// asked for something real, and -o json would give it. But a table that
+	// came back without the column they asked for and said nothing reads as a
+	// table with no such field, and they go looking for the typo.
+	Unrendered io.Writer
 }
 
 // PrintObj implements Printer.
@@ -191,6 +199,8 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 		keep = append(keep, i)
 		headers = append(headers, c.Header)
 	}
+
+	p.noteUnrendered(columns, keep)
 
 	tw := printers.GetNewTabWriter(w)
 	if _, err := fmt.Fprintln(tw, strings.Join(headers, "\t")); err != nil {
@@ -215,6 +225,56 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	}
 
 	return nil
+}
+
+// noteUnrendered reports the requested paths that no kept column renders.
+func (p *TablePrinter) noteUnrendered(columns []Column, keep []int) {
+	if p.Unrendered == nil || len(p.Fields) == 0 {
+		return
+	}
+
+	rendered := map[string]bool{}
+	for _, i := range keep {
+		for _, path := range columns[i].Fields {
+			rendered[path] = true
+		}
+	}
+
+	var missing []string
+	for _, path := range p.Fields {
+		if !rendered[path] && !coveredByAny(rendered, path) {
+			missing = append(missing, path)
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+
+	fmt.Fprintf(p.Unrendered,
+		"note: no column of this table renders %s; ask for -o json or -o yaml to see %s\n",
+		strings.Join(missing, ", "), pluralPaths(len(missing)))
+}
+
+// coveredByAny reports whether a requested section contains a path some kept
+// column renders, so that asking for "levels" is not reported as unrendered
+// when every level column survived.
+func coveredByAny(rendered map[string]bool, requested string) bool {
+	for path := range rendered {
+		if strings.HasPrefix(path, requested+".") {
+			return true
+		}
+	}
+
+	return false
+}
+
+// pluralPaths renders the noun of the note above.
+func pluralPaths(n int) string {
+	if n == 1 {
+		return "it"
+	}
+
+	return "them"
 }
 
 // keepsColumn reports whether a column survives a projection: every path it

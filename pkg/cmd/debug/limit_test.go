@@ -50,6 +50,23 @@ func TestDebugRegistersTheOutputFlags(t *testing.T) {
 	}
 }
 
+// --fields has nothing to do on the summary this command prints, which is a
+// description rather than a table of columns. It is the same answer kubectl nv
+// info gives, from the same function.
+func TestDebugRefusesFieldsOnItsSummary(t *testing.T) {
+	_, err := runDebug(t, gatherSeam{}, "worker-1", "--fields", "bundle")
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+	for _, want := range []string{"--fields", "-o json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+}
+
 // A DebugReport is about one node, so there is nothing for --limit to cut.
 // Answering a bounded request with an unbounded one would leave the caller
 // believing it asked for less than it got.

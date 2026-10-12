@@ -199,7 +199,9 @@ func PrintBounded(streams genericiooptions.IOStreams, format string, b BoundedOp
 		// A name line is a name: there is nothing left to project away.
 		return (&namePrinter{}).PrintObj(bounded, streams.Out)
 	case FormatTable, FormatWide:
-		return (&TablePrinter{Wide: f == FormatWide, Fields: b.Fields}).PrintObj(bounded, streams.Out)
+		printer := &TablePrinter{Wide: f == FormatWide, Fields: b.Fields, Unrendered: streams.ErrOut}
+
+		return printer.PrintObj(bounded, streams.Out)
 	case FormatJSON, FormatYAML:
 		return printProjected(streams.Out, f, bounded, b.Fields)
 	}

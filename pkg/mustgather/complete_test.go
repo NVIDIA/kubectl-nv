@@ -72,6 +72,10 @@ func completeCluster() []runtime.Object {
 		gpuRequestingPod("shared", "team-b", "gpu-node-2", "nvidia.com/gpu.shared", 1),
 		gpuRequestingPod("cpu-only", "research", "gpu-node-1", "cpu", 1),
 		nodeEvent("upgrade-1", "gpu-node-1"),
+		// A second node's event, so that --node has something to leave out. A
+		// fixture with one node's events cannot tell a filter that works from
+		// one that was never applied.
+		nodeEvent("upgrade-2", "gpu-node-2"),
 	)
 }
 
@@ -128,8 +132,11 @@ func TestAGatherCollectsTheNodeEvents(t *testing.T) {
 	for _, event := range list.Items {
 		about[event.InvolvedObject.Name] = true
 	}
-	if len(about) != 1 || !about["gpu-node-1"] {
-		t.Errorf("%s holds events about %v, want only gpu-node-1", nodeEventsFile, about)
+	// Both nodes, because nothing narrowed this gather: a collector that kept
+	// one node's events whatever was asked would pass a test that only ever
+	// looked for one.
+	if len(about) != 2 || !about["gpu-node-1"] || !about["gpu-node-2"] {
+		t.Errorf("%s holds events about %v, want both nodes", nodeEventsFile, about)
 	}
 }
 
@@ -159,6 +166,9 @@ func TestTheNewCollectorsHonourTheNodeFlag(t *testing.T) {
 	var events v1.EventList
 	if err := yaml.Unmarshal([]byte(readArtifact(t, dir, nodeEventsFile)), &events); err != nil {
 		t.Fatalf("%s does not parse: %v", nodeEventsFile, err)
+	}
+	if len(events.Items) != 1 {
+		t.Errorf("%s holds %d events, want the one about gpu-node-1", nodeEventsFile, len(events.Items))
 	}
 	for _, event := range events.Items {
 		if event.InvolvedObject.Name != "gpu-node-1" {

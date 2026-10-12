@@ -198,7 +198,10 @@ func (r HealthReport) MarshalJSON() ([]byte, error) {
 // first ones of the report a caller would get without the flag.
 func (r *HealthReport) LimitItems(n int) int {
 	total := len(r.Findings)
-	if n < 0 || total <= n {
+	// A limit of zero or less is no limit, which is what the flag's default
+	// means: a report truncated to nothing by it would say the cluster is
+	// clean.
+	if n <= 0 || total <= n {
 		return total
 	}
 
@@ -223,8 +226,8 @@ const noNode = "-"
 
 // TableColumns implements output.TableRows. Each column names the one field of
 // a finding it renders, so --fields findings.code keeps the CODE column and
-// nothing else, and --fields findings keeps none of them: the paths a caller
-// names are fields of a finding, not the list of them.
+// nothing else, and --fields findings keeps all of them: a section contains
+// every path inside it.
 func (r *HealthReport) TableColumns(wide bool) []output.Column {
 	columns := []output.Column{
 		output.OneField("NODE", "findings.node"),

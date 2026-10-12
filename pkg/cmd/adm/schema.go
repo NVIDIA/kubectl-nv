@@ -27,4 +27,8 @@ import "github.com/NVIDIA/kubectl-nv/pkg/output"
 // See pkg/cmd/list/schema.go on why this is an init.
 func init() {
 	output.RegisterCommandKind("must-gather", output.KindBundleManifest)
+	// And under the path a caller actually types. "kubectl nv schema adm
+	// must-gather" is the command they just ran, and asking them to drop the
+	// group is asking them to know which half of the name is the command.
+	output.RegisterCommandKind("adm must-gather", output.KindBundleManifest)
 }

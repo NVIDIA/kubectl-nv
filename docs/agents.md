@@ -64,10 +64,21 @@ schema`. A test fails when a checked-in file stops matching what the generator
 produces, so the published contract cannot drift from the code.
 
 In those schemas `apiVersion` and `kind` are required and pinned to one value
-each, a timestamp is an RFC3339 string, and `metadata` is trimmed to the five
-fields anything here sets: `name`, `namespace`, `labels`, `annotations` and
-`creationTimestamp`. The same five are the `metadata` paths `--fields`
-accepts, so the projection and the schema describe one object.
+each, and `metadata` is trimmed to the five fields anything here sets: `name`,
+`namespace`, `labels`, `annotations` and `creationTimestamp`. The same five are
+the `metadata` paths `--fields` accepts, so the projection and the schema
+describe one object.
+
+A timestamp is an RFC3339 string or `null`. The null is not a choice: a
+timestamp comes from `metav1.Time`, which writes `null` for its zero value, so
+a node condition the cluster reported without a heartbeat and the
+`creationTimestamp` of an object built in memory are both nulls on the wire. A
+schema saying `string` there would be a contract this tool does not satisfy.
+
+The schemas describe what a command prints whole. Output projected with
+`--fields` is not expected to satisfy them: a projection keeps `apiVersion`,
+`kind` and `metadata.name` and drops whatever else was not asked for, including
+fields the schema marks `required`. Validate the unprojected output.
 
 ## Exit codes
 
@@ -120,10 +131,21 @@ of them.
 
 `--limit N` keeps the first N items after the command's own sort. Truncation
 is reported twice: a note on stderr, and a remaining count in the output,
-because a program reading stdout never sees stderr. On a list kind that count
-is `metadata.remainingItemCount`. On a report it sits with the rest of the
-status, so a `HealthReport` carries `remainingItemCount` at the top level. A
-`TopologyReport` carries `status.remainingItemCount`.
+because a program reading stdout never sees stderr.
+
+Where that count sits depends on the kind, because each one puts its status
+where its own shape puts it:
+
+| Kind | Where the remaining count is |
+|---|---|
+| `GPUNodeList` | `metadata.remainingItemCount` |
+| `HealthReport` | `remainingItemCount`, at the top level |
+| `TopologyReport` | `status.remainingItemCount` |
+| `GPUNode`, `DebugReport` | nowhere: `--limit` is exit 2 on them |
+
+A report that was not truncated carries no such key at all, and the stderr note
+is not printed either. A zero would be true and would invite a reader to branch
+on the value rather than on its presence.
 
 What N counts is the repeated part of the kind: the items of a `GPUNodeList`,
 the findings of a `HealthReport`, and the groups of a `TopologyReport` counted
@@ -141,7 +163,8 @@ note: showing 2 of 3 items (--limit 2)
 ```
 
 `--fields a,b,c` keeps only the named dotted JSON paths on each item, for
-instance `status.ready` or `metadata.labels`. `apiVersion`, `kind` and
+instance `capacity` or `metadata.labels` on a `GPUNode`, or
+`levels.groups.free` on a `TopologyReport`. `apiVersion`, `kind` and
 `metadata.name` survive whatever is asked for: without them a consumer cannot
 tell what it is holding or which thing the values belong to.
 
@@ -163,6 +186,11 @@ when all of them were named: a table has nowhere to put half a cell, and a
 column kept by one of its paths would print the others to a caller that named
 neither. Asking for a section keeps the columns inside it. For `name` there is
 nothing left to project.
+
+A path the kind has and no column of the table renders is not an error: the
+caller asked for something real, and `-o json` would give it. A note on stderr
+says so, naming the paths, because a table that came back without the column
+they asked for and said nothing reads as a table with no such field.
 
 Run `kubectl nv schema <kind>` to see which paths a kind offers.
 
@@ -192,11 +220,12 @@ It is turned off with `--no-exec`, which collects everything else and records
 in the bundle what was skipped. A cluster where `pods/exec` is not allowed
 degrades the same way and exits 3.
 
-The flag itself is not in the tree yet. Until it lands, the MCP server refuses
-to serve `must-gather` at all rather than serving it with the exec still
-available, and says so in the tool error.
+`kubectl nv debug` runs the same gather and takes the same `--no-exec`, so the
+server serves it with the flag forced on. `adm must-gather` has no `--no-exec`
+of its own yet, and until it does the server refuses to serve it at all rather
+than serving it with the exec still available, and says so in the tool error.
 
-Over MCP it is never on. See below.
+Over MCP the exec is never on. See below.
 
 ## MCP
 

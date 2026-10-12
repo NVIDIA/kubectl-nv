@@ -55,12 +55,16 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 		Long: "Print the JSON Schema of one kubectl-nv output kind, named either by the kind\n" +
 			"or by the command that prints it. The schema is generated from the same Go type\n" +
 			"the command marshals, so it cannot describe something kubectl-nv does not emit.",
-		Args: cobra.MaximumNArgs(1),
+		// A command path is as many words as the command has. "adm must-gather"
+		// is two, and asking for it as one would mean knowing which half of
+		// the name is the group.
+		Args: cobra.MaximumNArgs(2),
 		RunE: func(c *cobra.Command, args []string) error {
 			if writeDir != "" {
 				if len(args) > 0 {
 					return output.NewUsageError(
-						"--write-dir writes every registered kind: it cannot be given %q as well", args[0])
+						"--write-dir writes every registered kind: it cannot be given %q as well",
+						strings.Join(args, " "))
 				}
 
 				return writeAllTo(o, registry, writeDir)
@@ -70,7 +74,7 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 				return output.NewUsageError("schema needs a kind or a command name: %s", known(registry))
 			}
 
-			raw, err := registry.Schema(args[0])
+			raw, err := registry.Schema(strings.Join(args, " "))
 			if err != nil {
 				return err
 			}

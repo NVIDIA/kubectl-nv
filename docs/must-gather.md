@@ -140,26 +140,74 @@ the redacted files'.
 
 ### What is rewritten
 
-- **Node names and hostnames.** Every node name in `nodes.yaml`, every
-  `kubernetes.io/hostname` label value, and every `Hostname`, `InternalDNS` and
-  `ExternalDNS` address, wherever they appear in the bundle: the node objects,
-  the pod specs that name a node, the descriptions and the logs. File names are
-  not rewritten, so a log file named after a pod keeps its name.
-- **IP addresses.** Every IPv4 and IPv6 address, in any file.
-- **Credential values.** The value of an environment variable, a Secret key, a
-  kubeconfig field or any `name: value` line whose name contains `pass`,
-  `secret`, `token`, `key`, `credential`, `cred`, `auth`, `licence`, `license`,
-  `signature` or `session`, case insensitively. The key is kept and the value
-  becomes `REDACTED`.
-- **The whole value map of a `Secret`**, that is, everything under `data:` or
-  `stringData:`.
-- **Bearer tokens**, as `Authorization: Bearer <token>` in a log.
-- **PEM blocks**, from `-----BEGIN` to `-----END`, private keys and
-  certificates alike.
+**Identities.** Every node name, every `kubernetes.io/hostname` label value and
+every `Hostname`, `InternalDNS` or `ExternalDNS` address, wherever it appears:
+the node objects, the pod specs that name a node, the events, the
+ResourceSlices, OpenShift's `machines.yaml`, the descriptions and the logs. The
+names are learned from all of those and from the cluster's whole node list, so
+a gather narrowed with `--node` still takes the other nodes out of the logs
+that name them.
 
-An identity becomes a pseudonym rather than a blank: `node-3f91c2a7b4`,
-`host-...`, `ip-...`. Secret material becomes `REDACTED`, because nothing is
-gained by being able to tell two passwords apart.
+File names are rewritten too. `nvidia-bug-report_<node>.log.gz` and
+`gpu_device_usage_<node>.log` carry the node in the directory listing, where no
+rewrite of the contents reaches it.
+
+A node name is replaced where it is a name and not part of a longer one, so a
+cluster with a node called `gpu` keeps `nvidia.com/gpu` intact.
+
+**Addresses.** Every IPv4 and IPv6 address, including one ending in `::` and
+the address half of a CIDR such as `fd00:10:244:1::/64`, whose prefix length is
+kept. Every candidate is parsed before it is replaced, so a version written
+`1.2.3.4` is left alone unless it is also a valid address.
+
+**Credential values**, in each of these shapes:
+
+| Shape | Example |
+|---|---|
+| `name: value` in YAML | `password: s3cr3t` |
+| `NAME=value` | `DB_PASSWORD=s3cr3t`, `password=s3cr3t` in a log line |
+| `"name": "value"` in JSON | `{"registryToken":"s3cr3t"}` |
+| a JSON env object | `{"name":"HF_TOKEN","value":"s3cr3t"}` |
+| the same escaped inside `last-applied-configuration` | `'{"env":[{"name":"NGC_API_KEY","value":"s3cr3t"}]}'` |
+| a command line flag | `--hf-token=s3cr3t`, `--password s3cr3t` |
+| a URL's userinfo | `https://robot:s3cr3t@registry.example.com` |
+| an `Authorization` header, anywhere in a line | `Authorization: Basic ...`, `Bearer ...` |
+| a kubeconfig `*-data:` field | `client-key-data: ...` |
+| a YAML block scalar | `password: \|` and everything indented under it |
+| a PEM block | `-----BEGIN ... PRIVATE KEY-----` to `-----END` |
+| the value map of a `Secret` | everything under `data:` or `stringData:` |
+
+A name counts as a credential when it contains `pass`, `secret`, `token`,
+`key`, `credential`, `cred`, `auth`, `licence`, `license`, `signature` or
+`session`, case insensitively.
+
+Only string values are rewritten. A boolean and a number are left as they are,
+so `automountServiceAccountToken: false` keeps its value, and the field
+literally called `key` is left alone, so a taint and a toleration keyed by
+`nvidia.com/gpu` survive.
+
+An identity becomes a pseudonym rather than a blank: `node-` or `host-` or
+`ip-` followed by twenty hexadecimal digits, for instance
+`node-3f91c2a7b4e81d05c9a2`. Secret material becomes `REDACTED`, because
+nothing is gained by being able to tell two passwords apart.
+
+### Compressed and binary files
+
+A file beginning with the gzip magic bytes is decompressed, rewritten and
+compressed again, so `nvidia-bug-report_<node>.log.gz` is redacted inside and
+still unpacks. Rewriting the compressed bytes would change nothing a reader can
+see and corrupt the file.
+
+Any other file that is not text is removed rather than shipped unrewritten,
+because a byte rewrite would corrupt it. `manifest.json` lists each one under
+`dropped`, with the reason, so a file that is not there is not mistaken for a
+bad upload.
+
+### When it cannot finish
+
+A redaction that fails takes the bundle with it and exits 4. Nothing is left in
+the artifacts directory and no `manifest.json` is written. Half a redaction is
+a directory the user believes is redacted and is not, and they send it on.
 
 ### Consistent within a bundle, not across bundles
 
@@ -180,18 +228,20 @@ whoever produced it.
   the hostname.** A pod name carries the node it is on only by accident, and
   these are what a reader navigates by.
 - **Versions, conditions, events, exit codes and log text** other than the
-  addresses and credentials in it.
-- **Hostnames the node list does not name.** A hostname is only recognised when
-  the cluster reported it as a node identity; one that appears in a log alone is
-  left.
-- **A four part dotted number that is a valid IP address but means something
-  else**, such as a version written `1.2.3.4`, is rewritten as an address.
-  Redacting a version is harmless; leaving an address is not.
+  addresses and credentials in them.
+- **Hostnames nothing in the cluster reported as a node identity.** One that
+  appears in a log alone is left.
 
 The rules are shapes rather than schemas, because the files of a bundle are not
 one format. `--redact` reduces what a bundle discloses; it is not a guarantee
 that nothing identifying survives, and a bundle leaving a regulated environment
 should still be read before it is sent.
+
+`--redact` applies to the bundle on disk. It does not apply to what a command
+prints: `kubectl nv debug` writes a redacted bundle and prints a report naming
+the real node, because that report is for the person who ran it. Over MCP the
+flag is offered like any other and is not forced on, so a tool call that wants
+a redacted bundle asks for one.
 
 ## Parity with the gpu-operator script
 

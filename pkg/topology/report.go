@@ -386,7 +386,10 @@ func (r *TopologyReport) LimitItems(n int) int {
 	for i := range r.Levels {
 		total += len(r.Levels[i].Groups)
 	}
-	if n < 0 || total <= n {
+	// A limit of zero or less is no limit, which is what the flag's default
+	// means. Truncating to nothing here would make a report with no groups out
+	// of a caller that passed the flag and then thought better of it.
+	if n <= 0 || total <= n {
 		return total
 	}
 
@@ -398,6 +401,14 @@ func (r *TopologyReport) LimitItems(n int) int {
 		}
 		if len(level.Groups) > left {
 			level.Groups = level.Groups[:left]
+		}
+		// A level with no groups is dropped rather than carried: a level that
+		// lists none says the cluster does not divide that way, which is a
+		// different answer from "you asked for fewer" and one a reader acts
+		// on. It happens at a limit landing on a level boundary, and to a
+		// level that had none to begin with.
+		if len(level.Groups) == 0 {
+			continue
 		}
 		left -= len(level.Groups)
 		kept = append(kept, level)
