@@ -1,10 +1,24 @@
 version: "2"
-# The end to end suite is behind the "e2e" build tag. Without it here the
-# linter skips those files entirely, so the only code that talks to a real
-# cluster would be the only code nobody checks.
+# The end to end suite is behind build tags, one per lane, and a file the
+# linter cannot compile is a file it skips in silence. Every lane tag is listed
+# here rather than only "e2e", or the only code that talks to a real cluster
+# would be the only code nobody checks, and the lanes behind the narrower tags
+# would be the part of that nobody checks either.
+#
+# They are listed together rather than linted one lane at a time, because this
+# file is what CI uses: the workflow runs golangci-lint directly, so a lane
+# covered only by a loop in the Makefile would still be unlinted there.
+#
+# All the lane files therefore compile as one package. A top-level identifier
+# that two lanes both declare is a build failure here even though each lane
+# builds on its own, so a new lane renames rather than redeclares.
+# cmd/kubectl-nv/lanes_test.go fails when a lane tag is missing from this list.
 run:
   build-tags:
     - e2e
+    - scale
+    - computedomain
+    - mig
 linters:
   disable:
     - errcheck
