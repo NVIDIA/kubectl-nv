@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // laneGPUCount is how many simulated GPUs the t4 and gb300 profiles, the two
@@ -100,6 +102,8 @@ func listJSON(t *testing.T, args ...string) gpuNodeListJSON {
 	if res.code != 0 {
 		t.Fatalf("kubectl nv list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
+
+	assertMatchesSchema(t, output.KindGPUNodeList, res.stdout)
 
 	var list gpuNodeListJSON
 	if err := json.Unmarshal([]byte(res.stdout), &list); err != nil {

@@ -27,6 +27,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // debugReportJSON is the DebugReport as a consumer parses it. Only the fields
@@ -73,6 +75,8 @@ func debugInto(t *testing.T, wantCode int, node string, args ...string) (debugRe
 	if res.code != wantCode {
 		t.Fatalf("kubectl nv debug %v exited %d, want %d\nstderr:\n%s", args, res.code, wantCode, res.stderr)
 	}
+
+	assertMatchesSchema(t, output.KindDebugReport, res.stdout)
 
 	var report debugReportJSON
 	if err := json.Unmarshal([]byte(res.stdout), &report); err != nil {
