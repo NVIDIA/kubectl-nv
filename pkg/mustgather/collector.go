@@ -342,6 +342,31 @@ func (g *Gatherer) listPods(namespace, selector string) (v1.PodList, error) {
 	return listAllPaginated[v1.PodList](500, selector, listFunc, appendFunc)
 }
 
+// listPodsOnNode lists the pods of the cluster, asking the API server to do
+// the --node cut when there is one. The caller still filters: a field selector
+// is an optimisation, and what the bundle holds must not depend on whether a
+// server honoured it.
+func (g *Gatherer) listPodsOnNode() (v1.PodList, error) {
+	if g.opts.Node == "" {
+		return g.listPods(metav1.NamespaceAll, "")
+	}
+
+	listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+		opts.FieldSelector = "spec.nodeName=" + g.opts.Node
+		list, err := g.clientset.CoreV1().Pods(metav1.NamespaceAll).List(context.Background(), opts)
+		if err != nil {
+			return v1.PodList{}, "", err
+		}
+
+		return *list, list.Continue, nil
+	}
+	appendFunc := func(all *v1.PodList, page v1.PodList) {
+		all.Items = append(all.Items, page.Items...)
+	}
+
+	return listAllPaginated[v1.PodList](500, "", listFunc, appendFunc)
+}
+
 // podsOnNode narrows a pod list to --node when one was given. A support
 // engineer asking about one node gets that node's evidence: anything else in
 // the bundle is both larger than they asked for and misleading about where the

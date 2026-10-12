@@ -120,6 +120,14 @@ func (b BoundedOptions) Validate(prototype runtime.Object) error {
 		return NewUsageError("--limit must not be negative, got %d", b.Limit)
 	}
 
+	// A kind with nothing repeated in it cannot honour a limit, and finding
+	// that out after the read has cost the caller the wait for a read it then
+	// gets no answer from. The prototype is enough to decide: whether a kind
+	// is list shaped is a fact about the type, not about the values in it.
+	if b.Limit > 0 && !isLimitable(prototype) {
+		return NewUsageError("--limit cannot be used on %s, which is not a list", kindOf(prototype))
+	}
+
 	valid, err := FieldPaths(prototype)
 	if err != nil {
 		return err
@@ -458,6 +466,17 @@ type Limitable interface {
 	// It is called on a deep copy, never on the object the command built, so
 	// that printing cannot change what the caller still holds.
 	LimitItems(n int) int
+}
+
+// isLimitable reports whether --limit has anything to cut on a kind: a list
+// with an Items slice, or a kind that keeps its own repeated part and says so
+// by implementing Limitable.
+func isLimitable(obj runtime.Object) bool {
+	if _, ok := obj.(Limitable); ok {
+		return true
+	}
+
+	return itemsField(obj).IsValid()
 }
 
 // applyLimit keeps the first limit items of a list, on a copy, and records how

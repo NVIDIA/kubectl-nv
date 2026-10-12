@@ -119,6 +119,14 @@ func runDebug(c *cobra.Command, o *cmd.Options, opts *options, name string) erro
 		return err
 	}
 
+	// The same answer kubectl nv info gives, from the same function: the
+	// summary this command prints is a description rather than a table of
+	// columns, so there is nothing for --fields to keep.
+	if err := info.RefuseFieldsOnADescription(
+		format, opts.out.Bounded.Fields, output.KindDebugReport); err != nil {
+		return err
+	}
+
 	if err := opts.gather.ValidateWindows(); err != nil {
 		return err
 	}

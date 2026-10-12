@@ -66,6 +66,10 @@ type Manifest struct {
 	Collectors []CollectorStatus `json:"collectors" yaml:"collectors"`
 	// Files is every file of the bundle except this one.
 	Files []FileEntry `json:"files" yaml:"files"`
+	// Dropped is every file --redact removed rather than ship unrewritten,
+	// with the reason. A file that silently disappeared is one a reader goes
+	// looking for and blames on a bad upload.
+	Dropped []DroppedFile `json:"dropped,omitempty" yaml:"dropped,omitempty"`
 }
 
 // ManifestFlags is what the user asked of the gather.
@@ -148,6 +152,9 @@ func (g *Gatherer) writeManifest() error {
 	if manifest.Collectors == nil {
 		manifest.Collectors = []CollectorStatus{}
 	}
+	// Last, because every string above may name a node: what was asked for,
+	// which cluster it came from, and what each collector said it did.
+	g.redactManifest(&manifest)
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {

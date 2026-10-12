@@ -81,6 +81,14 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 		return err
 	}
 
+	// The table this command prints is a description of one node rather than a
+	// row of columns, so there is nothing for --fields to keep or drop. Saying
+	// so is the honest answer: applying it silently to nothing would hand back
+	// the whole node to a caller that asked for one field of it.
+	if err := refuseFieldsOnADescription(format, opts.out.Bounded.Fields, output.KindGPUNode); err != nil {
+		return err
+	}
+
 	src, err := newSource(o, opts.fromBundle)
 	if err != nil {
 		return err
@@ -128,6 +136,28 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 	}
 
 	return buildErr
+}
+
+// refuseFieldsOnADescription rejects --fields where the output is a described
+// object rather than a table of columns.
+//
+// It is exported through info because kubectl nv debug prints the same shape
+// and has to give the same answer: a caller learning one command must not find
+// the other quietly ignoring the flag.
+func refuseFieldsOnADescription(format output.Format, fields []string, kind string) error {
+	if len(fields) == 0 || (format != output.FormatTable && format != output.FormatWide) {
+		return nil
+	}
+
+	return output.NewUsageError(
+		"--fields cannot be used with -o %s on %s, which is described rather than tabulated: "+
+			"ask for -o json or -o yaml", format, kind)
+}
+
+// RefuseFieldsOnADescription is refuseFieldsOnADescription for the commands
+// that print the same shape from another package.
+func RefuseFieldsOnADescription(format output.Format, fields []string, kind string) error {
+	return refuseFieldsOnADescription(format, fields, kind)
 }
 
 // NotAGPUNodeError is what every command says about a node that a complete

@@ -67,7 +67,12 @@ func TestRedactLearnsTheHostnameFromBothTheLabelAndTheAddress(t *testing.T) {
 	seam := writingSeam([]byte(
 		"kubelet on " + label + " started\nfabricmanager greeted " + address + "\n"))
 
-	dir, names := redactedGather(t, &Options{FetchPodFile: seam}, node)
+	// Beside the fixture cluster, which carries the operator and the driver
+	// pods a gather needs: a cluster holding one bare node fails half its
+	// collectors, and this test would then be about that rather than about
+	// what was redacted.
+	dir, names := redactedGather(t,
+		&Options{FetchPodFile: seam}, append(twoNodeCluster(), node)...)
 
 	for _, name := range names {
 		text := readArtifact(t, dir, name)

@@ -67,8 +67,72 @@ func (g *Gatherer) gatherComputeDomains(_ *gatherState) error {
 		computeDomainGVR, computeDomainsFile, computeDomainsMissingFile, "ComputeDomain", false)
 }
 
+// projectGPUPod keeps the fields of a GPU pod that a reader of the bundle
+// reads, and drops the rest.
+//
+// A bundle goes to another company, and these pods are not NVIDIA's: they are
+// whatever a tenant is running. The command they run, the arguments they run
+// it with, their environment and their annotations are theirs, and no reader
+// of a bundle reads any of it. Redaction is not the answer for them, because a
+// rewrite can only take out what it recognises and what is left is still
+// somebody's to decide about; not collecting them is.
+//
+// Every field below is kept because something reads it:
+//
+//	metadata.name, namespace     inventory.operandFromPod, and what a reader
+//	                             identifies a pod by
+//	metadata.uid                 what two reads of one cluster line a pod up by
+//	metadata.labels              inventory.componentOf and isOperand
+//	metadata.ownerReferences     inventory.DriverComponent, for the daemonset
+//	spec.nodeName                inventory.requestedByNode, which keys by it
+//	spec.overhead                the GPUs a runtime class reserves per pod
+//	spec.containers              name, resources and restartPolicy, which is
+//	spec.initContainers          all inventory.PodSpecGPURequest reads
+//	status.phase                 inventory.requestedByNode, which drops a
+//	                             Succeeded or Failed pod
+func projectGPUPod(pod *v1.Pod) v1.Pod {
+	return v1.Pod{
+		TypeMeta: pod.TypeMeta,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            pod.Name,
+			Namespace:       pod.Namespace,
+			UID:             pod.UID,
+			Labels:          pod.Labels,
+			OwnerReferences: pod.OwnerReferences,
+		},
+		Spec: v1.PodSpec{
+			NodeName:       pod.Spec.NodeName,
+			Overhead:       pod.Spec.Overhead,
+			Containers:     projectGPUContainers(pod.Spec.Containers),
+			InitContainers: projectGPUContainers(pod.Spec.InitContainers),
+		},
+		Status: v1.PodStatus{Phase: pod.Status.Phase},
+	}
+}
+
+// projectGPUContainers keeps the three fields of a container that decide what
+// a pod asks for: its name, so a reader can tell two of them apart, its
+// resources, and whether an init container is a sidecar.
+func projectGPUContainers(containers []v1.Container) []v1.Container {
+	if containers == nil {
+		return nil
+	}
+
+	out := make([]v1.Container, 0, len(containers))
+	for i := range containers {
+		out = append(out, v1.Container{
+			Name:          containers[i].Name,
+			Resources:     containers[i].Resources,
+			RestartPolicy: containers[i].RestartPolicy,
+		})
+	}
+
+	return out
+}
+
 // gatherGPUPods writes every pod of the cluster that asks for GPUs, in every
-// namespace, narrowed to --node when one was given.
+// namespace, narrowed to --node when one was given, and projected down to what
+// a reader reads.
 //
 // Every namespace, because that is the question: the GPUs of a node are used
 // by whatever landed on it, and a tenant's training job is not in the operator
@@ -79,7 +143,10 @@ func (g *Gatherer) gatherComputeDomains(_ *gatherState) error {
 // request rule: the same function the live read uses, so a bundle and a
 // cluster cannot disagree about which pods matter.
 func (g *Gatherer) gatherGPUPods(_ *gatherState) error {
-	all, err := g.listPods(metav1.NamespaceAll, "")
+	// Narrowed by the API server when --node named one. The client filter
+	// below still runs, because a field selector is the server's optimisation
+	// and the bundle's contents must not depend on one.
+	all, err := g.listPodsOnNode()
 	if err != nil {
 		return g.logError("error listing the pods of the cluster: %v", err)
 	}
@@ -88,7 +155,7 @@ func (g *Gatherer) gatherGPUPods(_ *gatherState) error {
 	kept := make([]v1.Pod, 0, len(wanted))
 	for i := range wanted {
 		if inventory.PodSpecGPURequest(&wanted[i].Spec) > 0 {
-			kept = append(kept, wanted[i])
+			kept = append(kept, projectGPUPod(&wanted[i]))
 		}
 	}
 
@@ -113,7 +180,17 @@ func (g *Gatherer) gatherGPUPods(_ *gatherState) error {
 // cordon-required is not a finding; a node that has been sitting there for an
 // hour is, and only the event says which of the two it is.
 func (g *Gatherer) gatherNodeEvents(_ *gatherState) error {
+	// The server does the first cut: a busy cluster has far more events than
+	// nodes, and every one of them would otherwise cross the wire. The client
+	// filter below still runs, because the bundle's contents must not depend
+	// on a server honouring a selector.
+	selector := "involvedObject.kind=Node"
+	if g.opts.Node != "" {
+		selector += ",involvedObject.name=" + g.opts.Node
+	}
+
 	listFunc := func(opts metav1.ListOptions) (v1.EventList, string, error) {
+		opts.FieldSelector = selector
 		list, err := g.clientset.CoreV1().Events(metav1.NamespaceAll).List(context.Background(), opts)
 		if err != nil {
 			return v1.EventList{}, "", err
