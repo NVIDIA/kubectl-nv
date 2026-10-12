@@ -32,6 +32,9 @@
         },
         "noExec": {
           "type": "boolean"
+        },
+        "redacted": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false,
@@ -39,7 +42,8 @@
       "required": [
         "node",
         "since",
-        "noExec"
+        "noExec",
+        "redacted"
       ]
     },
     "collectors": {
