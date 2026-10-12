@@ -36,7 +36,7 @@ import (
 	"testing"
 	"text/template"
 
-	"gopkg.in/yaml.v2"
+	"sigs.k8s.io/yaml"
 )
 
 // repoRoot is this package's directory, hack/release, walked back up.
@@ -45,26 +45,26 @@ const repoRoot = "../.."
 type releaseNotesConfig struct {
 	Changelog struct {
 		Exclude struct {
-			Labels  []string `yaml:"labels"`
-			Authors []string `yaml:"authors"`
-		} `yaml:"exclude"`
+			Labels  []string `json:"labels"`
+			Authors []string `json:"authors"`
+		} `json:"exclude"`
 		Categories []struct {
-			Title  string   `yaml:"title"`
-			Labels []string `yaml:"labels"`
-		} `yaml:"categories"`
-	} `yaml:"changelog"`
+			Title  string   `json:"title"`
+			Labels []string `json:"labels"`
+		} `json:"categories"`
+	} `json:"changelog"`
 }
 
 type goreleaserConfig struct {
 	Changelog struct {
-		Use  string `yaml:"use"`
-		Sort string `yaml:"sort"`
-	} `yaml:"changelog"`
+		Use  string `json:"use"`
+		Sort string `json:"sort"`
+	} `json:"changelog"`
 	Release struct {
-		Draft      bool   `yaml:"draft"`
-		Prerelease string `yaml:"prerelease"`
-		Header     string `yaml:"header"`
-	} `yaml:"release"`
+		Draft      bool   `json:"draft"`
+		Prerelease string `json:"prerelease"`
+		Header     string `json:"header"`
+	} `json:"release"`
 }
 
 func readYAML(t *testing.T, rel string, into any) {
