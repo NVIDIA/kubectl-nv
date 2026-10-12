@@ -80,6 +80,21 @@ func (quietProgress) Errorf(string, ...any) {}
 func gatherForRoundTrip(t *testing.T) string {
 	t.Helper()
 
+	return gatherForRoundTripWith(t, false)
+}
+
+// gatherForRoundTripRedacted is the same gather with --redact, so that the two
+// bundles differ in nothing but the flag.
+func gatherForRoundTripRedacted(t *testing.T) string {
+	t.Helper()
+
+	return gatherForRoundTripWith(t, true)
+}
+
+// gatherForRoundTripWith runs the gather with or without --redact.
+func gatherForRoundTripWith(t *testing.T, redact bool) string {
+	t.Helper()
+
 	four := *resource.NewQuantity(4, resource.DecimalSI)
 	two := corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(2, resource.DecimalSI)}
 
@@ -94,6 +109,13 @@ func gatherForRoundTrip(t *testing.T) string {
 					"nvidia.com/gpu.deploy.device-plugin":         "true",
 				},
 			},
+			// Tainted, and the policy below tolerates it. Both are keyed by a
+			// field literally called "key", which a credential pattern reaches
+			// for: a redaction that rewrote either changes which pods the
+			// operator can place.
+			Spec: corev1.NodeSpec{Taints: []corev1.Taint{{
+				Key: "nvidia.com/gpu", Value: "present", Effect: corev1.TaintEffectNoSchedule,
+			}}},
 			Status: corev1.NodeStatus{
 				Capacity:    corev1.ResourceList{"nvidia.com/gpu": four},
 				Allocatable: corev1.ResourceList{"nvidia.com/gpu": four},
@@ -117,7 +139,13 @@ func gatherForRoundTrip(t *testing.T) string {
 				Labels: map[string]string{"app": "nvidia-device-plugin-daemonset"},
 			},
 			Spec: corev1.PodSpec{
-				NodeName:   "gpu-node-1",
+				NodeName: "gpu-node-1",
+				// A boolean whose name holds "token": a redaction that read
+				// the key and not the value would write REDACTED over it.
+				AutomountServiceAccountToken: ptrTo(false),
+				Tolerations: []corev1.Toleration{{
+					Key: "nvidia.com/gpu", Operator: corev1.TolerationOpExists,
+				}},
 				Containers: []corev1.Container{{Name: "plugin"}},
 			},
 			Status: corev1.PodStatus{
@@ -147,6 +175,8 @@ func gatherForRoundTrip(t *testing.T) string {
 	opts := &mustgather.Options{
 		ArtifactDir: dir,
 		ToolVersion: "v9.9.9-round-trip",
+		Context:     "kind-round-trip",
+		Redact:      redact,
 		NoExec:      true,
 		FetchPodFile: func(_ context.Context, pod *corev1.Pod, destPath string) error {
 			return os.WriteFile(destPath, []byte(pod.Spec.NodeName), 0o600)
@@ -160,11 +190,21 @@ func gatherForRoundTrip(t *testing.T) string {
 
 	// The gather's own exit code is not what this test is about: a fake
 	// cluster serves none of the custom resources, so collectors are skipped.
-	// What matters is the bundle it leaves behind.
-	_ = mustgather.Run(opts, factory, quietProgress{})
+	// What matters is the bundle it leaves behind. A redaction that failed is
+	// another matter: it leaves no bundle at all, and every assertion made
+	// against one would then be about an empty directory.
+	err := mustgather.Run(opts, factory, quietProgress{})
+	if redact {
+		if _, statErr := os.Stat(filepath.Join(dir, "manifest.json")); statErr != nil {
+			t.Fatalf("the redacted gather left no manifest: %v (gather: %v)", statErr, err)
+		}
+	}
 
 	return dir
 }
+
+// ptrTo returns a pointer to a value, for the optional pod fields.
+func ptrTo[T any](v T) *T { return &v }
 
 // runFromBundle executes one command against a bundle directory and returns
 // the exit code the process would have left with, plus what it printed.
