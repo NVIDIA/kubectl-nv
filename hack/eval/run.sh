@@ -432,8 +432,13 @@ for code in ${EVAL_CODES}; do
             die 3 "could not write the shim into ${case_dir}"
 
         cp "${SKILL}" "${case_dir}/SKILL.md" || die 3 "could not copy ${SKILL} into ${case_dir}"
-        cp "${KUBECONFIG_PATH}" "${case_dir}/kubeconfig" ||
-            die 3 "could not copy ${KUBECONFIG_PATH} into ${case_dir}"
+
+        # The minified, flattened view rather than the file: it carries this
+        # one context and the credentials that context needs, and nothing
+        # else the lane file happens to hold. What the agent is given is what
+        # the agent can reach.
+        printf '%s\n' "${lane_config}" > "${case_dir}/kubeconfig" ||
+            die 3 "could not write the kubeconfig into ${case_dir}"
 
         chmod 0700 "${case_dir}" "${agent_home}"
         chmod 0600 "${case_dir}/kubeconfig"
@@ -450,8 +455,8 @@ for code in ${EVAL_CODES}; do
             [ -s "${case_dir}/${f}" ] || die 3 "${case_dir}/${f} is missing or empty"
         done
         cmp -s "${SKILL}" "${case_dir}/SKILL.md" || die 3 "the skill did not copy into ${case_dir}"
-        cmp -s "${KUBECONFIG_PATH}" "${case_dir}/kubeconfig" ||
-            die 3 "the kubeconfig did not copy into ${case_dir}"
+        grep -qF -- "${LANE_CONTEXT}" "${case_dir}/kubeconfig" ||
+            die 3 "the kubeconfig in ${case_dir} does not name ${LANE_CONTEXT}"
 
         agent_started="$(date +%s)"
         # env -i with an allow-list: the agent must not be able to read the
