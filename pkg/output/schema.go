@@ -45,13 +45,22 @@ type SchemaRegistry struct {
 	// prints. The commands fill it, so that "kubectl nv schema list" works
 	// without this package knowing the command tree.
 	commands map[string]string
+	// schemaless maps a command name onto why it has no kind. A command that
+	// prints prose has no schema to publish, and a caller walking the command
+	// tree still asks for one: answered with "unknown command" it would go
+	// looking for a typo in a name it read off --help.
+	schemaless map[string]string
 }
 
 // NewSchemaRegistry returns an empty registry. Tests use their own rather than
 // the package level one, so that what one test registers cannot be what another
 // test sees.
 func NewSchemaRegistry() *SchemaRegistry {
-	return &SchemaRegistry{kinds: map[string]any{}, commands: map[string]string{}}
+	return &SchemaRegistry{
+		kinds:      map[string]any{},
+		commands:   map[string]string{},
+		schemaless: map[string]string{},
+	}
 }
 
 // defaultSchemaRegistry is the registry the commands share.
@@ -84,6 +93,12 @@ func RegisterSchema(kind string, prototype any) { defaultSchemaRegistry.Register
 // ask for a schema by the command they were going to run.
 func RegisterCommandKind(command, kind string) {
 	defaultSchemaRegistry.RegisterCommand(command, kind)
+}
+
+// RegisterSchemalessCommand records that a command prints something that is
+// not a kind of this contract, and why.
+func RegisterSchemalessCommand(command, reason string) {
+	defaultSchemaRegistry.RegisterSchemaless(command, reason)
 }
 
 // RegisteredKinds returns the kinds of the default registry, sorted.
@@ -120,7 +135,32 @@ func (r *SchemaRegistry) RegisterCommand(command, kind string) {
 	if existing, taken := r.commands[command]; taken {
 		panic(fmt.Sprintf("output: command %q already maps to kind %q", command, existing))
 	}
+	if _, taken := r.schemaless[command]; taken {
+		panic(fmt.Sprintf("output: command %q is already registered as having no schema", command))
+	}
 	r.commands[command] = kind
+}
+
+// RegisterSchemaless records a command that prints no kind of this contract,
+// with the reason to give whoever asks for its schema.
+//
+// It is the same programming error as a duplicate kind to register a command
+// twice, or to register one both ways: which of the two answers a caller got
+// would depend on the order the packages happened to be linked in.
+func (r *SchemaRegistry) RegisterSchemaless(command, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if reason == "" {
+		panic(fmt.Sprintf("output: command %q needs a reason for having no schema", command))
+	}
+	if kind, taken := r.commands[command]; taken {
+		panic(fmt.Sprintf("output: command %q already maps to kind %q", command, kind))
+	}
+	if _, taken := r.schemaless[command]; taken {
+		panic(fmt.Sprintf("output: command %q is already registered as having no schema", command))
+	}
+	r.schemaless[command] = reason
 }
 
 // Kinds returns the registered kinds, sorted. The order is the order the
@@ -165,7 +205,12 @@ func (r *SchemaRegistry) Schema(name string) ([]byte, error) {
 		}
 	}
 	kinds, commands := sortedKeys(r.kinds), sortedKeys(r.commands)
+	reason, schemaless := r.schemaless[name]
 	r.mu.RUnlock()
+
+	if schemaless {
+		return nil, NewUsageError("%s has no schema: %s", name, reason)
+	}
 
 	if !known {
 		return nil, NewUsageError("unknown kind or command %q: kinds are %s; commands are %s",
@@ -242,9 +287,21 @@ func contractMapper(t reflect.Type) *jsonschema.Schema {
 	return nil
 }
 
-// rfc3339Schema is how every timestamp of this contract is written.
+// rfc3339Schema is how every timestamp of this contract is written: an RFC
+// 3339 string, or null.
+//
+// Null is in it because metav1.Time says so. Its MarshalJSON writes null for
+// the zero value, and omitempty does not drop a struct, so every embedded
+// apimachinery timestamp that nothing set is a null on the wire: the
+// creationTimestamp of an object built in memory, and the heartbeat of a node
+// condition a cluster reported without one. A schema saying "string" there
+// would be a published contract that what kubectl-nv prints does not satisfy,
+// and the sample checks in each kind'"'"'s package are what caught it.
 func rfc3339Schema() *jsonschema.Schema {
-	return &jsonschema.Schema{Type: "string", Format: "date-time"}
+	return &jsonschema.Schema{OneOf: []*jsonschema.Schema{
+		{Type: "string", Format: "date-time"},
+		{Type: "null"},
+	}}
 }
 
 // stringMapSchema is how labels and annotations are written.
