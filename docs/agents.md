@@ -47,6 +47,7 @@ first.
 | `HealthReport` | The result of a health check run |
 | `TopologyReport` | The device topology of a node or of the cluster |
 | `BundleManifest` | The index of a must-gather bundle |
+| `DebugReport` | One node's inventory next to the bundle collected for it |
 
 ### Schemas
 
@@ -82,7 +83,15 @@ Findings win over partial results. A run that found something at or above the
 threshold exits 1 even when part of the cluster stayed out of reach, because
 that is what the caller has to hear first. A run that found nothing but could
 not see everything exits 3, so that "clean" is never reported for a scan that
-did not happen; what was missed is listed in `status.unreachable`.
+did not happen; what was missed is listed alongside the findings, under
+`unreachable`.
+
+Where that list sits depends on the kind, because each one puts its status
+where its own shape puts it. A `HealthReport` embeds its status inline, so the
+paths are `findings`, `partial` and `unreachable` at the top level. A
+`TopologyReport` and a `DebugReport` carry theirs in a field, so the paths are
+`status.findings`, `status.partial` and `status.unreachable`. Run `kubectl nv
+schema <kind>` rather than guessing.
 
 Exit 4 means nothing was checked. No conclusion can be drawn from it.
 
@@ -110,8 +119,21 @@ Two flags are on every list-like command, and they mean the same thing on all
 of them.
 
 `--limit N` keeps the first N items after the command's own sort. Truncation
-is reported twice: a note on stderr, and `metadata.remainingItemCount` in the
-output, because a program reading stdout never sees stderr.
+is reported twice: a note on stderr, and a remaining count in the output,
+because a program reading stdout never sees stderr. On a list kind that count
+is `metadata.remainingItemCount`. On a report it sits with the rest of the
+status, so a `HealthReport` carries `remainingItemCount` at the top level. A
+`TopologyReport` carries `status.remainingItemCount`.
+
+What N counts is the repeated part of the kind: the items of a `GPUNodeList`,
+the findings of a `HealthReport`, and the groups of a `TopologyReport` counted
+across its levels, which are ordered narrowest first so that a limit keeps the
+tightest groups. A `HealthReport`'s summary is left whole whatever the limit
+is: it is the arithmetic over what was checked, and one that counted what was
+printed would say the cluster is in better shape than it is.
+
+A kind that is one object, `GPUNode` and `DebugReport`, has nothing for
+`--limit` to cut, so it is exit 2 rather than an answer that ignored the flag.
 
 ```console
 $ kubectl nv list --limit 2 -o json
@@ -273,22 +295,42 @@ the exec gate tests use.
 
 ## Commands
 
-The leaves below are what the tree carries today. Later tracks extend this
-section as they land.
+Every leaf of the tree, the kind it prints, and which of the three output
+flags apply to it. "List-like" is what `--limit` counts: a command that has
+one takes `--limit`, and one that does not answers it with exit 2.
 
-| Command | Prints on stdout | Writes |
-|---|---|---|
-| `adm must-gather` | Nothing; progress goes to stderr | A directory of collected files |
-| `schema` | The JSON Schema of a kind | Nothing, unless `--write-dir` |
-| `mcp` | Nothing; serves the protocol | Nothing |
-| `version` | The version string | Nothing |
+| Command | Kind | List-like | `-o` | `--fields` | `--limit` |
+|---|---|---|---|---|---|
+| `list` | `GPUNodeList` | Yes, the nodes | Yes | Yes | Yes |
+| `info NODE` | `GPUNode` | No, one node | Yes | Yes | Exit 2 |
+| `health` | `HealthReport` | Yes, the findings | Yes | Yes | Yes |
+| `topology` | `TopologyReport` | Yes, the groups | Yes | Yes | Yes |
+| `debug NODE` | `DebugReport` | No, one node | Yes | Yes | Exit 2 |
+| `adm must-gather` | `BundleManifest` | A directory, not an object | No | No | No |
+| `explain CODE` | None; Markdown | No | No | No | No |
+| `schema [KIND]` | None; a JSON Schema | No | No | No | No |
+| `mcp` | None; serves the protocol | No | No | No | No |
+| `version` | None; one line | No | No | No | No |
 
-`schema`, `mcp` and `version` read nothing from a cluster and need no
-kubeconfig.
+The kind column is also what `kubectl nv schema <command>` answers with, so a
+caller can ask for a schema by the command it was about to run rather than by a
+kind it has to look up. `explain` has no kind and says so, with exit 2: it
+prints a Markdown catalog entry, not an object of this contract.
 
-`must-gather` does not print an object: it writes a directory of collected
-files and reports progress on stderr. The `BundleManifest` kind above is
-reserved for the bundle index a later track adds; nothing emits it yet.
+`explain`, `schema`, `mcp` and `version` read nothing from a cluster and need
+no kubeconfig.
+
+`adm must-gather` and `debug` are the two commands that write on the machine
+`kubectl-nv` runs on. `must-gather` prints no object at all: it writes a
+directory and reports progress on stderr, and the `BundleManifest` kind is the
+`manifest.json` inside that directory. `debug` writes the same bundle and
+prints a `DebugReport` about it.
+
+Both take `--redact`, which rewrites the node names, hostnames, addresses and
+credential values out of the bundle before it is indexed. The mapping is keyed
+per run and never written, so a node keeps one pseudonym throughout a bundle
+and takes a different one in the next. `docs/must-gather.md` lists what is and
+is not covered.
 
 ### Exit codes over MCP
 

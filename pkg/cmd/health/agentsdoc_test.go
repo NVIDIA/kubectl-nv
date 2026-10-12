@@ -42,10 +42,10 @@ import (
 // agentsDoc is the contract page a program is written against.
 const agentsDoc = "agents.md"
 
-// docPath matches every dotted JSON path docs/agents.md names in backticks. A
-// flag such as `--fail-on` and a kind such as `GPUNodeList` are not paths and
-// do not match.
-var docPath = regexp.MustCompile("`([a-z][A-Za-z0-9]*(?:\\.[a-z][A-Za-z0-9]*)+)`")
+// docPath matches a JSON path docs/agents.md names in backticks, dotted or
+// not. A flag such as `--fail-on`, a kind such as `GPUNodeList` and a command
+// line such as `kubectl nv health` are none of them a path and do not match.
+var docPath = regexp.MustCompile("`([a-z][A-Za-z0-9]*(?:\\.[a-z][A-Za-z0-9]*)*)`")
 
 // partialReport is a real health report over a cluster that refused a read, so
 // that it carries the field this test is about.
@@ -55,7 +55,8 @@ func partialReport(t *testing.T) (map[string]any, string) {
 	out, errOut := &bytes.Buffer{}, &bytes.Buffer{}
 	io := genericiooptions.IOStreams{In: strings.NewReader(""), Out: out, ErrOut: errOut}
 
-	clientset := fake.NewSimpleClientset(gpuNode("worker-1", 4, 4))
+	clientset := fake.NewSimpleClientset(
+		gpuNode("worker-1", 4, 4), hintedNode("no-gpus-1"), hintedNode("no-gpus-2"))
 	clientset.PrependReactor("list", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewForbidden(
 			schema.GroupResource{Resource: "pods"}, "", stderrors.New("nope"))
@@ -68,7 +69,10 @@ func partialReport(t *testing.T) (map[string]any, string) {
 	})
 	command.SetOut(out)
 	command.SetErr(errOut)
-	command.SetArgs([]string{"-o", "json"})
+	// Partial and truncated, so that the report carries every field the page
+	// attributes to this kind: a fixture missing one of them would let the
+	// page name it wrongly and still pass.
+	command.SetArgs([]string{"-o", "json", "--limit", "1"})
 	command.SilenceUsage = true
 	command.SilenceErrors = true
 	_ = command.Execute()
@@ -77,8 +81,11 @@ func partialReport(t *testing.T) (map[string]any, string) {
 	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
 		t.Fatalf("parsing the report: %v\n%s", err, out.String())
 	}
-	if _, ok := report["unreachable"]; !ok {
-		t.Fatalf("the fixture produced no unreachable list, so this would compare nothing:\n%s", out.String())
+	for _, want := range []string{"unreachable", "partial", "findings", "remainingItemCount"} {
+		if _, ok := report[want]; !ok {
+			t.Fatalf("the fixture produced no %s, so the page could name it wrongly and pass:\n%s",
+				want, out.String())
+		}
 	}
 
 	return report, out.String()
@@ -118,21 +125,24 @@ func TestTheAgentsDocNamesPathsTheReportActuallyHas(t *testing.T) {
 	actual := map[string]bool{}
 	jsonPaths(report, "", actual)
 
+	// Only the sentences that are about this kind. The page documents several,
+	// and each one puts its status where its own shape puts it: status.findings
+	// is right for a TopologyReport and wrong here, and a test that could not
+	// tell them apart could only be satisfied by a page that said neither.
 	checked := 0
-	for _, match := range docPath.FindAllStringSubmatch(readAgentsDoc(t), -1) {
-		path := match[1]
-		// Only the paths whose last segment this report has somewhere. A path
-		// belonging to another kind, such as metadata.labels on a GPUNode, is
-		// not this test's to check.
-		last := path[strings.LastIndex(path, ".")+1:]
-		candidates := pathsEndingIn(actual, last)
-		if len(candidates) == 0 {
-			continue
-		}
-		checked++
-		if !actual[path] {
-			t.Errorf("docs/%s names %q, which a health report does not carry; it has %v\n%s",
-				agentsDoc, path, candidates, raw)
+	for _, sentence := range sentencesAbout(readAgentsDoc(t), "`HealthReport`") {
+		for _, match := range docPath.FindAllStringSubmatch(sentence, -1) {
+			path := match[1]
+			last := path[strings.LastIndex(path, ".")+1:]
+			candidates := pathsEndingIn(actual, last)
+			if len(candidates) == 0 {
+				continue
+			}
+			checked++
+			if !actual[path] {
+				t.Errorf("docs/%s says a health report carries %q; it carries %v\n%s",
+					agentsDoc, path, candidates, raw)
+			}
 		}
 	}
 
@@ -151,6 +161,22 @@ func readAgentsDoc(t *testing.T) string {
 	}
 
 	return string(raw)
+}
+
+// sentencesAbout returns the sentences of the page that name a subject. The
+// page is prose with hard wrapped lines, so the newlines are flattened first
+// or a sentence spanning two lines would be two.
+func sentencesAbout(doc, subject string) []string {
+	flat := strings.ReplaceAll(doc, "\n", " ")
+
+	var out []string
+	for _, sentence := range strings.Split(flat, ". ") {
+		if strings.Contains(sentence, subject) {
+			out = append(out, sentence)
+		}
+	}
+
+	return out
 }
 
 // pathsEndingIn lists the paths ending in a segment, sorted, for the message.
