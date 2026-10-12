@@ -372,16 +372,39 @@ func validateFields(fields, valid []string) error {
 	return nil
 }
 
+// Limitable is implemented by a kind that --limit bounds but that is not a
+// list: a report whose repeated part is a named field rather than Items.
+//
+// A health report is a list of findings and a topology report is a list of
+// groups, and both carry a summary and a status around them that a limit must
+// not touch. The kind is the only place that knows which of its fields is the
+// repeated one, and the only place that can record the remainder where its own
+// shape puts it, so it does the keeping and this package does the rest: one
+// --limit, one truncation note, one meaning.
+type Limitable interface {
+	// LimitItems keeps the first n of whatever this kind's --limit bounds,
+	// modifying the receiver, and records the remainder in the output. It
+	// returns how many there were before.
+	//
+	// It is called on a deep copy, never on the object the command built, so
+	// that printing cannot change what the caller still holds.
+	LimitItems(n int) int
+}
+
 // applyLimit keeps the first limit items of a list, on a copy, and records how
 // many were left behind. It reports the original item count and whether
 // anything was dropped.
 //
-// A kind with no items cannot honour a limit, and answering a bounded request
-// with an unbounded one is worse than refusing it: the caller believes it
-// asked for less than it got.
+// A kind with no items and no LimitItems cannot honour a limit, and answering
+// a bounded request with an unbounded one is worse than refusing it: the
+// caller believes it asked for less than it got.
 func applyLimit(obj runtime.Object, limit int) (runtime.Object, int, bool, error) {
 	if limit <= 0 {
 		return obj, 0, false, nil
+	}
+
+	if _, ok := obj.(Limitable); ok {
+		return limitReport(obj, limit)
 	}
 
 	items := itemsField(obj)
@@ -411,6 +434,29 @@ func applyLimit(obj runtime.Object, limit int) (runtime.Object, int, bool, error
 	accessor.SetRemainingItemCount(&remaining)
 
 	return clone, total, true, nil
+}
+
+// limitReport applies a limit through the kind's own LimitItems.
+func limitReport(obj runtime.Object, limit int) (runtime.Object, int, bool, error) {
+	clone, ok := obj.DeepCopyObject().(Limitable)
+	if !ok {
+		return nil, 0, false, fmt.Errorf("%T cannot be limited: its copy is not limitable", obj)
+	}
+
+	total := clone.LimitItems(limit)
+	if total <= limit {
+		// Nothing was dropped, so the original is printed rather than the copy:
+		// a report that says it was truncated when it was not is worse than one
+		// that says nothing.
+		return obj, total, false, nil
+	}
+
+	printable, ok := clone.(runtime.Object)
+	if !ok {
+		return nil, 0, false, fmt.Errorf("%T cannot be limited: its copy is not printable", obj)
+	}
+
+	return printable, total, true, nil
 }
 
 // kindOf names a kind for an error message, falling back to the Go type when

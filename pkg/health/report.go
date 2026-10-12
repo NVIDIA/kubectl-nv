@@ -153,9 +153,10 @@ type healthReportJSON struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	Findings    []output.Finding     `json:"findings"`
-	Partial     bool                 `json:"partial,omitempty"`
-	Unreachable []output.Unreachable `json:"unreachable,omitempty"`
+	Findings           []output.Finding     `json:"findings"`
+	Partial            bool                 `json:"partial,omitempty"`
+	Unreachable        []output.Unreachable `json:"unreachable,omitempty"`
+	RemainingItemCount *int64               `json:"remainingItemCount,omitempty"`
 
 	Summary Summary `json:"summary"`
 }
@@ -165,12 +166,13 @@ type healthReportJSON struct {
 // come off the wire looking like every other report.
 func (r HealthReport) MarshalJSON() ([]byte, error) {
 	out := healthReportJSON{
-		TypeMeta:    output.TypeMetaFor(output.KindHealthReport),
-		ObjectMeta:  r.ObjectMeta,
-		Findings:    r.Findings,
-		Partial:     r.Partial,
-		Unreachable: r.Unreachable,
-		Summary:     r.Summary,
+		TypeMeta:           output.TypeMetaFor(output.KindHealthReport),
+		ObjectMeta:         r.ObjectMeta,
+		Findings:           r.Findings,
+		Partial:            r.Partial,
+		Unreachable:        r.Unreachable,
+		RemainingItemCount: r.RemainingItemCount,
+		Summary:            r.Summary,
 	}
 
 	if out.Findings == nil {
@@ -183,6 +185,28 @@ func (r HealthReport) MarshalJSON() ([]byte, error) {
 	}
 
 	return raw, nil
+}
+
+// LimitItems implements output.Limitable: --limit on a health report bounds
+// its findings.
+//
+// The summary is left exactly as it is. It is the arithmetic over what was
+// checked, not over what was printed, and a limited report that summarised
+// only what it printed would say the cluster is in better shape than it is.
+//
+// The findings are already sorted by the engine, so the ones kept are the
+// first ones of the report a caller would get without the flag.
+func (r *HealthReport) LimitItems(n int) int {
+	total := len(r.Findings)
+	if n < 0 || total <= n {
+		return total
+	}
+
+	r.Findings = r.Findings[:n]
+	remaining := int64(total - n)
+	r.RemainingItemCount = &remaining
+
+	return total
 }
 
 // ExitCode maps the report onto the process exit code against the --fail-on
@@ -253,6 +277,13 @@ func (r *HealthReport) DeepCopyInto(out *HealthReport) {
 	out.TypeMeta = r.TypeMeta
 	r.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	out.Summary = r.Summary
+
+	// The count is a pointer, so a shallow copy would let the printer's copy
+	// write a truncation into the report the command still holds.
+	if r.RemainingItemCount != nil {
+		remaining := *r.RemainingItemCount
+		out.RemainingItemCount = &remaining
+	}
 
 	if r.Findings != nil {
 		out.Findings = make([]output.Finding, len(r.Findings))

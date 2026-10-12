@@ -729,18 +729,23 @@ func TestTopologyRefusesAnUnknownField(t *testing.T) {
 	}
 }
 
-// TestTopologyRefusesLimitOnAReportThatIsNotAList: the report is one object,
-// not a list of them, so there is nothing for --limit to cut. Answering a
-// bounded request with an unbounded one would leave the caller believing it
+// A negative limit is still a usage error. The report is a list of groups, so
+// --limit has something to cut, but a count below zero is not a count anybody
+// means and silently printing everything would leave the caller believing it
 // asked for less than it got.
-func TestTopologyRefusesLimitOnAReportThatIsNotAList(t *testing.T) {
-	_, err := run(t, []string{"--limit", "1"}, gpuNode("node-a", "clique-a", 4))
+//
+// What --limit does on this kind is in limit_test.go. It used to be refused
+// outright here, on the reading that the report is one object; the groups are
+// what a caller reads it for, and a report with no way to ask for fewer of
+// them is one that has to be read whole.
+func TestTopologyRefusesANegativeLimit(t *testing.T) {
+	_, err := run(t, []string{"--limit", "-1"}, gpuNode("node-a", "clique-a", 4))
 
 	var usage *output.UsageError
 	if !errors.As(err, &usage) {
 		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
 	}
-	if !strings.Contains(err.Error(), "TopologyReport") {
-		t.Errorf("the error is %q, want it to name the kind", err)
+	if !strings.Contains(err.Error(), "--limit") {
+		t.Errorf("the error is %q, want it to name the flag", err)
 	}
 }

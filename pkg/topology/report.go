@@ -354,7 +354,56 @@ func copyStatus(s output.ReportStatus) output.ReportStatus {
 		copy(out.Unreachable, s.Unreachable)
 	}
 
+	// The count is a pointer, so a shallow copy would let the printer's copy
+	// write a truncation into the report the command still holds.
+	if s.RemainingItemCount != nil {
+		remaining := *s.RemainingItemCount
+		out.RemainingItemCount = &remaining
+	}
+
 	return out
+}
+
+// LimitItems implements output.Limitable: --limit on a topology report bounds
+// its groups, counted across the levels in the order the report carries them.
+//
+// Across the levels rather than within each, because the levels are ordered
+// narrowest first and that is the order the answer to "where does this job
+// fit" is read in: a limit takes the tightest groups, which are the ones worth
+// having. A level left with no groups is dropped, because a level that lists
+// none says the cluster does not divide that way, which would be a different
+// answer from "you asked for fewer".
+//
+// PartialNodes, Kueue and Fit are untouched. They are about the whole report
+// rather than one group, and a caller that asked for fewer groups did not ask
+// to be told less about where its job fits.
+func (r *TopologyReport) LimitItems(n int) int {
+	total := 0
+	for i := range r.Levels {
+		total += len(r.Levels[i].Groups)
+	}
+	if n < 0 || total <= n {
+		return total
+	}
+
+	left := n
+	kept := make([]Level, 0, len(r.Levels))
+	for _, level := range r.Levels {
+		if left <= 0 {
+			break
+		}
+		if len(level.Groups) > left {
+			level.Groups = level.Groups[:left]
+		}
+		left -= len(level.Groups)
+		kept = append(kept, level)
+	}
+	r.Levels = kept
+
+	remaining := int64(total - n)
+	r.Status.RemainingItemCount = &remaining
+
+	return total
 }
 
 // DeepCopy returns a copy of the receiver.
