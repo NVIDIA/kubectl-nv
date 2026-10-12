@@ -277,11 +277,36 @@ func TestMIGConfigNotAppliedStaysQuietOnTheControlPlane(t *testing.T) {
 	}
 }
 
-// The kubelet does not drop a removed extended resource, it keeps it at zero.
-// A node partitioned last week and running whole GPUs today still carries its
-// old nvidia.com/mig-1g.10gb entry, and counting that leftover reports a
-// working single-strategy node as advertising profiles its strategy does not
-// serve.
+// The kubelet does not drop a removed extended resource, and this is the
+// shape E4 measured on the real MIG lane after switching the device plugin
+// from --mig-strategy=mixed back to single:
+//
+//	capacity    nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 14
+//	allocatable nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 0
+//
+// The stale key keeps its OLD capacity rather than going to zero, and nothing
+// ever removes it. A predicate on capacity therefore reported this healthy
+// single-strategy node as advertising profiles its strategy does not serve,
+// on every run, for ever. Allocatable is the number that says what the device
+// plugin is serving now.
+func TestMIGConfigNotAppliedIgnoresAStaleCapacityAfterAStrategyChange(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("single", "all-1g.10gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 14, Allocatable: 0},
+		}),
+	)
+	node.Count, node.Capacity, node.Allocatable = 14, 14, 14
+
+	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// The same key at zero on both numbers, which is the shape a source reading
+// predicted and which also has to stay quiet.
 func TestMIGConfigNotAppliedIgnoresALeftoverZeroMIGResource(t *testing.T) {
 	t.Parallel()
 
@@ -294,6 +319,51 @@ func TestMIGConfigNotAppliedIgnoresALeftoverZeroMIGResource(t *testing.T) {
 
 	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
 		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// The other direction: a mixed node really serving its profiles is healthy,
+// and allocatable is what says so.
+func TestMIGConfigNotAppliedStaysQuietOnAMixedNodeServingItsProfiles(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("mixed", "all-1g.10gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 14, Allocatable: 14},
+		}),
+	)
+	node.Capacity, node.Allocatable = 0, 0
+
+	if findings := evaluate(rules.NewMIGConfigNotApplied(), migInput(node)); len(findings) != 0 {
+		t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+	}
+}
+
+// A mixed node whose only profile has nothing allocatable is advertising
+// nothing a MIG workload can ask for, whatever its capacity still says. This
+// is the real fault the capacity reading was meant to catch, and it has to
+// survive the move to allocatable.
+func TestMIGConfigNotAppliedReportsMixedWithNothingAllocatable(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("mixed", "all-1g.10gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 14, Allocatable: 0},
+		}),
+	)
+
+	finding := only(t, evaluate(rules.NewMIGConfigNotApplied(), migInput(node)))
+
+	if got := finding.Message; got != "the node's MIG strategy and the resources it advertises disagree" {
+		t.Errorf("Message is %q", got)
+	}
+
+	// The key is left out: the node advertises no profile a workload can ask
+	// for, and naming one would contradict the finding in its own proof.
+	if _, present := finding.Evidence["migResources"]; present {
+		t.Errorf("a profile with nothing allocatable is not advertised: %v", finding.Evidence)
 	}
 }
 
@@ -326,8 +396,12 @@ func TestMIGConfigNotAppliedReportsMixedWithOnlyZeroMIGResources(t *testing.T) {
 }
 
 // The same filter on the other branch: a single-strategy node is reported for
-// the profiles it really advertises, and a zeroed leftover beside them is not
-// one of them.
+// the profiles it really advertises, and a leftover beside them is not one of
+// them.
+//
+// The leftover keeps a non-zero capacity on purpose. That is the shape E4
+// measured, and it is the one that tells a filter on allocatable apart from a
+// filter on capacity: under the latter this evidence would name both.
 func TestMIGConfigNotAppliedNamesOnlyTheAdvertisedProfiles(t *testing.T) {
 	t.Parallel()
 
@@ -335,7 +409,7 @@ func TestMIGConfigNotAppliedNamesOnlyTheAdvertisedProfiles(t *testing.T) {
 		withMIG("single", "all-1g.5gb", "success", true),
 		withMIGResources(map[string]inventory.ResourceCount{
 			"nvidia.com/mig-1g.5gb":  {Capacity: 56, Allocatable: 56},
-			"nvidia.com/mig-2g.10gb": {Capacity: 0, Allocatable: 0},
+			"nvidia.com/mig-2g.10gb": {Capacity: 8, Allocatable: 0},
 		}),
 	)
 

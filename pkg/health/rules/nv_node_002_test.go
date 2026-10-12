@@ -295,6 +295,31 @@ func TestNodeNoAllocatableGPUs(t *testing.T) {
 		}
 	})
 
+	// The shared MIG predicate reads allocatable rather than capacity, because
+	// the kubelet leaves a stale extended resource in capacity at its old
+	// value after a strategy change (E4's lane: mig-1g.10gb capacity 14,
+	// allocatable 0). This rule has to keep its own meaning under that: a node
+	// with whole GPUs the scheduler can place is healthy however many stale
+	// MIG keys its capacity still carries.
+	t.Run("a single-strategy node with a stale MIG key in capacity", func(t *testing.T) {
+		t.Parallel()
+
+		node := buildNode("worker-1",
+			withLabels(map[string]string{rules.LabelGPUPresent: "true"}),
+			withCount(14),
+			withGPUs(14, 14),
+			withOperand(inventory.ComponentDevicePlugin, true),
+		)
+		node.MIG.Strategy, node.MIG.Capable = "single", true
+		node.MIG.Resources = map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.10gb": {Capacity: 14, Allocatable: 0},
+		}
+
+		if findings := evaluate(rule, health.Input{Nodes: []inventory.GPUNode{node}}); len(findings) != 0 {
+			t.Fatalf("got %d findings, want none: %+v", len(findings), findings)
+		}
+	})
+
 	t.Run("a declared range excludes an out-of-range version", func(t *testing.T) {
 		t.Parallel()
 
