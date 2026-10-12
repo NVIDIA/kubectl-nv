@@ -190,6 +190,26 @@ SHIM
     chmod +x "${SHIM_DIR}/kubectl"
 }
 
+# make_claude_shim
+# Stands in for the default agent, so that the default KUBECTL_NV_EVAL_AGENT
+# is exercised rather than taken on trust. It records its whole argv, which is
+# what lets the test see that the allow-list reached it as one argument
+# rather than being split or eaten by the shell.
+make_claude_shim() {
+    mkdir -p "${SHIM_DIR}"
+    cat > "${SHIM_DIR}/claude" << 'SHIM'
+#!/bin/bash
+echo "claude $*" >> "${EVAL_CALL_LOG}"
+for a in "$@"; do
+    echo "claude-arg ${a}" >> "${EVAL_CALL_LOG}"
+done
+cat > /dev/null
+key="FAKE_ANSWER_$(printf '%s' "${KUBECTL_NV_EVAL_CODE}" | tr 'A-Z-' 'a-z_')"
+printf '%s\n' "${!key-}"
+SHIM
+    chmod +x "${SHIM_DIR}/claude"
+}
+
 # make_fault_scripts
 # One fake per code, with the same interface as the real ones:
 #   <code in lower case>.sh inject|recover <node>
@@ -352,6 +372,7 @@ run_subject() {
 
 make_tool_dir
 make_kubectl_shim
+make_claude_shim
 make_fault_scripts
 make_binary
 make_agent_stub
@@ -573,6 +594,38 @@ assert_jq '.cases[2].pass' 'false' "the case whose injection failed does not pas
 assert_jq '.summary.passed' '4' "the other four cases still run and pass"
 assert_logged "fault NV-OP-001 recover" "a failed injection is still recovered"
 assert_logged "fault NV-DCGM-001 inject" "the run continues to the next fault"
+
+# ---------------------------------------------------------------------------
+echo "# the default agent command is a command line that runs"
+# ---------------------------------------------------------------------------
+#
+# The default is a claude -p line carrying a tool allow-list with parentheses
+# in it. The harness evaluates the agent command as a shell command line, so an
+# allow-list that is not quoted is a syntax error rather than a run, and no
+# amount of reading the string says which.
+
+reset_fixtures
+set_passing_answers
+PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
+    KUBECTL_NV_EVAL_BIN="${BIN}" \
+    KUBECTL_NV_EVAL_SKILL="${SKILL}" \
+    KUBECTL_NV_EVAL_FAULTS_DIR="${FAULTS_DIR}" \
+    KUBECTL_NV_EVAL_KUBECONFIG="${LANE_KUBECONFIG}" \
+    KUBECTL_NV_EVAL_RESULTS_DIR="${RESULTS_DIR}" \
+    KUBECTL_NV_EVAL_POLL_INTERVAL=0 \
+    KUBECTL_NV_EVAL_OBSERVE_TIMEOUT=30 \
+    KUBECTL_NV_EVAL_RECOVER_TIMEOUT=30 \
+    "${RUN}" > "${WORK}/out" 2> "${WORK}/err"
+RC=$?
+OUT="$(cat "${WORK}/out")"
+ERR="$(cat "${WORK}/err")"
+RESULT_FILE="$(find "${RESULTS_DIR}" -name '*.json' -type f 2> /dev/null | sort | tail -1)"
+
+assert_rc 0 "the default agent command runs and its answers score"
+assert_logged "claude-arg -p" "the default agent runs claude in print mode"
+assert_logged "claude-arg Bash(./kubectl-nv:*)" \
+    "the tool allow-list reaches claude as one argument, parentheses and all"
+assert_jq '.agent | test("claude")' 'true' "the results file records the agent that ran"
 
 # ---------------------------------------------------------------------------
 echo "# the harness refuses to run where it must not"
