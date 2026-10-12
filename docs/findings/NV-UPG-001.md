@@ -60,7 +60,6 @@ The reason and the message shape are the upgrade controller's own:
   cluster mid-upgrade.
 - A stuck state entered more recently than `--upgrade-stuck-after`. That
   is an upgrade, not a stuck node.
-- Hinted nodes.
 
 ## Evidence
 

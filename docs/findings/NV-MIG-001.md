@@ -78,7 +78,6 @@ The Mokka control plane carries no MIG labels at all.
 - The node's GPUs are set up for virtual machines
   (`nvidia.com/gpu.workload.config` is `vm-passthrough` or `vm-vgpu`),
   and nodes the operator does not target.
-- Hinted nodes.
 
 ## Evidence
 

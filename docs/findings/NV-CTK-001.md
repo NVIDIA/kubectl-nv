@@ -74,7 +74,6 @@ finding to read first.
 - The node runs no validator pod. That the validator is missing is
   NV-OP-002's business.
 - No GPU Operator.
-- Hinted nodes.
 
 ## Evidence
 
