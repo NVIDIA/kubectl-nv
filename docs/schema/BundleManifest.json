@@ -94,6 +94,25 @@
         ]
       },
       "type": "array"
+    },
+    "dropped": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ]
+      },
+      "type": "array"
     }
   },
   "additionalProperties": false,
