@@ -80,6 +80,22 @@ var holmesToolsetFields = map[string]bool{
 // holmesTags is the upstream ToolsetTag enum.
 var holmesTags = map[string]bool{"core": true, "cluster": true, "cli": true}
 
+// holmesRequiredTags is what this toolset has to declare. The Holmes CLI
+// filters the toolsets it loads on the core and cli tags, so a toolset tagged
+// only `cluster` loads in the server and is invisible from `holmes ask`,
+// which is how this one is meant to be used.
+var holmesRequiredTags = []string{"core"}
+
+// holmesToolFields is the field set the upstream Tool and YAMLTool models
+// accept (holmes/core/tools.py at 59e2bd54: Tool carries name, description,
+// parameters, user_description, icon_url and transformers; YAMLTool adds
+// command and script). The models are declared extra="forbid".
+var holmesToolFields = map[string]bool{
+	"name": true, "description": true, "parameters": true,
+	"user_description": true, "icon_url": true, "transformers": true,
+	"command": true, "script": true,
+}
+
 // kubectlAITool is the kubectl-ai custom tool format. Upstream:
 // GoogleCloudPlatform/kubectl-ai, pkg/tools/custom_tool.go at commit
 // 50662f794da32e3df1ae6d8e1e99a12f16e56455 (CustomToolConfig), and
@@ -182,6 +198,25 @@ func TestHolmesGPTToolset(t *testing.T) {
 				t.Errorf("toolset %q carries field %q, which the upstream model forbids", name, field)
 			}
 		}
+
+		// The tools are read loosely too, so a field the upstream Tool model
+		// forbids is caught rather than dropped by a typed unmarshal.
+		rawTools, ok := fields["tools"].([]any)
+		if !ok {
+			t.Fatalf("toolset %q has no tools list", name)
+		}
+		for i, rawTool := range rawTools {
+			tool, ok := rawTool.(map[string]any)
+			if !ok {
+				t.Fatalf("toolset %q tool %d is not a mapping", name, i)
+			}
+			for field := range tool {
+				if !holmesToolFields[field] {
+					t.Errorf("toolset %q tool %d carries field %q, which the upstream model forbids",
+						name, i, field)
+				}
+			}
+		}
 	}
 
 	var file holmesFile
@@ -194,13 +229,14 @@ func TestHolmesGPTToolset(t *testing.T) {
 		if strings.TrimSpace(toolset.Description) == "" {
 			t.Errorf("toolset %q has no description", name)
 		}
-		if len(toolset.Tags) == 0 {
-			t.Errorf("toolset %q declares no tags", name)
-		}
 		for _, tag := range toolset.Tags {
 			if !holmesTags[tag] {
 				t.Errorf("toolset %q declares tag %q, which is not one of core, cluster or cli", name, tag)
 			}
+		}
+		if strings.Join(toolset.Tags, ",") != strings.Join(holmesRequiredTags, ",") {
+			t.Errorf("toolset %q declares tags %v, want %v: the CLI filters on core and cli, so a toolset without core is invisible from `holmes ask`",
+				name, toolset.Tags, holmesRequiredTags)
 		}
 		if len(toolset.Prerequisites) == 0 {
 			t.Errorf("toolset %q declares no prerequisite, so it would load where the binary is absent", name)
@@ -296,11 +332,26 @@ func TestKubectlAITools(t *testing.T) {
 
 		cmd := resolveCommandLine(t, tree, tool.Command)
 		assertReadOnly(t, cmd)
-		// The command field is a prefix; the model writes the rest, so the
-		// -o json instruction has to live in the description it reads.
-		assertJSONWhereSupported(t, tool.Name, cmd, tool.CommandDesc)
-		for _, line := range commandLinesIn(tool.CommandDesc) {
-			resolveCommandLine(t, tree, stripTemplates(line))
+
+		// The command field is a prefix: the model writes the rest of the
+		// line, so what it is taught is the example lines in command_desc.
+		// Every one of them has to be a command that exists, be read-only,
+		// and ask for JSON where the command takes it. Checking the whole
+		// description for "-o json" once would pass a description where one
+		// example asks for it and the others teach the model to parse a
+		// table.
+		lines := commandLinesInCode(tool.CommandDesc)
+		if len(lines) == 0 {
+			t.Errorf("tool %q documents no command line, so the model is shown no syntax", tool.Name)
+		}
+		for _, line := range lines {
+			line := stripTemplates(line)
+			documented := resolveCommandLine(t, tree, line)
+			assertReadOnly(t, documented)
+			assertJSONWhereSupported(t, tool.Name+": "+line, documented, line)
+			if documented.CommandPath() != cmd.CommandPath() {
+				t.Errorf("tool %q wraps %q but documents %q", tool.Name, cmd.CommandPath(), documented.CommandPath())
+			}
 		}
 		wrapped = append(wrapped, cmd.Name())
 	}

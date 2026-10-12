@@ -159,7 +159,7 @@ assert_jq() {
 # never be reached, and with them the developer's own clusters and account.
 EVAL_SYSTEM_TOOLS="bash sh env date mktemp grep sed awk cat sleep rm mkdir
 chmod tr wc head tail cut sort dirname basename shasum stat ls printf jq cp
-find touch id kill uniq readlink seq"
+find touch id kill uniq readlink seq cmp"
 
 make_tool_dir() {
     mkdir -p "${TOOL_DIR}"
@@ -332,8 +332,16 @@ SHIM
 # does, which is what makes the per-case expected node matter. The components
 # are the real inventory.Component* values.
 make_binary() {
-    cat > "${BIN}" << 'SHIM'
-#!/bin/bash
+    # The paths are baked in rather than read from the environment: the
+    # harness runs the agent under env -i, so a fake that needed EVAL_* set
+    # would answer nothing there and every case would score zero for a reason
+    # that has nothing to do with the subject.
+    {
+        printf '#!/bin/bash\n'
+        printf 'EVAL_CALL_LOG=%s\n' "${EVAL_CALL_LOG}"
+        printf 'EVAL_STATE_DIR=%s\n' "${EVAL_STATE_DIR}"
+    } > "${BIN}"
+    cat >> "${BIN}" << 'SHIM'
 echo "kubectl-nv $*" >> "${EVAL_CALL_LOG}"
 case " $* " in
     *" health "*) ;;
@@ -658,12 +666,13 @@ assert_eq "${CWDS}" "5" "each case gets its own working directory"
 # The case directory is its own temporary directory, not a subdirectory of
 # the harness scratch, so a cleanup bug in one cannot cover the other.
 BAD_CASE_DIR=0
-for d in $(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u); do
+while IFS= read -r d; do
+    [ -n "${d}" ] || continue
     case "${d}" in
         */kubectl-nv-eval-case.*) ;;
         *) BAD_CASE_DIR=$((BAD_CASE_DIR + 1)) ;;
     esac
-done
+done < <(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u)
 assert_eq "${BAD_CASE_DIR}" "0" "every case directory is its own temporary directory"
 
 # The environment the agent runs in: an allow-list, and nothing else.
@@ -1094,7 +1103,8 @@ assert_eq "${AFTER_SECOND}" "${BEFORE_SECOND}" "rendering is idempotent"
 PIPE_RESULTS="${WORK}/pipe-results"
 rm -rf "${PIPE_RESULTS}"
 mkdir -p "${PIPE_RESULTS}"
-jq '.agent = "my-agent --print | tee log"' < "${RESULT_FILE}" > "${PIPE_RESULTS}/2026-10-13.json"
+jq '.agent = "my-agent --print | tee log" | .startedAt = "2026-10-13T00:00:00Z"' \
+    < "${RESULT_FILE}" > "${PIPE_RESULTS}/2026-10-13.json"
 write_readme_fixture
 PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${PIPE_RESULTS}" --readme "${README_FIXTURE}" \
     > /dev/null 2>&1
