@@ -310,6 +310,14 @@ case "\${1:-}" in
             echo "recover failed on purpose" >&2
             exit 1
         fi
+        if [ "\${FAKE_RECOVER_FAIL_CLEAN_CODE:-}" = "${code}" ]; then
+            # Undoes the fault and still reports failure, which is what a
+            # script that cleaned up and then hit an error on its last step
+            # looks like. Only the exit code says anything is wrong.
+            rm -f "\${EVAL_STATE_DIR}/${code}"
+            echo "recover failed on purpose after undoing the fault" >&2
+            exit 1
+        fi
         if [ "\${FAKE_RECOVER_NOOP_CODE:-}" = "${code}" ]; then
             exit 0
         fi
@@ -402,6 +410,7 @@ ERR=""
 reset_fixtures() {
     unset FAKE_CONTEXT FAKE_WORKERS FAKE_OBSERVE_DELAY FAKE_SERVER FAKE_EXTRA_CONTEXT
     unset FAKE_INJECT_FAIL_CODE FAKE_RECOVER_FAIL_CODE FAKE_RECOVER_NOOP_CODE
+    unset FAKE_RECOVER_FAIL_CLEAN_CODE
     rm -rf "${STATE_DIR}" "${RESULTS_DIR}" "${OVERRIDE_DIR}"
     mkdir -p "${STATE_DIR}" "${RESULTS_DIR}" "${OVERRIDE_DIR}"
     : > "${EVAL_CALL_LOG}"
@@ -770,6 +779,19 @@ assert_jq '.cases[0].pass' 'false' "a shotgun answer that never commits does not
 assert_jq '.cases[0].named.code' 'false' "the code is not credited from prose around the answer"
 assert_jq '.summary.passed' '4' "the other four cases still pass"
 
+# Thinking out loud in the right shape is not committing to an answer. The
+# three fields appear in the prose, correctly, and there is no ANSWER line:
+# a scorer that read the whole reply would score this a pass.
+reset_fixtures
+override_answer NV-NODE-003 \
+    "Working through it: node=${WORKER} looks wrong, component=node is the part at fault, code=NV-NODE-003 is the likely code. I have not confirmed any of this."
+run_subject
+assert_rc 1 "prose in the right shape with no ANSWER line fails its case"
+assert_jq '.cases[1].pass' 'false' "an answer that never commits to an ANSWER line does not pass"
+assert_jq '.cases[1].named.node' 'false' "the node is not credited from prose"
+assert_jq '.cases[1].named.component' 'false' "the component is not credited from prose"
+assert_jq '.cases[1].named.code' 'false' "the code is not credited from prose"
+
 # The wrong node.
 reset_fixtures
 override_answer NV-NODE-002 "ANSWER node=kubectl-nv-faults-worker2 component=node code=NV-NODE-002"
@@ -860,6 +882,18 @@ if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
 else
     nope "a run stopped by a failed recover wrote no results"
 fi
+
+# A recover that undid the fault and still exited non-zero. The finding
+# clears, so the wait below it says nothing: the only evidence that the lane
+# may not be trustworthy is the script's own exit code.
+reset_fixtures
+run_subject FAKE_RECOVER_FAIL_CLEAN_CODE=NV-NODE-002
+
+assert_rc 1 "a recover that exits non-zero ends the run even though the finding cleared"
+assert_jq '.cases[0].recoverError | length > 0' 'true' \
+    "the failed recover is recorded even though nothing was left behind"
+assert_jq '.summary.cases' '1' "the run stops at the recover it cannot vouch for"
+assert_not_logged "fault NV-NODE-003 inject" "nothing is injected after a recover that reported failure"
 
 # A recover that reports success but leaves the finding in place is the same
 # problem wearing a zero exit code.
