@@ -169,14 +169,23 @@ func (l *Live) servesComputeDomains(ctx context.Context, version string) (bool, 
 
 // ComputeDomains returns the ComputeDomains a must-gather bundle recorded.
 //
-// pkg/mustgather does not collect them, so today this is always a partial read
-// naming the file that is not there. The empty list comes back with the error
-// rather than instead of it: an empty success would read as "this cluster has
-// no ComputeDomains", which is a claim about a cluster this bundle never
-// looked at.
+// A cluster without the DRA driver serves no such collection, and the gather
+// writes a marker saying so: that is an answer and comes back as an empty list
+// with no error, exactly as the live read answers it.
+//
+// A bundle with neither the file nor the marker was gathered before either
+// existed, and that is a partial read. The empty list comes back with the
+// error rather than instead of it: an empty success would read as "this
+// cluster has no ComputeDomains", which is a claim about a cluster this bundle
+// never looked at.
 func (b *Bundle) ComputeDomains(ctx context.Context) ([]unstructured.Unstructured, error) {
 	var list unstructured.UnstructuredList
 	if err := b.readYAML(ctx, fileComputeDomains, &list); err != nil {
+		marked, found := b.markerReason(ctx, fileComputeDomains, nil)
+		if found {
+			return []unstructured.Unstructured{}, marked
+		}
+
 		return []unstructured.Unstructured{}, err
 	}
 

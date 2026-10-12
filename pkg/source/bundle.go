@@ -46,6 +46,13 @@ const (
 	// namespace. A bundle carrying it can answer what is in use on a node; one
 	// gathered before it existed cannot, and says so.
 	fileGPUPods = "gpu_pods.yaml"
+	// missingMarkerSuffix is what the gather appends to a file name when it
+	// writes a marker in place of the resource. The marker's content says why.
+	missingMarkerSuffix = ".missing"
+	// notInstalledReason is the marker content meaning the cluster serves no
+	// such collection, because the CRD was never applied. Anything else in a
+	// marker is a read that was refused or that failed.
+	notInstalledReason = "not installed"
 
 	// defaultMaxFileBytes caps a single file read. A must-gather directory
 	// arrives in a support ticket, so its size is not this process's to
@@ -211,6 +218,39 @@ func isLegacyDocument(data []byte) bool {
 	}
 
 	return false
+}
+
+// markerLimit caps a ".missing" marker. The gather writes one short line; a
+// file larger than this is not one of its markers, whatever it is called.
+const markerLimit = 4 << 10
+
+// readRaw reads a small bundle file as bytes, with the same guards readFile
+// applies: a symlink points outside the bundle, a fifo never ends, and a
+// marker is one line long.
+func (b *Bundle) readRaw(ctx context.Context, name string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	path := filepath.Join(b.dir, name)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &UnsafeBundleFileError{Name: name, Mode: info.Mode()}
+	}
+	if info.Size() > markerLimit {
+		return nil, &BundleFileTooLargeError{Name: name, Limit: markerLimit}
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return io.ReadAll(io.LimitReader(f, markerLimit))
 }
 
 // readYAML decodes the named file into out and turns any failure into a
@@ -424,11 +464,45 @@ func describeNamespaces(recorded map[string]struct{}) string {
 	return "namespaces " + strings.Join(names, ", ")
 }
 
+// markerReason reads the ".missing" marker the gather writes in place of a
+// resource, and returns the error it stands for.
+//
+// A marker saying "not installed" means the cluster served no such collection,
+// which is an answer: nothing was denied and nothing is missing from the
+// bundle, and a reader that called it a partial read would report every
+// cluster without the GPU Operator as a cluster it could not see. Any other
+// reason is a read that was refused or that failed, and that is partial.
+//
+// No marker at all is no answer either way, which is what a bundle gathered
+// before the collector existed looks like, and the caller reports it as the
+// partial read it is.
+func (b *Bundle) markerReason(ctx context.Context, name string, absent error) (error, bool) {
+	raw, err := b.readRaw(ctx, strings.TrimSuffix(name, filepath.Ext(name))+missingMarkerSuffix)
+	if err != nil {
+		return nil, false
+	}
+
+	reason := strings.TrimSpace(string(raw))
+	if reason == notInstalledReason {
+		return absent, true
+	}
+
+	return &PartialError{Resource: name, Err: errors.New(reason)}, true
+}
+
 // ClusterPolicies returns the single ClusterPolicy recorded in
 // cluster_policy.yaml.
+//
+// A bundle from a cluster that never applied the CRD carries a marker instead,
+// and that is ErrNotInstalled rather than a partial read: the caller treats it
+// as the answer it is.
 func (b *Bundle) ClusterPolicies(ctx context.Context) ([]unstructured.Unstructured, error) {
 	var obj map[string]any
 	if err := b.readYAML(ctx, fileClusterPolicy, &obj); err != nil {
+		if marked, found := b.markerReason(ctx, fileClusterPolicy, ErrNotInstalled); found {
+			return nil, marked
+		}
+
 		return nil, err
 	}
 	if len(obj) == 0 {

@@ -94,14 +94,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 // customResourceListKinds names every custom resource the gather lists, so
 // that the dynamic fake answers with an empty list rather than panicking.
 func customResourceListKinds() map[schema.GroupVersionResource]string {
-	return map[schema.GroupVersionResource]string{
-		{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
-		{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
-		{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
-		{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}:        "DeviceClassList",
-	}
+	return mustgather.CustomResourceListKinds()
 }
 
 // gpuNode is a node advertising the given number of GPUs.

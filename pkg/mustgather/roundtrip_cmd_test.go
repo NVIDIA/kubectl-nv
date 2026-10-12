@@ -63,14 +63,7 @@ func (f roundTripFactory) RESTConfig() (*rest.Config, error)               { ret
 // reads. The dynamic fake panics on a List it was not told about, which is a
 // crash in the test rather than a cluster this gather could ever meet.
 func roundTripListKinds() map[schema.GroupVersionResource]string {
-	return map[schema.GroupVersionResource]string{
-		{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
-		{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
-		{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
-		{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}:        "DeviceClassList",
-	}
+	return mustgather.CustomResourceListKinds()
 }
 
 // quietProgress keeps the gather's commentary out of the test output.

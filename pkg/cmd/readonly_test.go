@@ -34,7 +34,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -373,14 +372,7 @@ func newTestCommandWithExecs(t *testing.T, rec *recorder, execs *execLog) *cobra
 	// not told about, so every custom resource the must-gather reads is
 	// registered even though this cluster holds none of them.
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
-		map[schema.GroupVersionResource]string{
-			{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
-			{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
-			{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
-			{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
-			{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
-			{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}:        "DeviceClassList",
-		})
+		mustgather.CustomResourceListKinds())
 	rec.install(&clientset.Fake)
 	rec.install(&dyn.Fake)
 

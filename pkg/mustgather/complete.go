@@ -22,6 +22,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/yaml"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
@@ -40,7 +41,31 @@ const (
 	gpuPodsFile = "gpu_pods.yaml"
 	// nodeEventsFile holds the events whose involved object is a node.
 	nodeEventsFile = "node_events.yaml"
+	// computeDomainsFile holds the NVIDIA DRA driver's ComputeDomains, which
+	// NV-CD-001 reads. computeDomainsMissingFile is the marker written in its
+	// place when the cluster serves none, saying why.
+	computeDomainsFile        = "compute_domains.yaml"
+	computeDomainsMissingFile = "compute_domains.missing"
 )
+
+// computeDomainGVR is the NVIDIA DRA driver's ComputeDomain collection. The
+// version is the one pkg/source reads, so a bundle and a live cluster cannot
+// disagree about which API this is.
+var computeDomainGVR = schema.GroupVersionResource{
+	Group: "resource.nvidia.com", Version: "v1beta1", Resource: "computedomains",
+}
+
+// gatherComputeDomains collects the ComputeDomains, or a marker saying why the
+// bundle has none.
+//
+// A cluster without the DRA driver serves no such collection, which is an
+// answer rather than a denial, and the marker is what lets a reader tell the
+// two apart: without it, every bundle from a cluster that never installed the
+// driver would read as a bundle whose ComputeDomain read was refused.
+func (g *Gatherer) gatherComputeDomains(_ *gatherState) error {
+	return g.gatherOrMark(
+		computeDomainGVR, computeDomainsFile, computeDomainsMissingFile, "ComputeDomain", false)
+}
 
 // gatherGPUPods writes every pod of the cluster that asks for GPUs, in every
 // namespace, narrowed to --node when one was given.

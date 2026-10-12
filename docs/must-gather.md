@@ -117,6 +117,15 @@ to hold what they read:
   dates a driver upgrade step from them: a node sitting in `cordon-required` is
   not a finding and a node that has been sitting there for an hour is, and only
   the event says which.
+- `compute_domains.yaml`, the NVIDIA DRA driver's ComputeDomains, which
+  `NV-CD-001` reads. A cluster without that driver serves none, and the gather
+  writes `compute_domains.missing` saying so; a reader takes that as the answer
+  it is rather than as a read that was refused.
+
+A `<name>.missing` marker is how the bundle says why it holds no such file. Its
+one line is `not installed` when the cluster served no such collection,
+`forbidden` when the read was refused, and the error otherwise. Only the first
+is an answer; the rest are partial reads.
 
 Both honour `--node`. A bundle written before they existed, or one whose read
 was refused, is still read as partial and exits 3, naming the file that is not

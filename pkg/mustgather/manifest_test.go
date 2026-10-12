@@ -49,14 +49,7 @@ func draAPIResources() []*metav1.APIResourceList {
 // customResourceListKinds names the list kind of every custom resource the
 // gather reads, which the dynamic fake needs before it will serve a List.
 func customResourceListKinds() map[schema.GroupVersionResource]string {
-	return map[schema.GroupVersionResource]string{
-		{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
-		{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
-		{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
-		{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
-		{Group: "resource.k8s.io", Version: "v1", Resource: "deviceclasses"}:        "DeviceClassList",
-	}
+	return CustomResourceListKinds()
 }
 
 // readManifest parses the bundle index.

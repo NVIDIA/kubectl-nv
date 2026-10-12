@@ -185,6 +185,12 @@ func Collectors() []Collector {
 			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherGPUNodes() },
 		},
 		{
+			Name:      "compute-domains",
+			Step:      "Gathering the ComputeDomains",
+			Artifacts: []string{computeDomainsFile, computeDomainsMissingFile},
+			Run:       (*Gatherer).gatherComputeDomains,
+		},
+		{
 			Name:      "gpu-pods",
 			Step:      "Gathering the pods that request GPUs",
 			Artifacts: []string{gpuPodsFile},
@@ -371,6 +377,29 @@ var (
 	}
 	kubeVirtGVR = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}
 )
+
+// CustomResourceListKinds names the list kind of every custom resource a
+// gather lists, which is what a dynamic fake has to be told before it will
+// serve a List.
+//
+// It is exported, and derived from the same variables the collectors use,
+// because the alternative is the list written out in every test package that
+// drives a gather: a collector added for a new resource then panics those
+// tests one by one, a long way from the line that added it.
+func CustomResourceListKinds() map[schema.GroupVersionResource]string {
+	return map[schema.GroupVersionResource]string{
+		clusterPolicyGVR:  "ClusterPolicyList",
+		nvidiaDriverGVR:   "NVIDIADriverList",
+		gpuClusterGVR:     "GPUClusterList",
+		hyperConvergedGVR: "HyperConvergedList",
+		kubeVirtGVR:       "KubeVirtList",
+		computeDomainGVR:  "ComputeDomainList",
+		// The DRA group is discovered at run time, so the version here is the
+		// one a current cluster serves. A fake told about another is a fake
+		// this gather would not have listed anyway.
+		{Group: draGroup, Version: "v1", Resource: "deviceclasses"}: "DeviceClassList",
+	}
+}
 
 // customResourceTimeout bounds a single read of a custom resource. The dynamic
 // client has no deadline of its own, and a gather that hangs on one CRD never
