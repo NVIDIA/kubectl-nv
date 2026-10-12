@@ -75,7 +75,9 @@ POLL_INTERVAL="${KUBECTL_NV_EVAL_POLL_INTERVAL:-10}"
 # limited to the binary under evaluation: the point of the exercise is whether
 # kubectl-nv answers the question, so an agent that could reach kubectl would
 # be scored on the wrong thing.
-DEFAULT_AGENT='claude -p --allowedTools Bash(./kubectl-nv:*)'
+# The allow-list is quoted because the agent command is evaluated as a shell
+# command line: unquoted parentheses are a syntax error, not an argument.
+DEFAULT_AGENT="claude -p --allowedTools 'Bash(./kubectl-nv:*)'"
 AGENT="${KUBECTL_NV_EVAL_AGENT:-${DEFAULT_AGENT}}"
 
 CONTEXT="kind-kubectl-nv-${LANE}"
