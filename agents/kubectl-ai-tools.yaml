@@ -1,0 +1,114 @@
+# kubectl-ai custom tools for kubectl-nv.
+#
+# Format confirmed against GoogleCloudPlatform/kubectl-ai with read-only
+# gh api calls on 2026-10-12:
+#   pkg/tools/custom_tool.go at commit 50662f794da32e3df1ae6d8e1e99a12f16e56455
+#     CustomToolConfig, whose yaml keys are name, description, command,
+#     command_desc and is_interactive. The command field is a prefix: the
+#     model writes the rest of the line, and kubectl-ai prepends the prefix
+#     when it is missing, so command_desc is where the syntax is taught.
+#   docs/tools.md at commit c18b1240d8ed0d3961a2d14b8e1c667e0b1db556
+#     the four pieces of information a tool declares and the
+#     --custom-tools-config flag that loads them.
+#
+# Use it with:
+#   kubectl-ai --custom-tools-config=agents/kubectl-ai-tools.yaml \
+#     "why is worker-1 not scheduling GPU pods"
+#
+# Every tool here reads. None of them writes to the cluster, and the one
+# kubectl-nv command that can exec into a pod, adm must-gather, is left out.
+
+- name: kubectl_nv_health
+  description: >-
+    Run every NVIDIA GPU health check over a Kubernetes cluster and report what
+    is wrong, as findings carrying a stable code, a severity, a node, a
+    component, the evidence and the command to run next. Use this first for any
+    question about GPUs being broken, missing, unschedulable or unusable.
+  command: "kubectl-nv health"
+  is_interactive: false
+  command_desc: |
+    The GPU health checks of the kubectl-nv plugin. Always ask for JSON.
+
+    - `kubectl-nv health --fail-on info -o json`: check the whole cluster and
+      report findings of every severity.
+    - `kubectl-nv health --node <node> --fail-on info -o json`: check one node.
+    - `kubectl-nv health --from-bundle <dir> --fail-on info -o json`: read a
+      must-gather directory instead of a cluster, for offline diagnosis.
+    - `kubectl-nv health --summary`: the counts only, without the findings.
+
+    The output is a HealthReport. Each entry of `findings` carries `code`
+    (the stable NV-<AREA>-<NNN> identifier, the only field worth branching on),
+    `severity` (error, warning or info), `node`, `component`, `message`,
+    `evidence` (the values the rule concluded from) and `next` (the command to
+    run after it). `summary` carries the counts and the GPU arithmetic.
+
+    Exit 0 means nothing at or above --fail-on, exit 1 means something was
+    found and is an answer rather than a failure, exit 2 is a bad command line,
+    exit 3 means part of the cluster could not be read and is listed under
+    `unreachable`, and exit 4 means nothing was checked at all.
+
+- name: kubectl_nv_list
+  description: >-
+    List the GPU nodes of a Kubernetes cluster: what each advertises, the
+    driver and CUDA versions, whether the device plugin or DRA serves it, and
+    how many GPUs are already requested. Use it to see the GPU inventory, or to
+    confirm what a health finding says about capacity.
+  command: "kubectl-nv list"
+  is_interactive: false
+  command_desc: |
+    The GPU node inventory of the kubectl-nv plugin. Always ask for JSON.
+
+    - `kubectl-nv list -o json`: every GPU node of the cluster.
+    - `kubectl-nv list --include-hinted -o json`: also the nodes that carry an
+      NVIDIA label but advertise no GPUs. A node that should have GPUs and has
+      none is usually the answer, so prefer this form when the list comes back
+      shorter than expected.
+    - `kubectl-nv list --node <node> -o json`: one node.
+    - `kubectl-nv list --selector <label>=<value> -o json`: the nodes matching
+      a label query.
+    - `kubectl-nv list --from-bundle <dir> -o json`: read a must-gather
+      directory instead of a cluster.
+
+    The output is a GPUNodeList with an `items` array, which is `[]` and never
+    null when there is nothing to report. Trim a large answer with
+    `--limit <n>` or `--fields <dotted.paths>`; `--fields` keeps every node and
+    drops columns, which is the safer of the two.
+
+- name: kubectl_nv_info
+  description: >-
+    Show everything the kubectl-nv plugin knows about one GPU node: its labels,
+    what it advertises, its conditions and taints, the GPU Operator pods on it
+    with their images and validator results, and its ResourceSlices. Use it
+    after a health finding names a node.
+  command: "kubectl-nv info"
+  is_interactive: false
+  command_desc: |
+    The per-node detail view of the kubectl-nv plugin. Always ask for JSON.
+
+    - `kubectl-nv info <node> -o json`: everything known about that node.
+    - `kubectl-nv info <node> --from-bundle <dir> -o json`: the same, read from
+      a must-gather directory instead of a cluster.
+
+    Exactly one node name is required. A node that carries an NVIDIA label and
+    advertises no GPUs is reported and marked as hinted, because that it should
+    have GPUs and does not is itself the answer. An unknown node, or one with
+    no GPUs and no GPU labels, exits 2.
+
+- name: kubectl_nv_explain
+  description: >-
+    Print the catalog entry for a kubectl-nv finding code: what it means, what
+    the evidence is, which GPU Operator versions it applies to, what to run
+    next and how to reproduce it. Call it for every code a health report
+    carries before drawing a conclusion about the cause.
+  command: "kubectl-nv explain"
+  is_interactive: false
+  command_desc: |
+    The finding catalog of the kubectl-nv plugin. It is compiled into the
+    binary, so it needs no cluster and no network, and it prints Markdown
+    rather than JSON.
+
+    - `kubectl-nv explain NV-NODE-002`: the entry for that code.
+    - `kubectl-nv explain nv-node-002`: the same; codes are not case sensitive.
+
+    An unknown code exits 2 and prints the codes the catalog does hold, so a
+    mistyped one is recoverable without guessing.
