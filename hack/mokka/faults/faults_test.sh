@@ -974,8 +974,8 @@ assert_no_call "label node ${NODE} nvidia.com/gpu-driver-upgrade-state=upgrade-d
 reset
 export FAKE_LABEL_VALUE="pod-restart-required"
 invoke "nv-upg-001.sh" "inject" "${NODE}"
-assert_rc 5 "nv-upg-001.sh refuses a node that is already mid-upgrade"
-assert_no_writes "nv-upg-001.sh writes nothing to a node mid-upgrade"
+assert_rc 5 "nv-upg-001.sh refuses a node that already has an upgrade state"
+assert_no_writes "nv-upg-001.sh writes nothing to a node already in an upgrade state"
 
 # -- nv-mig-001.sh: the two MIG labels -------------------------------------
 reset

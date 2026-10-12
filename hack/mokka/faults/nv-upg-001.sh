@@ -48,12 +48,15 @@ inject() {
     local before
     before="$(faults::node_label "${FAULTS_NODE}" "${LABEL}")"
 
-    # Already mid-upgrade. Saving that state as the one to restore would leave
-    # the node looking upgraded-by-somebody after the recovery, and every rule
-    # that lowers itself mid-upgrade would stay lowered.
+    # The node is already in an upgrade state somebody else set. Saving it as
+    # the one to restore would leave the node wearing it after the recovery,
+    # and a state that is neither empty nor upgrade-done changes what other
+    # rules report: pkg/health/rules' midUpgrade lowers NV-DRV-001 to info for
+    # every one of them except upgrade-failed, which E2 settled as a finished
+    # upgrade rather than one in progress.
     if [ -n "${before}" ] && [ "${before}" != "upgrade-done" ]; then
         faults::die "${FAULTS_RC_ALREADY}" \
-            "${LABEL} on ${FAULTS_NODE} is already '${before}'; the node is mid-upgrade"
+            "${LABEL} on ${FAULTS_NODE} is already '${before}'; an upgrade state is already set"
     fi
 
     faults::save "label" "${before}"
