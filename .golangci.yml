@@ -18,6 +18,7 @@ run:
     - e2e
     - scale
     - computedomain
+    - faults
     - mig
 linters:
   disable:
