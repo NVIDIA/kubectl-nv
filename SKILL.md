@@ -32,6 +32,7 @@ Every command takes `-o json` and prints one object on stdout. Run them with
 | What does finding code X mean, and what do I run next? | `kubectl nv explain CODE` |
 | How are the nodes wired together, and where does a job fit? | `kubectl nv topology` |
 | What fields does a kind have? | `kubectl nv schema KIND` |
+| Everything about one node, plus a bundle for support | `kubectl nv debug NODE` |
 | Collect the bundle support asks for | `kubectl nv adm must-gather` |
 
 ### What each command prints, and what it may do
@@ -42,6 +43,7 @@ Every command takes `-o json` and prints one object on stdout. Run them with
 | `kubectl nv info` | yes | no | One `GPUNode` |
 | `kubectl nv health` | yes | no | A `HealthReport` |
 | `kubectl nv topology` | yes | no | A `TopologyReport` |
+| `kubectl nv debug` | yes | yes | A `DebugReport` |
 | `kubectl nv explain` | no | no | The catalog entry, as Markdown |
 | `kubectl nv schema` | no | no | A JSON Schema |
 | `kubectl nv adm must-gather` | no | yes | Nothing; it writes a directory |
@@ -151,27 +153,43 @@ The loop is: run `kubectl nv health`, take the highest severity finding,
 and report what that showed. Do not guess at a cause the evidence does not
 support; the entry lists the usual ones and the command that tells them apart.
 
-Codes seen most often:
+The whole catalog, sixteen codes:
 
 | Code | What it means |
 |---|---|
+| `NV-NODE-001` | the GPU Operator is not reconciling this node |
 | `NV-NODE-002` | a GPU node that advertises no allocatable GPUs |
 | `NV-NODE-003` | fewer allocatable GPUs than the node has |
-| `NV-DP-001` | the device plugin is missing or not ready on a GPU node |
+| `NV-NODE-004` | the GPU count label disagrees with the node's capacity |
+| `NV-NODE-005` | an NVSentinel check is failing, or the node is cordoned |
 | `NV-OP-001` | the ClusterPolicy is not ready |
+| `NV-OP-002` | an operand the operator is not running on the node |
+| `NV-DP-001` | the device plugin is missing or not ready on a GPU node |
+| `NV-DRV-001` | a driver pod on the node is not ready or is restarting |
 | `NV-DCGM-001` | dcgm-exporter is missing or not ready where it should run |
+| `NV-CTK-001` | the container toolkit validation failed on the node |
+| `NV-MIG-001` | the node's MIG configuration has not been applied |
+| `NV-UPG-001` | a driver upgrade failed or is stuck on the node |
+| `NV-DRA-001` | the node advertises its GPUs twice over |
+| `NV-CD-001` | a ComputeDomain covering the node is not serving it |
+| `NV-TOPO-001` | the node is missing Topograph tiers its peers carry |
 
-Run `kubectl nv explain` for every code a report carries rather than reading
-the list above as the whole catalog; the catalog grows and this file does not.
+Run `kubectl nv explain` for every code a report carries: the line above is
+the headline, and the entry carries the evidence, the versions it applies to
+and what to run next.
 
 ## Working offline from a bundle
 
-`kubectl nv adm must-gather` collects a directory from a live cluster.
-`kubectl nv list`, `kubectl nv info` and `kubectl nv health` read that
-directory instead of a cluster with `--from-bundle`:
+`kubectl nv adm must-gather` collects a directory from a live cluster, and
+`kubectl nv debug NODE` collects one narrowed to a single node and prints a
+`DebugReport`: that node's `GPUNode` next to what the gather did and did not
+manage to collect. `kubectl nv list`, `kubectl nv info` and
+`kubectl nv health` read such a directory instead of a cluster with
+`--from-bundle`:
 
 ```console
 kubectl nv adm must-gather --artifacts-dir /tmp/support
+kubectl nv debug worker-1 --artifacts-dir /tmp/worker-1 -o json
 kubectl nv health --from-bundle /tmp/support -o json
 kubectl nv info worker-1 --from-bundle /tmp/support -o json
 ```

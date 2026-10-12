@@ -75,6 +75,16 @@ answers where the pods of one job would fit.
 kubectl nv topology --for job/training -n ml
 ```
 
+### kubectl nv debug
+
+Collects a must-gather narrowed to one node and prints a `DebugReport`: that
+node's GPUs, driver and operands on one screen, next to what the gather could
+and could not collect.
+
+```bash
+kubectl nv debug worker-1 --artifacts-dir /tmp/worker-1 -o json
+```
+
 ### kubectl nv adm must-gather
 
 Collects the diagnostic bundle support asks for, so you do not have to run the
