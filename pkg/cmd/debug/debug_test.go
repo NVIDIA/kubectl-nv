@@ -1123,9 +1123,9 @@ func contains(names []string, want string) bool {
 //
 // The comparison is driven by AddGatherFlags into a scratch set rather than by
 // a list written out here, so a flag added to the gather is required on both
-// commands without this test being edited. Until pkg/cmd/adm is moved onto
-// that helper, the two registrations are separate code and this is what holds
-// them together.
+// commands without this test being edited. Both commands now register from that
+// helper, so this is a floor under the arrangement rather than the only thing
+// holding it up: it goes red if either one starts registering its own again.
 func TestDebugGatherFlagsMatchMustGather(t *testing.T) {
 	t.Parallel()
 

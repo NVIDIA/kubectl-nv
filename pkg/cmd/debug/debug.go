@@ -36,6 +36,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/info"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/debug"
 	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
@@ -249,7 +250,7 @@ func readNode(ctx context.Context, o *cmd.Options, name string) (*inventory.GPUN
 
 	// The same message kubectl nv info gives, word for word. A user who typed
 	// the same name into both commands must not be told two different things.
-	return nil, nil, output.NewUsageError("node %s has no GPUs and no GPU labels", name)
+	return nil, nil, info.NotAGPUNodeError(name)
 }
 
 // newSource returns the read path: the cluster the kubectl flags point at.

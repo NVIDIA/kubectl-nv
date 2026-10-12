@@ -112,7 +112,7 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 		// The read was complete and the node still is not in it: either the
 		// cluster does not have it or it has nothing to do with GPUs, and
 		// either way the user typed the name. Exit 2.
-		return output.NewUsageError("node %s has no GPUs and no GPU labels", name)
+		return NotAGPUNodeError(name)
 	}
 
 	if format == output.FormatTable || format == output.FormatWide {
@@ -128,6 +128,20 @@ func run(c *cobra.Command, o *cmd.Options, opts *options, name string) error {
 	}
 
 	return buildErr
+}
+
+// NotAGPUNodeError is what every command says about a node that a complete
+// read did not find among the GPU nodes: the cluster does not have it, or it
+// has nothing to do with GPUs, and either way the user typed the name.
+//
+// It is exported because kubectl nv debug answers the same question, and a
+// support engineer reading one answer has to recognise the other. Two copies
+// of the sentence drift the moment either is improved.
+//
+// It is a usage error, so the process exits 2. That is the difference between
+// "you typed something wrong" and "the cluster is broken".
+func NotAGPUNodeError(name string) error {
+	return output.NewUsageError("node %s has no GPUs and no GPU labels", name)
 }
 
 // nodeNamed picks the node out of the built list. The builder was asked for
