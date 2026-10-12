@@ -282,6 +282,9 @@
             "type": "object"
           },
           "type": "array"
+        },
+        "remainingItemCount": {
+          "type": "integer"
         }
       },
       "additionalProperties": false,

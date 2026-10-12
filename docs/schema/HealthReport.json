@@ -105,6 +105,9 @@
       },
       "type": "array"
     },
+    "remainingItemCount": {
+      "type": "integer"
+    },
     "summary": {
       "properties": {
         "errors": {
