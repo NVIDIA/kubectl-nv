@@ -325,7 +325,9 @@ reset_fixtures() {
     : > "${EVAL_CALL_LOG}"
 }
 
-# run_subject [extra env assignments are exported by the caller]
+# run_subject
+# The fixtures are exported by the caller; the subject itself takes no
+# arguments, and a case that needs to pass one builds its own invocation.
 run_subject() {
     PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
         KUBECTL_NV_EVAL_BIN="${BIN}" \
@@ -337,7 +339,7 @@ run_subject() {
         KUBECTL_NV_EVAL_POLL_INTERVAL=0 \
         KUBECTL_NV_EVAL_OBSERVE_TIMEOUT=30 \
         KUBECTL_NV_EVAL_RECOVER_TIMEOUT=30 \
-        "${RUN}" "$@" > "${WORK}/out" 2> "${WORK}/err"
+        "${RUN}" > "${WORK}/out" 2> "${WORK}/err"
     RC=$?
     OUT="$(cat "${WORK}/out")"
     ERR="$(cat "${WORK}/err")"
@@ -749,7 +751,7 @@ echo "# static analysis"
 
 if command -v shellcheck > /dev/null 2>&1; then
     for dir in / "${SCRIPT_DIR}"; do
-        if (cd "${dir}" && shellcheck -x "${RUN}" "${RENDER}" "${BASH_SOURCE[0]}"); then
+        if (cd "${dir}" && shellcheck -x "${RUN}" "${RENDER}" "${SCRIPT_DIR}/run_test.sh"); then
             ok "shellcheck -x is clean from ${dir}"
         else
             nope "shellcheck -x reported findings from ${dir}"
