@@ -85,18 +85,35 @@ func TestALimitEqualToTheTotalTruncatesNothing(t *testing.T) {
 // A level that had no groups to begin with is dropped too. A report carrying
 // one is a report saying the cluster divides a way it has no groups for, and
 // the limit is not what made that true.
+//
+// The empty level goes first, before the limit runs out. Put last it is never
+// reached, because the loop stops as soon as the limit is filled, so a report
+// whose empty level trails would pass whether the guard is there or not: that
+// fixture could not tell the two apart and this one has to.
 func TestALimitDropsALevelThatHadNoGroups(t *testing.T) {
 	t.Parallel()
 
 	r := twoLevelReport()
-	r.Levels = append(r.Levels, Level{Name: "tier-1", Label: "fabric.topograph.run/tier-1"})
+	empty := Level{Name: "tier-1", Label: "fabric.topograph.run/tier-1"}
+	r.Levels = append([]Level{empty}, r.Levels...)
 
-	r.LimitItems(3)
+	if total := r.LimitItems(3); total != 4 {
+		t.Fatalf("the report holds %d groups, want 4", total)
+	}
 
 	for _, level := range r.Levels {
 		if len(level.Groups) == 0 {
 			t.Errorf("level %q came back with no groups", level.Name)
 		}
+	}
+	// And the three groups asked for are there: a guard that dropped the
+	// empty level by dropping every level would pass the loop above.
+	kept := 0
+	for _, level := range r.Levels {
+		kept += len(level.Groups)
+	}
+	if kept != 3 {
+		t.Errorf("the report kept %d groups, want the 3 that were asked for", kept)
 	}
 }
 
