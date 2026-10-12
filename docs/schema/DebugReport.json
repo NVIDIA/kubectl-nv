@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/debug/report",
+  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/debug/schema-shape",
   "properties": {
     "kind": {
       "type": "string",
@@ -577,9 +577,6 @@
             "type": "object"
           },
           "type": "array"
-        },
-        "remainingItemCount": {
-          "type": "integer"
         }
       },
       "additionalProperties": false,
