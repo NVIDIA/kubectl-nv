@@ -10,9 +10,10 @@ what is wrong with them, and what to do about it. Findings come back as stable
 `NV-<AREA>-<NNN>` codes with the evidence behind each one, in a table for a
 person and as JSON or YAML for a program.
 
-It never creates, updates, patches or deletes a Kubernetes object. The one
-exception is `kubectl nv adm must-gather`, which runs `nvidia-bug-report.sh`
-inside the driver pods and can be turned off with `--no-exec`.
+It never creates, updates, patches or deletes a Kubernetes object. The
+exception is the commands that collect a diagnostic bundle: they run
+`nvidia-bug-report.sh` inside the driver pods, and that can be turned off with
+`--no-exec`. Nothing else in the tool does anything cluster side.
 
 ## Install
 
@@ -123,9 +124,14 @@ kubectl nv version
 
 Exit 1 is an answer rather than a failure: the command found what it was asked
 to look for. Exit 3 is an answer with a hole in it, and what was missed is
-listed in `status.unreachable`. The whole contract, including the output
-kinds, the streams and the bounded output flags, is in
+listed in `unreachable`, at the top level of the report. The whole contract,
+including the output kinds, the streams and the bounded output flags, is in
 [docs/agents.md](docs/agents.md).
+
+Data goes to stdout and progress to stderr, with four commands still to catch
+up: `kubectl nv version`, `kubectl nv explain`, `kubectl nv schema` and
+`kubectl nv mcp --list-tools` print on stderr today. `kubectl nv schema` also
+has no kinds registered yet and answers any argument with exit 2.
 
 ## Agent surfaces
 

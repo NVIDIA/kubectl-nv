@@ -4,15 +4,15 @@ Can an agent holding nothing but `kubectl-nv` and its `SKILL.md` diagnose a
 broken GPU node? This directory holds the answers, one file per run.
 
 The harness is `hack/eval/run.sh`. It breaks the faults lane five times in
-turn, hands an agent a directory containing the binary, the skill and the lane
-kubeconfig, asks what is wrong, scores the answer, and puts the lane back.
+turn, hands an agent a directory containing a guarded `kubectl-nv`, the skill
+and the lane kubeconfig, asks what is wrong, scores the answer, and puts the
+lane back.
 
 ## Running it
 
 Runs are manual. The harness talks to a real cluster and spends money on a
 real model, so nothing in CI calls it and it refuses to start when `CI` is
-set. It also refuses any kubeconfig whose current context is not a
-`kind-kubectl-nv-*` lane.
+set.
 
 ```console
 make build
@@ -21,17 +21,24 @@ hack/eval/run.sh
 hack/mokka/down.sh faults
 ```
 
-The default agent command is `claude -p` with its tool allow-list limited to
-the binary under evaluation. Override it to score something else:
+The default agent command is Claude Code in print mode, locked down:
+
+```console
+claude -p --restricted --tools Bash,Read --allowedTools 'Bash(./kubectl-nv:*)' \
+  --permission-mode dontAsk --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+```
+
+Override it to score something else:
 
 ```console
 KUBECTL_NV_EVAL_AGENT='my-agent --print' hack/eval/run.sh
 ```
 
-The agent command runs with the case directory as its working directory, the
-question on stdin, and `KUBECONFIG` pointing at `./kubeconfig`. Whatever it
-writes to stdout is the final answer. `hack/eval/run.sh` lists the rest of the
-environment it reads.
+The agent command is evaluated as a shell command line, so anything in it that
+the shell would read as syntax has to be quoted, as the parentheses and braces
+are above. It runs with the case directory as its working directory, the
+question on stdin, and its stdout taken as the final answer.
+`hack/eval/run.sh` lists the rest of the environment it reads.
 
 Once a run is recorded, put its row in the top level README:
 
@@ -39,19 +46,64 @@ Once a run is recorded, put its row in the top level README:
 hack/eval/render-results.sh
 ```
 
+## What the agent can reach
+
+The agent is a model and the lane is a real cluster, so what it can reach is
+bounded rather than trusted.
+
+`./kubectl-nv` in the case directory is `hack/eval/kubectl-nv-shim.sh`, not
+the binary. The allow-list pattern `Bash(./kubectl-nv:*)` allows any argument,
+so without the shim an agent could point the binary at another cluster with
+`--server`, read another identity with `--kubeconfig`, or write anywhere on
+the machine with `--artifacts-dir`. The shim refuses every kubectl connection
+flag, both directory flags and the two commands that can exec inside a pod,
+then execs the real binary with the lane fixed. The real binary is outside the
+case directory.
+
+The agent runs under `env -i` with `PATH`, `LANG`, `HOME` and `KUBECONFIG` and
+nothing else, with a `HOME` of its own that starts empty. It cannot read the
+operator's Claude settings, and nothing in its environment says which fault is
+running, so it has to find out.
+
+A wall clock bound ends an agent that does not return. There is no
+`--max-turns` in claude 2.1.296, so the bound is a background run plus a kill.
+
+The lane kubeconfig is checked before anything is injected: the current
+context has to be this lane's exactly, the file has to carry exactly one
+context, and the server has to be on the loopback address. A kubeconfig that
+can reach anything but a local kind lane is refused, because that file is
+handed to the agent.
+
+Each case directory and the agent's `HOME` are removed when the run ends,
+whichever way it ended, because the case directory holds a copy of the lane
+kubeconfig.
+
 ## Scoring
 
-A case passes when the final answer names three things: the node that was
-broken, the component the finding blames, and the finding code. Each is
-matched on whole words, so an answer naming `worker2` is not credited with
-naming `worker`, and the code match ignores case.
+The prompt asks the agent to end its reply with one line:
 
-The component is read out of the live `HealthReport` rather than from a table
-inside the harness, so a rule that changes which component it blames changes
-what the harness expects. One consequence is worth knowing: where the
-component is `node`, almost any sentence about a node contains the word, so
-that part of the score is close to free for the `NV-NODE-*` cases. The node
-name and the code carry the weight there.
+```text
+ANSWER node=<node> component=<component> code=<code>
+```
+
+A case passes when that line names all three correctly. Scoring reads that
+line and nothing else: an answer that lists every code it can think of has not
+diagnosed anything, and crediting it for containing the right one would score
+the shotgun above the diagnosis.
+
+- `node` is matched exactly. A node name is a DNS label, so case matters, and
+  naming `worker2` is not naming `worker`.
+- `component` is matched exactly against the `component` field of the finding,
+  which is read out of the live `HealthReport` rather than from a table inside
+  the harness. A rule that changes which component it blames changes what the
+  harness expects.
+- `code` ignores case, because a report prints it upper case and prose does
+  not always, but it is still the whole code: `NV-OP-0010` is not
+  `NV-OP-001`.
+
+A finding about the cluster rather than about one node carries no node at all.
+`NV-OP-001` is the one here: it is about the ClusterPolicy. For those the
+expected node is `-`, and an answer that names a node instead is wrong.
 
 ## The result file
 
@@ -71,20 +123,26 @@ on the same day.
 | `summary.passed` | How many passed |
 | `summary.failed` | How many did not |
 
+A run that stopped early because the lane could not be put back has fewer
+`cases` than faults, which is the difference between a short run and a clean
+one.
+
 Each entry of `cases`:
 
 | Field | Meaning |
 |---|---|
 | `code` | The finding code that was injected |
 | `node` | The node it was injected on |
+| `expectedNode` | What the answer had to name: the node, or `-` for a cluster scoped finding |
 | `component` | The component the report blamed, empty if it never appeared |
-| `pass` | True when all three parts were named |
-| `named.node` | The answer named the node |
-| `named.component` | The answer named the component |
-| `named.code` | The answer named the code |
+| `pass` | True when all three parts were named and the lane recovered |
+| `named.node` | The ANSWER line named the node |
+| `named.component` | The ANSWER line named the component |
+| `named.code` | The ANSWER line named the code |
 | `observedPolls` | How many health polls it took for the fault to show |
 | `agentSeconds` | How long the agent took |
 | `error` | Why the case could not be scored, empty when it was |
+| `recoverError` | Why the lane could not be put back, empty when it was |
 
 An example:
 
@@ -96,17 +154,19 @@ An example:
   "lane": "faults",
   "context": "kind-kubectl-nv-faults",
   "node": "kubectl-nv-faults-worker",
-  "agent": "claude -p --allowedTools Bash(./kubectl-nv:*)",
+  "agent": "claude -p --restricted ...",
   "cases": [
     {
       "code": "NV-NODE-002",
       "node": "kubectl-nv-faults-worker",
+      "expectedNode": "kubectl-nv-faults-worker",
       "component": "node",
       "pass": true,
       "named": {"node": true, "component": true, "code": true},
       "observedPolls": 4,
       "agentSeconds": 73,
-      "error": ""
+      "error": "",
+      "recoverError": ""
     }
   ],
   "summary": {"cases": 5, "passed": 5, "failed": 0}
@@ -118,15 +178,22 @@ An example:
 | Code | Meaning |
 |---|---|
 | 0 | Every case passed |
-| 1 | At least one case failed |
-| 2 | Refused: `CI` is set, or the context is not a lane |
+| 1 | At least one case failed, or the lane could not be put back |
+| 2 | Refused: `CI` is set, or the kubeconfig is not this lane's |
 | 3 | Could not run: a required tool, file or script is missing |
 
 The lane is put back whichever way the run ended, including an interrupt. A
 fault that could not be injected is still recovered, because an injection that
 failed halfway has still changed the cluster.
 
+A recover that fails, or a finding that is still reported after the recover
+timeout, ends the run: the next fault must not be injected onto a lane that
+still carries the last one, and a cluster left broken is worse than a short
+run. The results written up to that point are still recorded.
+
 ## Testing the harness
 
 `hack/eval/run_test.sh` runs the whole harness against fake fault scripts, a
-fake binary and a stub agent. No cluster is created and no model is called.
+fake binary, the real shim and a stub agent. No cluster is created and no
+model is called, and it passes with `CI` set, so it can join the suite that
+CI runs.

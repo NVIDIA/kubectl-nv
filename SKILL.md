@@ -34,6 +34,23 @@ Every command takes `-o json` and prints one object on stdout. Run them with
 | What fields does a kind have? | `kubectl nv schema KIND` |
 | Collect the bundle support asks for | `kubectl nv adm must-gather` |
 
+### What each command prints, and what it may do
+
+| Command | Takes `-o` | Runs anything in a pod | Prints |
+|---|---|---|---|
+| `kubectl nv list` | yes | no | A `GPUNodeList` |
+| `kubectl nv info` | yes | no | One `GPUNode` |
+| `kubectl nv health` | yes | no | A `HealthReport` |
+| `kubectl nv topology` | yes | no | A `TopologyReport` |
+| `kubectl nv explain` | no | no | The catalog entry, as Markdown |
+| `kubectl nv schema` | no | no | A JSON Schema |
+| `kubectl nv adm must-gather` | no | yes | Nothing; it writes a directory |
+| `kubectl nv mcp` | no | no | Nothing; it serves the protocol |
+| `kubectl nv version` | no | no | The version string |
+
+Only the four in the first group take `-o`. Asking the others for `-o json`
+is exit 2, not a silently ignored flag.
+
 Start at `kubectl nv health`. It is the command that turns "the GPUs are
 broken" into a finding code, a node and a component. Use `kubectl nv list` and
 `kubectl nv info` to confirm what a finding says, not to find the problem.
@@ -60,7 +77,7 @@ for it when `kubectl nv list` comes back shorter than expected.
 {
   "apiVersion": "kubectl-nv.nvidia.com/v1alpha1",
   "kind": "HealthReport",
-  "metadata": {"name": "health"},
+  "metadata": {"name": "cluster"},
   "findings": [
     {
       "code": "NV-NODE-002",
@@ -138,11 +155,11 @@ Codes seen most often:
 
 | Code | What it means |
 |---|---|
-| `NV-NODE-002` | A GPU node advertises no allocatable GPUs |
-| `NV-NODE-003` | A GPU reported an uncorrectable fault |
-| `NV-DP-001` | The device plugin is not serving a node that should have it |
-| `NV-OP-001` | A GPU Operator operand is not rolling out |
-| `NV-DCGM-001` | DCGM is not running where it should be |
+| `NV-NODE-002` | a GPU node that advertises no allocatable GPUs |
+| `NV-NODE-003` | fewer allocatable GPUs than the node has |
+| `NV-DP-001` | the device plugin is missing or not ready on a GPU node |
+| `NV-OP-001` | the ClusterPolicy is not ready |
+| `NV-DCGM-001` | dcgm-exporter is missing or not ready where it should run |
 
 Run `kubectl nv explain` for every code a report carries rather than reading
 the list above as the whole catalog; the catalog grows and this file does not.
@@ -195,6 +212,13 @@ stdout carries the output object and nothing else. Progress, notes and
 warnings go to stderr, so reading stdout alone never needs filtering. No
 command prompts, and none requires a terminal.
 
+Four commands do not keep to that yet. `kubectl nv version`,
+`kubectl nv explain`, `kubectl nv schema` and `kubectl nv mcp --list-tools`
+print their output on stderr today. Read both streams when you call those
+four, and stdout alone for everything else. `kubectl nv schema` also has no
+kinds registered yet, so it answers any argument with exit 2; the output
+kinds are real and the contract below is what it will print.
+
 ## Bounded output
 
 A whole cluster's report can be large. Two flags cut it down, and they mean
@@ -229,11 +253,11 @@ It is run against a cluster that is already unhappy, and a write from it would
 change the state being reported. This is enforced by a test that drives every
 command against clients that fail on any write verb.
 
-The one exception is `kubectl nv adm must-gather`, which runs
-`nvidia-bug-report.sh` inside the driver pods and copies the result out. That
-is the only cluster-side action anywhere in the tool. It leaves
-`/tmp/nvidia-bug-report.log.gz` behind inside each driver pod it collected
-from. Turn it off with `--no-exec`:
+The exception is the commands that collect a bundle: they run
+`nvidia-bug-report.sh` inside the driver pods and copy the result out. The
+table above says which ones they are, and that is the whole of what this tool
+does cluster side. A gather leaves `/tmp/nvidia-bug-report.log.gz` behind
+inside each driver pod it collected from. Turn it off with `--no-exec`:
 
 ```console
 kubectl nv adm must-gather --no-exec --artifacts-dir /tmp/support

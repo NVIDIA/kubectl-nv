@@ -21,9 +21,12 @@ toolsets:
       Diagnose NVIDIA GPU nodes with the kubectl-nv plugin: which nodes carry
       GPUs, what each one advertises, what the GPU health checks found, and
       what a finding code means. Read-only, and it answers with stable
-      NV-<AREA>-<NNN> codes plus the evidence behind each one.
+      NV-AREA-NNN codes plus the evidence behind each one.
+    # core, not cluster: the Holmes CLI filters the toolsets it loads on the
+    # core and cli tags, so a toolset tagged only cluster loads in the server
+    # and is invisible from `holmes ask`, which is how this one is used.
     tags:
-      - cluster
+      - core
     prerequisites:
       - command: "kubectl-nv version"
     llm_instructions: |
@@ -97,7 +100,7 @@ toolsets:
         user_description: "explain the finding code {{ code }}"
         parameters:
           code:
-            description: "A finding code in the form NV-<AREA>-<NNN>, for instance NV-NODE-002. Not case sensitive."
+            description: "A finding code in the form NV-AREA-NNN, for instance NV-NODE-002. Not case sensitive."
             type: string
             required: true
         command: |
