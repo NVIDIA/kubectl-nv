@@ -98,12 +98,19 @@ else
         printf '%s\n' '| Date | Agent | Cases | Passed | Codes missed |'
         printf '%s\n' '|---|---|---|---|---|'
         for f in "${files[@]}"; do
+            # A pipe inside a cell ends the cell, so every cell is escaped
+            # before it is joined. The agent command line is the one that
+            # realistically carries one, and it is also the one worth reading
+            # verbatim, so it is wrapped in code ticks as well.
             row="$(jq -r '
-                [ (((.startedAt // "") | split("T"))[0]),
-                  (.agent // "unknown"),
-                  (.summary.cases | tostring),
-                  (.summary.passed | tostring),
-                  ([.cases[] | select(.pass | not) | .code] | if length == 0 then "none" else join(", ") end)
+                def cell: tostring | gsub("\\|"; "\\|");
+                [ (((.startedAt // "") | split("T"))[0] | cell),
+                  ("`" + ((.agent // "unknown") | cell) + "`"),
+                  (.summary.cases | cell),
+                  (.summary.passed | cell),
+                  ([.cases[] | select(.pass | not) | .code]
+                   | if length == 0 then "none" else join(", ") end
+                   | cell)
                 ] | "| " + join(" | ") + " |"' < "${f}" 2> /dev/null)"
             [ -n "${row}" ] || die 3 "could not read ${f}"
             printf '%s\n' "${row}"
