@@ -58,3 +58,13 @@ M45	nv-node-001.sh	-o 'jsonpath={.metadata.name}' 2> /dev/null || true)" ]; then
 M46	lib.sh	[ -z "${deleted}" ] || continue	:
 M47	lib.sh	[ "${uid}" != "${FAULTS_DELETED_POD_UID:-}" ] || continue	:
 M48	nv-op-001.sh	faults::wait_for_template "nvidia-device-plugin-daemonset" absent "${FAULTS_ABSENT_VERSION}"	: no template wait
+M49	nv-upg-001.sh	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "${saved}"	faults::set_node_label "${FAULTS_NODE}" "${LABEL}" "upgrade-done"
+M50	nv-mig-001.sh	faults::set_node_label "${FAULTS_NODE}" "${CONFIG_LABEL}" "${config}"	: the config label is left as it was injected
+M51	nv-node-005.sh	if [ "${before}" = "true" ]; then	if false; then
+M52	nv-topo-001.sh	faults::set_node_label "${peer}" "${TIER_LABEL}" "${TIER_VALUE}"	faults::set_node_label "${FAULTS_NODE}" "${TIER_LABEL}" "${TIER_VALUE}"
+M53	nv-ctk-001.sh	"__IMAGE__=${image}"\n}	"__IMAGE__=busybox:latest"\n}
+M54	nv-drv-001.sh	if faults::deploy_is_off "${deploy}"; then	if false; then
+M55	nv-dra-001.sh	faults::delete_fixture "${FIXTURE}" "__NODE__=${FAULTS_NODE}"	: the slice is left behind
+M56	nv-cd-001.sh	faults::apply_fixture "${CRD_FIXTURE}"\n    faults::wait_for_crd	faults::apply_fixture "${CRD_FIXTURE}"
+M57	nv-cd-001.sh	--subresource=status --type=merge	--type=merge
+M58	nv-topo-001.sh	faults::save "peer-${peer}" "${before}"	: not saved

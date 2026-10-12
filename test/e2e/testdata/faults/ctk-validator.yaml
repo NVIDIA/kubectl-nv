@@ -1,0 +1,41 @@
+# A validator-shaped pod whose toolkit-validation init container fails, for the
+# NV-CTK-001 reproduction.
+#
+# The rule reads the validator pod on the node and looks at one init container.
+# It takes the FIRST pod of that component on the node, and pkg/inventory sorts
+# a node's operands by name, so this pod's name has to sort before the real
+# validator's: "nv-faults-..." against "nvidia-operator-validator-...", where
+# the third character is a hyphen against an "i". The test pins the pod name in
+# the finding's evidence, so a day when that stops being true is a failure
+# rather than a pass against the wrong pod.
+#
+# restartPolicy Always, which is what the operator's own validator runs with
+# and what the rule is written for: a failing init container does not sit
+# terminated, it is Waiting with reason CrashLoopBackOff and the exit code of
+# the run that failed is in its last termination.
+#
+# The image is the validator's own, read off the lane, so nothing is pulled.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nv-faults-ctk-validator
+  namespace: __NAMESPACE__
+  labels:
+    app: nvidia-operator-validator
+    nv.example/faults-fixture: "nv-ctk-001"
+spec:
+  nodeName: __NODE__
+  restartPolicy: Always
+  terminationGracePeriodSeconds: 1
+  tolerations:
+    - operator: Exists
+  initContainers:
+    - name: toolkit-validation
+      image: __IMAGE__
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "exit 1"]
+  containers:
+    - name: nvidia-operator-validator
+      image: __IMAGE__
+      imagePullPolicy: IfNotPresent
+      command: ["/bin/sh", "-c", "sleep 86400"]

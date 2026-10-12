@@ -593,3 +593,85 @@ faults::deploy_is_off() {
         *) return 1 ;;
     esac
 }
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+#
+# The manifests the injections apply, under test/e2e/testdata/faults so that
+# they sit with the suite's other fixtures rather than in two places. They
+# carry placeholders rather than values, because the node and the images are
+# properties of the lane a script was pointed at.
+
+FAULTS_FIXTURE_DIR="${MOKKA_FIXTURE_DIR:-${FAULTS_SCRIPT_DIR}/../../../test/e2e/testdata/faults}"
+
+# faults::render <fixture> [<placeholder>=<value>]...
+# Prints the fixture with each placeholder replaced throughout.
+#
+# A missing fixture is a failure rather than an empty manifest: `kubectl apply
+# -f -` with nothing on stdin succeeds and applies nothing, so a typo in a
+# fixture name would inject nothing and report that it had.
+faults::render() {
+    local fixture="${FAULTS_FIXTURE_DIR}/$1"
+    shift
+
+    if [ ! -f "${fixture}" ]; then
+        faults::die 1 "fixture not found: ${fixture}"
+    fi
+
+    local text pair
+    text="$(cat "${fixture}")"
+    for pair in "$@"; do
+        text="${text//${pair%%=*}/${pair#*=}}"
+    done
+
+    if [ -z "${text}" ]; then
+        faults::die 1 "fixture is empty: ${fixture}"
+    fi
+
+    printf '%s\n' "${text}"
+}
+
+# faults::apply_fixture <fixture> [<placeholder>=<value>]...
+faults::apply_fixture() {
+    local name="$1"
+    faults::render "$@" | k apply -f - > /dev/null
+    faults::note "${FAULTS_CODE}: applied ${name}"
+}
+
+# faults::delete_fixture <fixture> [<placeholder>=<value>]...
+# --ignore-not-found, because a recovery after a half-finished injection is
+# not a second failure on top of the first.
+faults::delete_fixture() {
+    local name="$1"
+    faults::render "$@" | k delete -f - --ignore-not-found --wait=false > /dev/null
+    faults::note "${FAULTS_CODE}: deleted ${name}"
+}
+
+# faults::other_workers <node>
+# The lane's other worker nodes, one per line. The control plane is left out:
+# no operand runs there, and no rule treats it as a node work is placed on.
+faults::other_workers() {
+    local node="$1" names name
+    names="$(k get nodes -l '!node-role.kubernetes.io/control-plane' \
+        -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}')"
+
+    while IFS= read -r name; do
+        [ -n "${name}" ] || continue
+        [ "${name}" != "${node}" ] || continue
+        printf '%s\n' "${name}"
+    done <<< "${names}"
+}
+
+# faults::operand_image <component> <node>
+# The image of the first container of that operand's pod on the node, so that a
+# fixture standing in for it needs no pull. Empty when there is no such pod.
+faults::operand_image() {
+    local pod
+    pod="$(faults::pod_on_node "${FAULTS_OPERATOR_NAMESPACE}" "app=$1" "$2")"
+    if [ -z "${pod}" ]; then
+        return 0
+    fi
+    k --namespace "${FAULTS_OPERATOR_NAMESPACE}" get pod "${pod}" \
+        -o 'jsonpath={.spec.containers[0].image}' 2> /dev/null
+}

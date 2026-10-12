@@ -130,6 +130,52 @@ type faultCase struct {
 // saying nothing about anything.
 var faultCases = []faultCase{
 	{
+		code:         "NV-CD-001",
+		script:       "nv-cd-001.sh",
+		severity:     "info",
+		component:    "compute-domain-daemon",
+		evidenceKeys: []string{"computeDomain", "nodeStatus", "pod", "ready"},
+		exact: func(int64) map[string]string {
+			// The domain is namespaced, so the evidence names it with its
+			// namespace; the node entry and the IMEX pod are the two halves
+			// of "not serving this node".
+			return map[string]string{
+				"computeDomain": "gpu-operator/nv-faults-compute-domain",
+				"nodeStatus":    "NotReady",
+				"pod":           "nv-faults-imex-daemon",
+				"ready":         "false",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-CTK-001",
+		script:       "nv-ctk-001.sh",
+		severity:     "error",
+		component:    "nvidia-container-toolkit-daemonset",
+		evidenceKeys: []string{"pod", "initContainer", "exitCode", "reason", "lastTerminationAt"},
+		exact: func(int64) map[string]string {
+			// The pod name is pinned because the rule takes the FIRST
+			// validator pod on the node and the lane runs a real one too: a
+			// day when the fixture stops sorting first is a failure here
+			// rather than a pass against the operator's own validator.
+			//
+			// CrashLoopBackOff and not a termination reason: under a restart
+			// policy of Always the init container sits Waiting, and the exit
+			// code of the run that failed is in the last termination, which
+			// is why lastTerminationAt is required above.
+			return map[string]string{
+				"pod":           "nv-faults-ctk-validator",
+				"initContainer": "toolkit-validation",
+				"exitCode":      "1",
+				"reason":        "CrashLoopBackOff",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
 		code:         "NV-DCGM-001",
 		script:       "nv-dcgm-001.sh",
 		severity:     "warning",
@@ -246,6 +292,75 @@ var faultCases = []faultCase{
 		clear:  faultClear,
 	},
 	{
+		code:         "NV-DRA-001",
+		script:       "nv-dra-001.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"mode", "capacity", "allocatable", "resourceSlices"},
+		exact: func(capacity int64) map[string]string {
+			// Both numbers unchanged: the node advertises the same devices
+			// twice rather than losing any, which is the whole of the
+			// finding and the reason it is only info.
+			return map[string]string{
+				"mode":           "both",
+				"capacity":       strconv.FormatInt(capacity, 10),
+				"allocatable":    strconv.FormatInt(capacity, 10),
+				"resourceSlices": "nv-faults-dra-slice",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-DRV-001",
+		script:       "nv-drv-001.sh",
+		severity:     "error",
+		component:    "nvidia-driver-daemonset",
+		evidenceKeys: []string{"pod", "phase", "ready", "restarts", "operands"},
+		exact: func(int64) map[string]string {
+			// Error and not info: the node is not mid-upgrade, which is the
+			// one thing that lowers this rule. restarts 0 says it is the
+			// not-ready half of the rule rather than the restarting one.
+			return map[string]string{
+				"pod":      "nv-faults-driver-standin",
+				"ready":    "false",
+				"restarts": "0",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-MIG-001",
+		script:       "nv-mig-001.sh",
+		severity:     "error",
+		component:    "nvidia-mig-manager",
+		evidenceKeys: []string{"nvidia.com/mig.capable", "nvidia.com/mig.config", "nvidia.com/mig.config.state"},
+		exact: func(int64) map[string]string {
+			// Error and not the rule's own warning: a config state of failed
+			// is the mig-manager saying it gave up, where pending is a change
+			// still in flight.
+			return map[string]string{
+				"nvidia.com/mig.config":       "all-1g.10gb",
+				"nvidia.com/mig.config.state": "failed",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-005",
+		script:       "nv-node-005.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"unschedulable"},
+		exact: func(int64) map[string]string {
+			return map[string]string{"unschedulable": "true"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
 		code:         "NV-OP-002",
 		script:       "nv-op-002.sh",
 		severity:     "info",
@@ -253,6 +368,37 @@ var faultCases = []faultCase{
 		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter"},
 		exact: func(int64) map[string]string {
 			return map[string]string{"nvidia.com/gpu.deploy.dcgm-exporter": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-TOPO-001",
+		script:       "nv-topo-001.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"missing"},
+		exact: func(int64) map[string]string {
+			// The tier goes on the OTHER worker, so the node under test is
+			// the one missing it. "present" is deliberately not required: a
+			// node carrying none of the tiers in use has nothing to list, and
+			// an absent key is how that is encoded.
+			return map[string]string{"missing": "fabric.topograph.run/tier-0"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-UPG-001",
+		script:       "nv-upg-001.sh",
+		severity:     "error",
+		component:    "node",
+		evidenceKeys: []string{"nvidia.com/gpu-driver-upgrade-state", "upgradeStuckAfter"},
+		exact: func(int64) map[string]string {
+			// Error and not the rule's own warning: upgrade-failed is the
+			// upgrade controller saying it gave up, where the stuck states
+			// are reported against a window and need an event to date them.
+			return map[string]string{"nvidia.com/gpu-driver-upgrade-state": "upgrade-failed"}
 		},
 		appear: faultAppear,
 		clear:  faultClear,

@@ -53,14 +53,22 @@ trap 'rm -rf "${WORK}"' EXIT
 # Every script in the directory, so that a new one added without a guard fails
 # the tables below rather than being quietly exempt from them.
 SCRIPTS=(
+    nv-cd-001.sh
+    nv-ctk-001.sh
     nv-dcgm-001.sh
     nv-dp-001.sh
+    nv-dra-001.sh
+    nv-drv-001.sh
+    nv-mig-001.sh
     nv-node-001.sh
     nv-node-002.sh
     nv-node-003.sh
     nv-node-004.sh
+    nv-node-005.sh
     nv-op-001.sh
     nv-op-002.sh
+    nv-topo-001.sh
+    nv-upg-001.sh
 )
 
 # The distinctive fixture values. None of them is a value a healthy lane would
@@ -172,8 +180,39 @@ esac
 verb="${rest[0]:-}"
 kind="${rest[1]:-}"
 
+if [ "${verb}" = "get" ] && [ "${kind}" = "nodes" ]; then
+    # The worker list NV-TOPO-001 reads to find the node's peers.
+    printf '%s\n' "${FAKE_WORKERS:-kubectl-nv-faults-worker
+kubectl-nv-faults-worker2}"
+    exit 0
+fi
+
+if [ "${verb}" = "get" ] && [ "${kind}" = "crd" ]; then
+    case "$*" in
+        *Established*)
+            printf '%s' "${FAKE_CRD_ESTABLISHED:-True}"
+            exit 0
+            ;;
+    esac
+    printf '%s' "${FAKE_CRD:-}"
+    exit 0
+fi
+
+if [ "${verb}" = "get" ] && [ "${kind}" = "resourceslice" ]; then
+    printf '%s' "${FAKE_SLICE:-}"
+    exit 0
+fi
+
+if [ "${verb}" = "cordon" ] || [ "${verb}" = "uncordon" ]; then
+    exit 0
+fi
+
 if [ "${verb}" = "get" ] && [ "${kind}" = "node" ]; then
     case "$*" in
+        *unschedulable*)
+            printf '%s' "${FAKE_UNSCHEDULABLE:-}"
+            exit 0
+            ;;
         *" -o name"*)
             [ "${FAKE_NODE_EXISTS:-1}" = "1" ] || exit 1
             printf 'node/%s\n' "${rest[2]:-}"
@@ -270,9 +309,26 @@ if [ "${verb}" = "get" ] && [ "${kind}" = "pod" ]; then
             exit 0
             ;;
     esac
+    case "$*" in
+        *'jsonpath={.spec.containers[0].image}'*)
+            printf '%s' "${FAKE_OPERAND_IMAGE:-nvcr.io/nvidia/cloud-native/gpu-operator-validator:v26.3.3}"
+            exit 0
+            ;;
+    esac
+    # The fixture pods each script refuses to inject over. Each answers for
+    # itself, so a script that probed for the wrong one is not hidden by a
+    # shim that answers for every name.
     case "${rest[2]:-}" in
         nv-faults-operator-standin)
             printf '%s' "${FAKE_STANDIN:-}"
+            exit 0
+            ;;
+        nv-faults-ctk-validator)
+            printf '%s' "${FAKE_CTK_POD:-}"
+            exit 0
+            ;;
+        nv-faults-driver-standin)
+            printf '%s' "${FAKE_DRIVER_POD:-}"
             exit 0
             ;;
     esac
@@ -313,11 +369,19 @@ if [ "${verb}" = "delete" ] && [ "${kind}" = "pod" ]; then
     exit 0
 fi
 
-# apply reads a manifest on stdin; draining it keeps the writer from a SIGPIPE.
+# apply and `delete -f -` read a manifest on stdin; draining it keeps the
+# writer from a SIGPIPE, and recording it is how a test checks what was applied.
 if [ "${verb}" = "apply" ]; then
-    cat > "${FAKE_APPLIED:-/dev/null}"
+    cat >> "${FAKE_APPLIED:-/dev/null}"
     exit 0
 fi
+
+case "${verb} ${kind}" in
+    "delete -f")
+        cat >> "${FAKE_DELETED:-/dev/null}"
+        exit 0
+        ;;
+esac
 
 exit 0
 SHIM
@@ -441,13 +505,20 @@ reset() {
     unset FAKE_NODE_EXISTS FAKE_CAPACITY FAKE_ALLOCATABLE FAKE_STANDIN \
         FAKE_OPERATOR_PODS FAKE_POD_READY FAKE_DEPLOY_READY FAKE_PODS \
         FAKE_TEMPLATE_IMAGE FAKE_POD_NODE FAKE_POD_UID FAKE_SERVER \
-        FAKE_APPLIED FAKE_POLICY_VERSION FAKE_POLICY_STATE FAKE_POD_STICKY
+        FAKE_POLICY_VERSION FAKE_POLICY_STATE \
+        FAKE_POD_STICKY FAKE_UNSCHEDULABLE FAKE_CRD FAKE_CRD_ESTABLISHED \
+        FAKE_SLICE FAKE_WORKERS FAKE_CTK_POD FAKE_DRIVER_POD FAKE_OPERAND_IMAGE
     export FAULTS_READY_TIMEOUT=10
     export FAULTS_READY_POLL=1
     export FAULTS_TEMPLATE_TIMEOUT=10
     export FAULTS_TEMPLATE_POLL=1
     export FAULTS_DRAIN_TIMEOUT=10
     export FAULTS_DRAIN_POLL=1
+    export FAULTS_CRD_TIMEOUT=10
+    export FAULTS_CRD_POLL=1
+    rm -f "${WORK}/applied.yaml" "${WORK}/deleted.yaml"
+    export FAKE_APPLIED="${WORK}/applied.yaml"
+    export FAKE_DELETED="${WORK}/deleted.yaml"
     export FAKE_CONTEXT="kind-kubectl-nv-faults"
     export FAKE_NS_UID="uid-lane-a"
     export FAKE_LABEL_VALUE="${SAVED_LABEL}"
@@ -478,6 +549,11 @@ inject_fixture() {
         nv-node-004.sh) export FAKE_LABEL_VALUE="4" ;;
         nv-dp-001.sh | nv-dcgm-001.sh | nv-op-001.sh) export FAKE_POLICY_VERSION="${SAVED_VERSION}" ;;
         nv-node-001.sh) export FAKE_LABEL_VALUE="true" ;;
+        # The four codes whose injection is a label the lane does not yet
+        # carry: an upgrade state, a MIG config, a fabric tier. An empty
+        # reading is what lets inject proceed, and it is also the value the
+        # recovery has to put back, which is a removal rather than a write.
+        nv-upg-001.sh | nv-mig-001.sh | nv-topo-001.sh | nv-drv-001.sh) export FAKE_LABEL_VALUE="" ;;
         *) export FAKE_LABEL_VALUE="${SAVED_LABEL}" ;;
     esac
 }
@@ -775,19 +851,18 @@ assert_logged "get daemonset nvidia-device-plugin-daemonset" \
 # -- nv-node-001.sh: the operator, the stand-in and the label --------------
 reset
 export FAKE_LABEL_VALUE="true"
-export FAKE_APPLIED="${WORK}/standin.yaml"
 invoke "nv-node-001.sh" "inject" "${NODE}"
 assert_rc 0 "nv-node-001.sh injects"
 assert_call "scale deploy/gpu-operator --replicas=0" "nv-node-001.sh scales the operator down"
 assert_call "label node ${NODE} nvidia.com/gpu.present- --overwrite" \
     "nv-node-001.sh clears the label the operator writes"
-if grep -q 'app: gpu-operator' "${WORK}/standin.yaml" 2> /dev/null; then
+if grep -q 'app: gpu-operator' "${WORK}/applied.yaml" 2> /dev/null; then
     ok "nv-node-001.sh plants a stand-in carrying the operator's own label"
 else
     nope "the stand-in manifest does not carry app: gpu-operator" \
-        "manifest:" "$(cat "${WORK}/standin.yaml" 2> /dev/null)"
+        "manifest:" "$(cat "${WORK}/applied.yaml" 2> /dev/null)"
 fi
-if grep -q "name: nv-faults-operator-standin" "${WORK}/standin.yaml" 2> /dev/null; then
+if grep -q "name: nv-faults-operator-standin" "${WORK}/applied.yaml" 2> /dev/null; then
     ok "the stand-in is the pod nv-node-001.sh later deletes"
 else
     nope "the stand-in manifest does not name nv-faults-operator-standin"
@@ -795,7 +870,6 @@ fi
 
 : > "${FAKE_CALL_LOG}"
 : > "${FAKE_SCOPED_LOG}"
-unset FAKE_APPLIED
 export FAKE_LABEL_VALUE=""
 invoke "nv-node-001.sh" "recover" "${NODE}"
 assert_rc 0 "nv-node-001.sh recovers"
@@ -855,6 +929,226 @@ assert_call "exec pod-on-node -- nvml-mock-ctl fail --gpu 0 --mode healthy" \
     "nv-node-003.sh clears the failure rather than repeating it"
 assert_no_call "exec pod-on-node -- nvml-mock-ctl fail --gpu 0 --mode ecc_uncorrectable --xid 79" \
     "nv-node-003.sh does not inject again on recover"
+
+# ---------------------------------------------------------------------------
+# The eight codes Track E2 added
+# ---------------------------------------------------------------------------
+
+# assert_applied <text> <name>
+assert_applied() {
+    if grep -qF -- "$1" "${WORK}/applied.yaml" 2> /dev/null; then
+        ok "$2"
+    else
+        nope "$2: nothing applied contains: $1" \
+            "applied:" "$(cat "${WORK}/applied.yaml" 2> /dev/null)"
+    fi
+}
+
+# assert_deleted <text> <name>
+assert_deleted() {
+    if grep -qF -- "$1" "${WORK}/deleted.yaml" 2> /dev/null; then
+        ok "$2"
+    else
+        nope "$2: nothing deleted contains: $1" \
+            "deleted:" "$(cat "${WORK}/deleted.yaml" 2> /dev/null)"
+    fi
+}
+
+# -- nv-upg-001.sh: the upgrade state label --------------------------------
+reset
+export FAKE_LABEL_VALUE=""
+invoke "nv-upg-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-upg-001.sh injects"
+assert_call "label node ${NODE} nvidia.com/gpu-driver-upgrade-state=upgrade-failed --overwrite" \
+    "nv-upg-001.sh writes the state the rule reports at error"
+
+: > "${FAKE_SCOPED_LOG}"
+export FAKE_LABEL_VALUE="upgrade-failed"
+invoke "nv-upg-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-upg-001.sh recovers"
+assert_call "label node ${NODE} nvidia.com/gpu-driver-upgrade-state- --overwrite" \
+    "nv-upg-001.sh removes a label the node did not carry before"
+assert_no_call "label node ${NODE} nvidia.com/gpu-driver-upgrade-state=upgrade-done --overwrite" \
+    "nv-upg-001.sh does not invent an upgraded state"
+
+reset
+export FAKE_LABEL_VALUE="pod-restart-required"
+invoke "nv-upg-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-upg-001.sh refuses a node that is already mid-upgrade"
+assert_no_writes "nv-upg-001.sh writes nothing to a node mid-upgrade"
+
+# -- nv-mig-001.sh: the two MIG labels -------------------------------------
+reset
+export FAKE_LABEL_VALUE=""
+invoke "nv-mig-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-mig-001.sh injects"
+assert_call "label node ${NODE} nvidia.com/mig.config=all-1g.10gb --overwrite" \
+    "nv-mig-001.sh asks for a profile"
+assert_call "label node ${NODE} nvidia.com/mig.config.state=failed --overwrite" \
+    "nv-mig-001.sh says the attempt failed"
+
+: > "${FAKE_SCOPED_LOG}"
+export FAKE_LABEL_VALUE="failed"
+invoke "nv-mig-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-mig-001.sh recovers"
+assert_call "label node ${NODE} nvidia.com/mig.config- --overwrite" \
+    "nv-mig-001.sh removes the config label it added"
+assert_call "label node ${NODE} nvidia.com/mig.config.state- --overwrite" \
+    "nv-mig-001.sh removes the state label it added"
+
+reset
+export FAKE_LABEL_VALUE="all-1g.5gb"
+invoke "nv-mig-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-mig-001.sh refuses a node already asking for a profile"
+assert_no_writes "nv-mig-001.sh writes nothing to a node mid-change"
+
+# -- nv-node-005.sh: the cordon --------------------------------------------
+reset
+invoke "nv-node-005.sh" "inject" "${NODE}"
+assert_rc 0 "nv-node-005.sh injects"
+assert_call "cordon ${NODE}" "nv-node-005.sh cordons the node"
+
+: > "${FAKE_SCOPED_LOG}"
+export FAKE_UNSCHEDULABLE="true"
+invoke "nv-node-005.sh" "recover" "${NODE}"
+assert_rc 0 "nv-node-005.sh recovers"
+assert_call "uncordon ${NODE}" "nv-node-005.sh uncordons the node"
+
+reset
+export FAKE_UNSCHEDULABLE="true"
+invoke "nv-node-005.sh" "inject" "${NODE}"
+assert_rc 5 "nv-node-005.sh refuses a node somebody else cordoned"
+assert_no_call "cordon ${NODE}" "nv-node-005.sh cordons nothing twice"
+
+# -- nv-topo-001.sh: the tier goes on the PEER -----------------------------
+reset
+export FAKE_LABEL_VALUE=""
+invoke "nv-topo-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-topo-001.sh injects"
+assert_call "label node ${OTHER_NODE} fabric.topograph.run/tier-0=nv-faults-block --overwrite" \
+    "nv-topo-001.sh labels the peer"
+assert_no_call "label node ${NODE} fabric.topograph.run/tier-0=nv-faults-block --overwrite" \
+    "nv-topo-001.sh leaves the node under test without the tier"
+
+: > "${FAKE_SCOPED_LOG}"
+export FAKE_LABEL_VALUE="nv-faults-block"
+invoke "nv-topo-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-topo-001.sh recovers"
+assert_call "label node ${OTHER_NODE} fabric.topograph.run/tier-0- --overwrite" \
+    "nv-topo-001.sh takes the tier off the peer again"
+
+reset
+export FAKE_LABEL_VALUE="already-in-a-block"
+invoke "nv-topo-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-topo-001.sh refuses a node that already carries the tier"
+assert_no_writes "nv-topo-001.sh labels nothing when the node is already in the fabric"
+
+reset
+export FAKE_LABEL_VALUE=""
+export FAKE_WORKERS="${NODE}"
+invoke "nv-topo-001.sh" "inject" "${NODE}"
+assert_rc 2 "nv-topo-001.sh refuses a lane with no peer worker"
+assert_no_writes "nv-topo-001.sh labels nothing without a peer"
+
+# -- nv-ctk-001.sh: the validator-shaped fixture ---------------------------
+reset
+invoke "nv-ctk-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-ctk-001.sh injects"
+assert_applied "name: nv-faults-ctk-validator" "nv-ctk-001.sh applies the validator stand-in"
+assert_applied "name: toolkit-validation" "the stand-in carries the init container the rule reads"
+assert_applied "restartPolicy: Always" "the stand-in uses the restart policy the rule is written for"
+assert_applied "nodeName: ${NODE}" "the stand-in is pinned to the node"
+assert_applied "image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v26.3.3" \
+    "the stand-in borrows the validator image off the lane rather than pulling one"
+
+: > "${FAKE_SCOPED_LOG}"
+invoke "nv-ctk-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-ctk-001.sh recovers"
+assert_deleted "name: nv-faults-ctk-validator" "nv-ctk-001.sh deletes the stand-in"
+
+reset
+export FAKE_CTK_POD="nv-faults-ctk-validator"
+invoke "nv-ctk-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-ctk-001.sh refuses when its stand-in is already there"
+
+# -- nv-drv-001.sh: the failing driver fixture -----------------------------
+reset
+export FAKE_LABEL_VALUE=""
+invoke "nv-drv-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-drv-001.sh injects"
+assert_applied "app: nvidia-driver-daemonset" "the fixture carries the first driver label"
+assert_applied "app.kubernetes.io/component: nvidia-driver" "the fixture carries the second"
+assert_applied "image: registry.invalid/nv-faults/driver:v0.0.0-absent" \
+    "the fixture points at an image that cannot be pulled"
+
+: > "${FAKE_SCOPED_LOG}"
+invoke "nv-drv-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-drv-001.sh recovers"
+assert_deleted "name: nv-faults-driver-standin" "nv-drv-001.sh deletes the fixture"
+assert_call "label node ${NODE} nvidia.com/gpu.deploy.driver- --overwrite" \
+    "nv-drv-001.sh removes a deploy label the node did not carry"
+
+# A node told not to run a driver is told it should, and told again afterwards.
+reset
+export FAKE_LABEL_VALUE="false"
+invoke "nv-drv-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-drv-001.sh injects over a disabled driver operand"
+assert_call "label node ${NODE} nvidia.com/gpu.deploy.driver=true --overwrite" \
+    "nv-drv-001.sh makes the operand count as wanted"
+
+: > "${FAKE_SCOPED_LOG}"
+invoke "nv-drv-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-drv-001.sh recovers the disabled operand"
+assert_call "label node ${NODE} nvidia.com/gpu.deploy.driver=false --overwrite" \
+    "nv-drv-001.sh puts the deploy label back the way it found it"
+
+# -- nv-dra-001.sh: the ResourceSlice --------------------------------------
+reset
+invoke "nv-dra-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-dra-001.sh injects"
+assert_applied "driver: gpu.nvidia.com" "the slice names the driver the rule looks for"
+assert_applied "nodeName: ${NODE}" "the slice names the node"
+
+: > "${FAKE_SCOPED_LOG}"
+invoke "nv-dra-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-dra-001.sh recovers"
+assert_deleted "name: nv-faults-dra-slice" "nv-dra-001.sh deletes the slice"
+
+reset
+export FAKE_SLICE="nv-faults-dra-slice"
+invoke "nv-dra-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-dra-001.sh refuses when its slice is already there"
+
+# -- nv-cd-001.sh: the CRD, the domain, its status and the IMEX pod --------
+reset
+invoke "nv-cd-001.sh" "inject" "${NODE}"
+assert_rc 0 "nv-cd-001.sh injects"
+assert_applied "name: computedomains.resource.nvidia.com" "nv-cd-001.sh applies the CRD"
+assert_applied "name: nv-faults-compute-domain" "nv-cd-001.sh creates the ComputeDomain"
+assert_applied "resource.nvidia.com/computeDomain:" "nv-cd-001.sh applies the IMEX daemon fixture"
+assert_logged "--subresource=status" "the domain status is written through its subresource"
+assert_logged "\"name\":\"${NODE}\"" "the domain status names the node"
+assert_logged "\"status\":\"NotReady\"" "the node entry is NotReady"
+
+: > "${FAKE_SCOPED_LOG}"
+invoke "nv-cd-001.sh" "recover" "${NODE}"
+assert_rc 0 "nv-cd-001.sh recovers"
+assert_deleted "name: computedomains.resource.nvidia.com" "nv-cd-001.sh deletes the CRD"
+assert_deleted "name: nv-faults-imex-daemon" "nv-cd-001.sh deletes the IMEX fixture"
+
+reset
+export FAKE_CRD="computedomains.resource.nvidia.com"
+invoke "nv-cd-001.sh" "inject" "${NODE}"
+assert_rc 5 "nv-cd-001.sh refuses a lane that already serves the kind"
+assert_no_writes "nv-cd-001.sh applies nothing over an existing CRD"
+
+reset
+export FAKE_CRD_ESTABLISHED="False"
+export FAULTS_CRD_TIMEOUT=0
+export FAULTS_CRD_POLL=0
+invoke "nv-cd-001.sh" "inject" "${NODE}"
+assert_rc 1 "nv-cd-001.sh fails when the kind is never established"
+assert_says "was not established within" "nv-cd-001.sh says what it was waiting for"
 
 # ---------------------------------------------------------------------------
 # Node targeting

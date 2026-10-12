@@ -1,0 +1,30 @@
+# A driver pod that never becomes ready, for the NV-DRV-001 reproduction.
+#
+# The failing variant of test/e2e/testdata/driver-standin.yaml: the same two
+# labels, which is how pkg/inventory classifies a driver pod, and an image tag
+# that cannot be pulled, so the pod stays Pending and not ready. Nothing is
+# downloaded: a registry that does not resolve fails faster than one that
+# refuses, and the pod's state is the same either way.
+#
+# A pod and not a DaemonSet. The rule reads the driver pods on one node, the
+# test injects into one node, and a DaemonSet would put a second broken pod on
+# the other worker for no extra coverage.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nv-faults-driver-standin
+  namespace: __NAMESPACE__
+  labels:
+    app: nvidia-driver-daemonset
+    app.kubernetes.io/component: nvidia-driver
+    nv.example/faults-fixture: "nv-drv-001"
+spec:
+  nodeName: __NODE__
+  restartPolicy: Never
+  terminationGracePeriodSeconds: 1
+  tolerations:
+    - operator: Exists
+  containers:
+    - name: nvidia-driver-ctr
+      image: registry.invalid/nv-faults/driver:v0.0.0-absent
+      imagePullPolicy: Always
