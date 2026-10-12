@@ -34,7 +34,7 @@ import (
 // command answers on a laptop with no network and a kubeconfig that points
 // nowhere, which is the situation a support engineer reading a finding code is
 // usually in.
-func NewCommand(_ *cmd.Options) *cobra.Command {
+func NewCommand(o *cmd.Options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "explain CODE",
 		Short: "Explain a finding code reported by kubectl nv health",
@@ -54,11 +54,13 @@ func NewCommand(_ *cmd.Options) *cobra.Command {
 				return unknownCode(args[0])
 			}
 
-			// Written to the command's own stream rather than to the options'
-			// streams, so that cobra's SetOut and a kubectl pipeline both land
-			// in the same place. Nothing goes to stderr on success: piping
-			// this into a pager should get the document and only the document.
-			_, err := fmt.Fprint(c.OutOrStdout(), entry)
+			// Written to the options' output stream, which is the process's
+			// stdout. cobra's own stream is not it: main points that at stderr
+			// so that usage lands there, and a document printed through it
+			// makes "kubectl nv explain NV-NODE-002 > entry.md" write an empty
+			// file. Nothing goes to stderr on success: piping this into a pager
+			// should get the document and only the document.
+			_, err := fmt.Fprint(o.Streams.Out, entry)
 			if err != nil {
 				return fmt.Errorf("writing the catalog entry for %s: %w", args[0], err)
 			}

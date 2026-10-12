@@ -63,7 +63,7 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 						"--write-dir writes every registered kind: it cannot be given %q as well", args[0])
 				}
 
-				return writeAllTo(c, registry, writeDir)
+				return writeAllTo(o, registry, writeDir)
 			}
 
 			if len(args) == 0 {
@@ -74,7 +74,11 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 			if err != nil {
 				return err
 			}
-			if _, err := c.OutOrStdout().Write(raw); err != nil {
+			// The options' output stream, which is the process's stdout.
+			// cobra's own stream is not it: main points that at stderr so that
+			// usage lands there, and a schema printed through it is a schema no
+			// pipeline receives.
+			if _, err := o.Streams.Out.Write(raw); err != nil {
 				return fmt.Errorf("writing the schema: %w", err)
 			}
 
@@ -97,13 +101,13 @@ func newCommandFor(o *cmd.Options, registry *output.SchemaRegistry) *cobra.Comma
 
 // writeAllTo writes every schema and reports what it wrote on the error
 // stream, which is where progress belongs.
-func writeAllTo(c *cobra.Command, registry *output.SchemaRegistry, dir string) error {
+func writeAllTo(o *cmd.Options, registry *output.SchemaRegistry, dir string) error {
 	written, err := WriteAll(registry, dir)
 	if err != nil {
 		return err
 	}
 	for _, path := range written {
-		fmt.Fprintf(c.ErrOrStderr(), "wrote %s\n", path)
+		fmt.Fprintf(o.Streams.ErrOut, "wrote %s\n", path)
 	}
 
 	return nil

@@ -60,6 +60,11 @@ func TestRootRejectsUnparseableDebugEnvironment(t *testing.T) {
 }
 
 // TestVersionIsReported covers both ways a user asks for the version.
+//
+// The buffer is the IOStreams output as well as cobra's. The version is the
+// command's data and goes to the former, which is the process's stdout; cobra's
+// own stream is where main puts usage, and reading only that is how the version
+// went to stderr unnoticed.
 func TestVersionIsReported(t *testing.T) {
 	isolateKubeconfig(t)
 
@@ -67,7 +72,7 @@ func TestVersionIsReported(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			out := &bytes.Buffer{}
 			cmd := root.NewCommand("v1.2.3-test", root.Deps{
-				Streams:    genericiooptions.NewTestIOStreamsDiscard(),
+				Streams:    genericiooptions.IOStreams{In: strings.NewReader(""), Out: out, ErrOut: out},
 				MustGather: func(*mustgather.Options) error { return nil },
 			})
 			cmd.SetArgs(args)
