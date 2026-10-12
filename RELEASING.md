@@ -163,6 +163,7 @@ on a pull request decides where it appears:
 | `bug` | Fixes |
 | `documentation` | Documentation |
 | `dependencies` | Dependencies, applied by Dependabot already |
+| `maintenance` | Maintenance |
 | `skip-changelog` | nowhere: the pull request is left out of the notes |
 
 A pull request carrying none of these lands under Other changes, which is the
@@ -176,28 +177,21 @@ labelled both `bug` and `documentation` appears under Fixes.
 
 ### Creating the labels, once
 
-The labels have to exist on the repository before they can be applied. This
-is run once, by a maintainer with write access:
+`feature`, `bug`, `documentation`, `dependencies` and `maintenance` already
+exist on the repository. Two of the labels the notes use do not, and have to be
+created before a pull request can carry them. This is run once, by a maintainer
+with write access:
 
 ```bash
 gh label create breaking-change --repo NVIDIA/kubectl-nv \
   --color d73a4a --description "Changes behaviour that users depend on"
-gh label create feature --repo NVIDIA/kubectl-nv \
-  --color 0e8a16 --description "New functionality"
-gh label create bug --repo NVIDIA/kubectl-nv \
-  --color d93f0b --description "Fixes a defect"
-gh label create documentation --repo NVIDIA/kubectl-nv \
-  --color 0075ca --description "Documentation only"
-gh label create dependencies --repo NVIDIA/kubectl-nv \
-  --color 0366d6 --description "Dependency updates"
 gh label create skip-changelog --repo NVIDIA/kubectl-nv \
   --color ededed --description "Keep out of the release notes"
 ```
 
-Without `--force`, `gh label create` leaves a label that already exists alone,
-which is what you want if the repository picked up `bug` or `documentation`
-from GitHub's defaults. Add `--force` only when the colour or the description
-of an existing label is the thing you mean to change.
+`gh label create --help` describes the command as creating a new label, or
+updating an existing one with `--force`, so without `--force` a label that is
+already there is not changed.
 
 `gh label list --repo NVIDIA/kubectl-nv` shows the result.
 
