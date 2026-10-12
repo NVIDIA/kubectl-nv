@@ -57,15 +57,26 @@ func everyNode(in health.Input) []inventory.GPUNode {
 // midUpgrade reports whether the GPU Operator's upgrade controller is in the
 // middle of replacing the node's driver.
 //
-// An empty label is a node no upgrade has touched, and upgrade-done is one the
-// controller has finished with. Everything between them is the controller
-// deliberately taking the driver down and putting it back, which is why a
-// driver pod that is not ready during one is information rather than a fault:
-// reporting an error would make every rolling driver upgrade in the fleet look
-// like an outage, and NV-UPG-001 is the rule that says whether the upgrade
-// itself is in trouble.
+// Three states are not an upgrade in progress: the empty label, which is a
+// node no upgrade has touched, and the two terminal ones. Everything else is
+// the controller deliberately taking the driver down and putting it back,
+// which is why a driver pod that is not ready during one is information rather
+// than a fault: reporting an error would make every rolling driver upgrade in
+// the fleet look like an outage, and NV-UPG-001 is the rule that says whether
+// the upgrade itself is in trouble.
+//
+// upgrade-failed is terminal and the exclusion matters most there. It is the
+// state of a node whose upgrade is over and did not work, which is exactly
+// when a driver that will not come up is a fault rather than a step: counting
+// it as mid-upgrade lowered the worst case to info and hid it behind the rule
+// meant to excuse a rollout.
 func midUpgrade(node inventory.GPUNode) bool {
-	return node.UpgradeState != "" && node.UpgradeState != upgradeStateDone
+	switch node.UpgradeState {
+	case "", upgradeStateDone, upgradeStateFailed:
+		return false
+	default:
+		return true
+	}
 }
 
 // insideWindow reports whether a termination happened within d of now.

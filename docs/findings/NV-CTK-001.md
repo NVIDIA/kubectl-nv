@@ -9,9 +9,12 @@ The operator's validator pod on the node has an init container named
 is being restarted after.
 
 The container toolkit is what makes a GPU reachable from inside a
-container. When its validation fails the node keeps advertising its
-GPUs and every pod placed on it fails to start, which is the worst shape
-a GPU node can be in: the scheduler still believes it.
+container. When its validation fails the device plugin never starts, so
+the node stops advertising `nvidia.com/gpu` and drops out of the GPU
+inventory into the hinted one: a node that was running work a minute ago
+now looks, to anything reading capacity alone, like a node that never
+had GPUs at all. That is why this rule checks the hinted nodes as well,
+and why NV-NODE-002 usually fires on the same node without saying why.
 
 The validator runs one init container per thing it validates and carries
 each verdict in that container's exit code rather than in a log line,

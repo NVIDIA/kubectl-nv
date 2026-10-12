@@ -39,9 +39,10 @@ const reasonCrashLoop = "CrashLoopBackOff"
 // non-zero on the node.
 //
 // The container toolkit is what makes a GPU reachable from inside a container.
-// When its validation fails the node keeps advertising its GPUs and every pod
-// placed on it fails to start, which is the worst shape a GPU node can be in:
-// the scheduler still believes it.
+// When its validation fails the device plugin never starts, so the node stops
+// advertising nvidia.com/gpu and drops out of the GPU inventory into the
+// hinted one: a node that was running work a minute ago and now looks, to
+// anything reading capacity alone, like a node that never had GPUs at all.
 //
 // The finding names the toolkit rather than the validator. The validator is
 // the messenger, and a reader sent to nvidia-operator-validator spends the
