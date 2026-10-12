@@ -94,6 +94,7 @@ func TestReleaseNotesCategories(t *testing.T) {
 		{"Fixes", []string{"bug"}},
 		{"Documentation", []string{"documentation"}},
 		{"Dependencies", []string{"dependencies"}},
+		{"Maintenance", []string{"maintenance"}},
 		{"Other changes", []string{"*"}},
 	}
 
