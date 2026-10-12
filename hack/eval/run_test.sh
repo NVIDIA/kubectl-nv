@@ -247,6 +247,9 @@ ls -A | sort | while read -r e; do echo "claude-sees ${e}" >> "${CALL_LOG}"; don
 if [ -L ./kubectl-nv ]; then
     echo "claude-sees-symlink kubectl-nv" >> "${CALL_LOG}"
 fi
+if grep -q '^kind: Config' ./kubeconfig 2> /dev/null; then
+    echo "claude-sees-minified-kubeconfig" >> "${CALL_LOG}"
+fi
 cat > /dev/null
 
 if [ -f "${OVERRIDE_DIR}/.hang" ]; then
@@ -660,6 +663,12 @@ assert_eq "${SEEN}" "SKILL.md kubeconfig kubectl-nv" \
 assert_not_logged "claude-sees-symlink" \
     "the binary in the case directory is a copy, not a link out of it"
 
+# The agent is handed `config view --minify --flatten`, not the lane file:
+# the minified form carries this one context and the credentials it needs,
+# and nothing else the file happens to hold.
+assert_eq "$(grep -c '^claude-sees-minified-kubeconfig$' "${EVAL_CALL_LOG}")" "5" \
+    "the kubeconfig handed over is the minified, flattened view"
+
 CWDS="$(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u | wc -l | tr -d ' ')"
 assert_eq "${CWDS}" "5" "each case gets its own working directory"
 
@@ -700,12 +709,12 @@ fi
 assert_eq "$(grep -c '^claude-env KUBECONFIG=./kubeconfig$' "${EVAL_CALL_LOG}")" "5" \
     "KUBECONFIG points at the copy in the case directory"
 
-CASE_DIR_SAMPLE="$(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | head -1 | awk '{print $2}')"
-if [ -n "${CASE_DIR_SAMPLE}" ] && [ -e "${CASE_DIR_SAMPLE}" ]; then
-    nope "the case directory ${CASE_DIR_SAMPLE} survived the run"
-else
-    ok "the case directories are removed when the run ends"
-fi
+SURVIVING=0
+while IFS= read -r d; do
+    [ -n "${d}" ] || continue
+    [ -e "${d}" ] && SURVIVING=$((SURVIVING + 1))
+done < <(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u)
+assert_eq "${SURVIVING}" "0" "every case directory is removed when the run ends"
 
 # ---------------------------------------------------------------------------
 echo "# the default agent command is a command line that runs"
@@ -914,8 +923,23 @@ assert_eq "$(grep -c '^fault .* recover ' "${EVAL_CALL_LOG}")" "1" \
 LEFTOVER="$(find "${STATE_DIR}" -name 'NV-*' 2> /dev/null | wc -l | tr -d ' ')"
 assert_eq "${LEFTOVER}" "0" "an interrupted run leaves no fault injected"
 
-STRAY="$(find "${TMPDIR:-/tmp}" -maxdepth 2 -path '*kubectl-nv-eval-case.*' -name 'kubeconfig' 2> /dev/null | wc -l | tr -d ' ')"
-assert_eq "${STRAY}" "0" "an interrupted run leaves no copy of the lane kubeconfig behind"
+# The directories this run actually used, read out of its own call log. A
+# glob over TMPDIR would also count the directories another process is using
+# right now, which makes the check fail for reasons that have nothing to do
+# with the subject, and would miss a leak at a different depth.
+STRAY=0
+STRAY_CHECKED=0
+while IFS= read -r d; do
+    [ -n "${d}" ] || continue
+    STRAY_CHECKED=$((STRAY_CHECKED + 1))
+    [ -e "${d}" ] && STRAY=$((STRAY + 1))
+    [ -e "${d}/kubeconfig" ] && STRAY=$((STRAY + 1))
+done < <(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u)
+if [ "${STRAY_CHECKED}" -lt 1 ]; then
+    nope "the interrupted run recorded no case directory, so the leak check proves nothing"
+else
+    assert_eq "${STRAY}" "0" "an interrupted run leaves no copy of the lane kubeconfig behind"
+fi
 
 # ---------------------------------------------------------------------------
 echo "# the harness refuses to run where it must not"
