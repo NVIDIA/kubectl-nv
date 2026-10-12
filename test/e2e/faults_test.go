@@ -353,9 +353,19 @@ var faultCases = []faultCase{
 		script:       "nv-node-005.sh",
 		severity:     "info",
 		component:    "node",
-		evidenceKeys: []string{"unschedulable"},
+		evidenceKeys: []string{"condition", "status", "reason", "message", "since"},
 		exact: func(int64) map[string]string {
-			return map[string]string{"unschedulable": "true"}
+			// The condition half rather than the cordon half. Both are this
+			// code at info on the same node, and the injection produces both;
+			// the condition is the one with something to get wrong, because
+			// the rule recognises it by the reason being the condition's own
+			// type with IsNotHealthy appended. A matcher that ignored the
+			// reason would accept any condition at all.
+			return map[string]string{
+				"condition": "GPUXidError",
+				"status":    "True",
+				"reason":    "GPUXidErrorIsNotHealthy",
+			}
 		},
 		appear: faultAppear,
 		clear:  faultClear,

@@ -15,16 +15,26 @@
 #
 # NV-NODE-005: an NVSentinel check is failing, or the node is cordoned.
 #
-# Injection: cordon the node. Of the rule's two halves this is the one a lane
-# can produce honestly: the other reads a node condition NVSentinel writes, and
-# NVSentinel is not installed here, so reproducing it would mean writing a
-# condition in its name and then checking that the rule reads what this script
-# wrote. E2's unit tests cover that half against a table.
+# Injection: both halves of the rule. The node is cordoned, and a node
+# condition in the shape NVSentinel writes is patched onto its status.
+#
+# The condition is a strategic merge patch against the status subresource, and
+# both words matter. A merge patch replaces the whole conditions list, which
+# would take Ready with it and have the kubelet evict the lane's pods before it
+# put them back; a strategic merge patch has conditions keyed by type, so it
+# adds one and leaves the rest alone. Observed on a t4 lane on 2026-10-12:
+# after the patch the node carried GPUXidError, MemoryPressure, DiskPressure,
+# PIDPressure and Ready, the new condition was still there two minutes later
+# across six readings, and a delete patch took it off again leaving the other
+# four.
 #
 # Cordoning adds the node.kubernetes.io/unschedulable taint, which every
 # operand DaemonSet tolerates by default, so the operands stay where they are
 # and no other rule changes its mind. The node keeps its GPUs and its labels;
 # what changes is that nothing new is placed on it.
+#
+# Two findings come out of this, both at info and both this code: one for the
+# condition and one for the cordon.
 #
 # Usage: hack/mokka/faults/nv-node-005.sh inject|recover <node>
 
@@ -37,6 +47,12 @@ FAULTS_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${FAULTS_SCRIPT_DIR}/lib.sh"
 
 faults::init "NV-NODE-005" "$@"
+
+# The condition NVSentinel would write. The rule recognises one by its reason
+# being the condition's own type with IsNotHealthy appended, which is the shape
+# NVSentinel uses, so the type here decides both strings.
+CONDITION="GPUXidError"
+MESSAGE="injected by hack/mokka/faults/nv-node-005.sh"
 
 inject() {
     faults::refuse_double_inject
@@ -56,6 +72,12 @@ inject() {
 
     k cordon "${FAULTS_NODE}" > /dev/null
     faults::note "NV-NODE-005: ${FAULTS_NODE} cordoned"
+
+    local now
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    k patch node "${FAULTS_NODE}" --subresource=status --type=strategic \
+        -p "{\"status\":{\"conditions\":[{\"type\":\"${CONDITION}\",\"status\":\"True\",\"reason\":\"${CONDITION}IsNotHealthy\",\"message\":\"${MESSAGE}\",\"lastHeartbeatTime\":\"${now}\",\"lastTransitionTime\":\"${now}\"}]}}" > /dev/null
+    faults::note "NV-NODE-005: ${CONDITION} is True on ${FAULTS_NODE}"
 }
 
 recover() {
@@ -72,6 +94,12 @@ recover() {
     if [ "${saved}" = "true" ]; then
         faults::die 1 "saved state says ${FAULTS_NODE} was already cordoned, which inject refuses; not uncordoning it"
     fi
+
+    # The condition goes first. A node left carrying it after the cordon came
+    # off is still reported, and the code is what the recovery is measured by.
+    k patch node "${FAULTS_NODE}" --subresource=status --type=strategic \
+        -p "{\"status\":{\"conditions\":[{\"type\":\"${CONDITION}\",\"\$patch\":\"delete\"}]}}" > /dev/null
+    faults::note "NV-NODE-005: ${CONDITION} removed from ${FAULTS_NODE}"
 
     k uncordon "${FAULTS_NODE}" > /dev/null
     faults::forget

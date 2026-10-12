@@ -23,8 +23,16 @@
 #
 # A fixture and not the real validator. The lane disables the container toolkit
 # in its values, so there is nothing to break through the ClusterPolicy, and
-# the validator the operator runs has no toolkit verdict to spoil. The fixture
-# borrows the validator's own image off the lane, so nothing is pulled.
+# the validator the operator runs has no toolkit verdict to spoil.
+#
+# The image is borrowed off the lane so that nothing is pulled, and it is the
+# DEVICE PLUGIN's rather than the validator's. The validator runs the operator
+# image, which carries no shell: a container whose command cannot be executed
+# fails with RunContainerError and a last termination whose reason is
+# StartError, and the rule reads a last termination only under
+# CrashLoopBackOff, so that injection produced no finding at all. Measured on a
+# t4 lane on 2026-10-12. The device plugin image has /bin/sh and exits with the
+# code it is given.
 #
 # The rule reads the FIRST validator pod on the node, pkg/inventory sorting a
 # node's operands by name, and the fixture is named to sort before the real
@@ -56,14 +64,14 @@ inject() {
     fi
 
     local image
-    image="$(faults::operand_image "nvidia-operator-validator" "${FAULTS_NODE}")"
+    image="$(faults::operand_image "nvidia-device-plugin-daemonset" "${FAULTS_NODE}")"
     if [ -z "${image}" ]; then
         faults::die "${FAULTS_RC_USAGE}" \
-            "no nvidia-operator-validator pod on ${FAULTS_NODE} to borrow an image from"
+            "no nvidia-device-plugin-daemonset pod on ${FAULTS_NODE} to borrow an image from"
     fi
 
     faults::save "image" "${image}"
-    faults::note "NV-CTK-001: standing in for the validator with ${image}"
+    faults::note "NV-CTK-001: standing in for the validator, running ${image}"
 
     faults::apply_fixture "${FIXTURE}" \
         "__NODE__=${FAULTS_NODE}" \

@@ -14,7 +14,10 @@
 # terminated, it is Waiting with reason CrashLoopBackOff and the exit code of
 # the run that failed is in its last termination.
 #
-# The image is the validator's own, read off the lane, so nothing is pulled.
+# The image is read off the lane so that nothing is pulled, and it is the
+# device plugin's: the validator runs the operator image, which carries no
+# shell, and a command that cannot be executed fails with StartError rather
+# than the crash loop the rule reads.
 apiVersion: v1
 kind: Pod
 metadata:

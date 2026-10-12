@@ -311,7 +311,7 @@ if [ "${verb}" = "get" ] && [ "${kind}" = "pod" ]; then
     esac
     case "$*" in
         *'jsonpath={.spec.containers[0].image}'*)
-            printf '%s' "${FAKE_OPERAND_IMAGE:-nvcr.io/nvidia/cloud-native/gpu-operator-validator:v26.3.3}"
+            printf '%s' "${FAKE_OPERAND_IMAGE:-nvcr.io/nvidia/k8s-device-plugin:v0.19.3}"
             exit 0
             ;;
     esac
@@ -1007,12 +1007,20 @@ reset
 invoke "nv-node-005.sh" "inject" "${NODE}"
 assert_rc 0 "nv-node-005.sh injects"
 assert_call "cordon ${NODE}" "nv-node-005.sh cordons the node"
+assert_logged "--subresource=status --type=strategic" \
+    "the condition is written through the status subresource, by strategic merge"
+assert_logged '"type":"GPUXidError","status":"True","reason":"GPUXidErrorIsNotHealthy"' \
+    "the condition carries the reason the rule recognises"
 
 : > "${FAKE_SCOPED_LOG}"
 export FAKE_UNSCHEDULABLE="true"
 invoke "nv-node-005.sh" "recover" "${NODE}"
 assert_rc 0 "nv-node-005.sh recovers"
 assert_call "uncordon ${NODE}" "nv-node-005.sh uncordons the node"
+# The $patch directive is literal JSON, not a shell expansion, so the quoting
+# says so to a reader and to shellcheck both.
+assert_logged '"type":"GPUXidError","'"\$"'patch":"delete"' \
+    "the condition is taken off again rather than left behind"
 
 reset
 export FAKE_UNSCHEDULABLE="true"
@@ -1058,8 +1066,10 @@ assert_applied "name: nv-faults-ctk-validator" "nv-ctk-001.sh applies the valida
 assert_applied "name: toolkit-validation" "the stand-in carries the init container the rule reads"
 assert_applied "restartPolicy: Always" "the stand-in uses the restart policy the rule is written for"
 assert_applied "nodeName: ${NODE}" "the stand-in is pinned to the node"
-assert_applied "image: nvcr.io/nvidia/cloud-native/gpu-operator-validator:v26.3.3" \
-    "the stand-in borrows the validator image off the lane rather than pulling one"
+assert_applied "image: nvcr.io/nvidia/k8s-device-plugin:v0.19.3" \
+    "the stand-in borrows an image off the lane rather than pulling one"
+assert_logged "get pod -l app=nvidia-device-plugin-daemonset" \
+    "the image comes from a pod that has a shell, not from the validator"
 
 : > "${FAKE_SCOPED_LOG}"
 invoke "nv-ctk-001.sh" "recover" "${NODE}"
