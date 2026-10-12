@@ -101,7 +101,13 @@ func (r *NodeNoAllocatableGPUs) Evaluate(in health.Input) []output.Finding {
 
 			// Only on a MIG node, where it is the number that proves the node
 			// is not healthy-but-partitioned.
-			if isMixedMIG(node) {
+			//
+			// The question here is whether the node's status mentions MIG
+			// profiles at all, not whether it is serving any: the node this
+			// evidence matters most on is the one whose profiles have all
+			// gone unplaceable, and that is exactly the node isMixedMIG says
+			// no to. See declaresMIGResources.
+			if declaresMIGResources(node) {
 				evidence["mig.allocatable"] = itoa(mig)
 			}
 

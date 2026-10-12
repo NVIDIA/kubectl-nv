@@ -246,22 +246,47 @@ func migAllocatable(node inventory.GPUNode) int64 {
 // isMixedMIG reports whether the node advertises MIG profiles as its extended
 // resources, which is the case where GPUNode.Capacity is legitimately zero.
 //
-// Only a profile with capacity above zero counts. The kubelet does not drop a
-// removed extended resource from a node's status, it keeps it at zero, so a
-// node that was partitioned last week and is now running whole GPUs still
-// carries a nvidia.com/mig-1g.10gb entry for ever. Counting those leftovers
-// told NV-NODE-002 that a node with no allocatable GPUs was a legitimate
-// mixed-strategy node, and told NV-MIG-001 that a node advertising nothing was
-// advertising its profiles.
+// Only a profile with allocatable above zero counts, which is to say a profile
+// the device plugin is serving now.
+//
+// Capacity cannot be used, and the reason is measured rather than reasoned.
+// The kubelet never removes an extended resource from a node's status, and it
+// does not zero one either: after the device plugin on E4's MIG lane was
+// switched from --mig-strategy=mixed back to single, the node reported
+//
+//	capacity    nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 14
+//	allocatable nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 0
+//
+// and nothing ever cleared the stale key. A predicate on capacity therefore
+// called that healthy single-strategy node a mixed one for ever, which made
+// NV-MIG-001 fire on every run of a working lane. Allocatable is what drops
+// when the plugin stops serving a profile, so it is the number that says what
+// the node is advertising today.
+//
+// The number still matters as well as the predicate: a node whose profiles are
+// all unplaceable is broken in exactly the way NV-NODE-002 is about, and
+// migAllocatable is what says so. See declaresMIGResources for the question
+// "did this node ever advertise profiles", which is what the evidence needs.
 func isMixedMIG(node inventory.GPUNode) bool {
 	for _, count := range node.MIG.Resources {
-		if count.Capacity > 0 {
+		if count.Allocatable > 0 {
 			return true
 		}
 	}
 
 	return false
 }
+
+// declaresMIGResources reports whether the node's status carries any
+// nvidia.com/mig-* resource at all, placeable or not.
+//
+// It is deliberately not isMixedMIG. That one answers "is this node serving
+// MIG profiles", which decides findings; this one answers "does this node's
+// status mention MIG profiles", which decides whether the allocatable count is
+// worth printing. A node whose profiles have all gone unplaceable needs that
+// zero in its evidence most of all, and it is exactly the node isMixedMIG now
+// says no to.
+func declaresMIGResources(node inventory.GPUNode) bool { return len(node.MIG.Resources) > 0 }
 
 // setIf puts a key in an evidence map only when the value is not empty.
 // Absent is the encoding for "not there": the key is left out, never set to ""

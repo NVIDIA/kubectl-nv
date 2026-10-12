@@ -214,18 +214,18 @@ func migEvidence(node inventory.GPUNode, withResources bool) map[string]string {
 // sorted and comma joined, which is the evidence encoding for a list. It is
 // empty when there are none, and setIf then leaves the key out.
 //
-// Only a profile with capacity above zero is named, which is the same
-// predicate isMixedMIG decides the finding with. The kubelet keeps a removed
-// extended resource at zero rather than dropping it, so without the filter the
-// evidence listed leftovers the node no longer advertises: on the
-// mixed-strategy finding that contradicted the finding in its own proof, the
-// message saying the node advertises no MIG profile and the evidence naming
-// one.
+// Only a profile with allocatable above zero is named, which is the same
+// predicate isMixedMIG decides the finding with. The kubelet never removes an
+// extended resource from a node's status and does not zero its capacity
+// either, so without the filter the evidence listed leftovers the node no
+// longer serves: on the mixed-strategy finding that contradicted the finding
+// in its own proof, the message saying the node advertises no MIG profile and
+// the evidence naming one.
 func migResourceNames(node inventory.GPUNode) string {
 	names := make([]string, 0, len(node.MIG.Resources))
 
 	for name, count := range node.MIG.Resources {
-		if count.Capacity <= 0 {
+		if count.Allocatable <= 0 {
 			continue
 		}
 

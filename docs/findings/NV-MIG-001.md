@@ -31,24 +31,42 @@ backwards is the easy mistake:
 
 | Strategy | What the node advertises | Fires when |
 |---|---|---|
-| `single` | every partition as `nvidia.com/gpu`, and no `nvidia.com/mig-*` at all | the node advertises a `nvidia.com/mig-*` resource with capacity above zero, which its own strategy does not serve |
-| `mixed` | one `nvidia.com/mig-<profile>` per partition, and no `nvidia.com/gpu` | a partitioning config was applied and the node advertises no `nvidia.com/mig-*` with capacity above zero, so there is nothing a MIG workload can ask for |
+| `single` | every partition as `nvidia.com/gpu`, and no `nvidia.com/mig-*` at all | the node has a `nvidia.com/mig-*` resource with allocatable above zero, which its own strategy does not serve |
+| `mixed` | one `nvidia.com/mig-<profile>` per partition, and no `nvidia.com/gpu` | a partitioning config was applied and the node has no `nvidia.com/mig-*` with allocatable above zero, so there is nothing a MIG workload can ask for |
 | `none` | whole GPUs | never |
 
 `none` on MIG-capable hardware is the Mokka main lane, gb300 with
 `nvidia.com/mig.capable=true` and strategy `none`, and it is healthy:
 nothing was asked for and nothing is wrong.
 
-### Only a profile with capacity above zero counts
+### Only a profile with allocatable above zero counts
 
-The kubelet does not drop a removed extended resource from a node's
-status, it keeps it at zero. A node partitioned last week and running
-whole GPUs today still carries its old `nvidia.com/mig-1g.10gb` entry
-for ever, and counting that leftover reports a working single-strategy
-node as advertising profiles its strategy does not serve. The same
-predicate decides NV-NODE-002's "this node's zero `nvidia.com/gpu`
-capacity is legitimate", so the two cannot disagree about what a
-mixed-strategy node is.
+The kubelet never removes an extended resource from a node's status, and
+it does not zero one either: a stale key keeps the capacity it last had.
+Switching the device plugin on a real MIG lane from
+`--mig-strategy=mixed` back to `single` left the node reporting
+
+```text
+capacity     nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 14
+allocatable  nvidia.com/gpu 14, nvidia.com/mig-1g.10gb 0
+```
+
+and nothing ever cleared the stale key. Counting a profile by its
+capacity therefore called that healthy single-strategy node a mixed one
+for ever, and this rule fired on every run of a working lane.
+
+Allocatable is the number that drops when the device plugin stops
+serving a profile, so it is what says which profiles the node is
+advertising today. A profile at allocatable zero is not advertised,
+whatever its capacity still says, and it is neither counted nor named in
+the evidence.
+
+The same predicate decides NV-NODE-002's "this node's zero
+`nvidia.com/gpu` capacity is legitimate", so the two cannot disagree
+about what a mixed-strategy node is. That rule still prints
+`mig.allocatable` for any node whose status mentions MIG profiles at
+all, placeable or not, because a node whose profiles have all gone
+unplaceable is the one that number explains.
 
 ### Hinted nodes are checked too
 
@@ -87,7 +105,7 @@ The Mokka control plane carries no MIG labels at all.
 | `nvidia.com/mig.strategy` | `none`, `single` or `mixed`, absent when the label is not there |
 | `nvidia.com/mig.config` | the profile the mig-manager was asked for, absent when the label is not there |
 | `nvidia.com/mig.config.state` | where it got to, absent when the label is not there, which is itself the finding |
-| `migResources` | the `nvidia.com/mig-*` resources the node advertises, sorted and comma joined, absent when there are none. Strategy half only |
+| `migResources` | the `nvidia.com/mig-*` resources the node is serving, that is, those with allocatable above zero, sorted and comma joined. Absent when there are none, which a stale key at allocatable zero does not change. Strategy half only |
 | `capacity` | the `nvidia.com/gpu` capacity, base 10. Strategy half only |
 
 ## Versions
