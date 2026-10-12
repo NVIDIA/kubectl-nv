@@ -32,6 +32,9 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/spf13/cobra"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
@@ -119,8 +122,17 @@ func isolateKubeconfig(t *testing.T) string {
 func realRoot(t *testing.T) (mcp.NewRootFunc, *gatherRecorder) {
 	t.Helper()
 
+	return realRootOver(t)
+}
+
+// realRootOver is realRoot over a cluster holding the given objects, for the
+// tools that do nothing worth watching against an empty one.
+func realRootOver(t *testing.T, objects ...runtime.Object) (mcp.NewRootFunc, *gatherRecorder) {
+	t.Helper()
+
 	recorder := &gatherRecorder{}
 	factory := newFakeFactory()
+	factory.clientset = fake.NewSimpleClientset(objects...)
 
 	return func(deps mcp.CallDeps) *cobra.Command {
 		return root.NewCommand("test", root.Deps{
@@ -442,4 +454,120 @@ func resultText(result *sdk.CallToolResult) string {
 	}
 
 	return strings.Join(parts, "\n")
+}
+
+// debug is the second exec capable command of the tree, and the first that can
+// actually be served: it has a --no-exec flag, so the server forces it rather
+// than refusing the tool.
+//
+// The gate is asserted where it has to hold, which is the gather the call
+// reaches, not the Tool value: a server that listed the flag as forced and then
+// left it off the argv would pass every assertion made against the tree alone.
+func TestTheRealDebugIsServedWithExecForcedOff(t *testing.T) {
+	isolateKubeconfig(t)
+
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "worker-1",
+			Labels: map[string]string{"nvidia.com/gpu.present": "true"},
+		},
+		Status: corev1.NodeStatus{
+			Capacity:    corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(4, resource.DecimalSI)},
+			Allocatable: corev1.ResourceList{"nvidia.com/gpu": *resource.NewQuantity(4, resource.DecimalSI)},
+			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		},
+	}
+
+	newRoot, recorder := realRootOver(t, node)
+	tree := newRoot(mcp.CallDeps{Streams: genericiooptions.NewTestIOStreamsDiscard()})
+
+	var tool mcp.Tool
+	for _, candidate := range mcp.Tools(tree) {
+		if candidate.Name == "debug" {
+			tool = candidate
+		}
+	}
+	if tool.Name == "" {
+		t.Fatal("the real tree offers no debug tool")
+	}
+	if !tool.ForceNoExec {
+		t.Error("the real debug tool is not exec gated")
+	}
+	if !tool.HasNoExecFlag {
+		t.Fatal("the real debug tool has no --no-exec flag, so the server would refuse it")
+	}
+	if !tool.WritesHost {
+		t.Error("the real debug tool is marked as writing nothing on the host: it writes a bundle")
+	}
+
+	server, err := mcp.NewServer(newRoot, "test")
+	if err != nil {
+		t.Fatalf("building the server over the real tree: %v", err)
+	}
+	session := connectTo(t, server)
+
+	for _, name := range []string{"no-exec", "exec"} {
+		if _, offered := toolProperties(t, session, "debug")[name]; offered {
+			t.Errorf("the debug tool offers --%s: a model could turn the exec back on", name)
+		}
+	}
+
+	result, err := session.CallTool(context.Background(), &sdk.CallToolParams{
+		Name:      "debug",
+		Arguments: map[string]any{"args": []any{"worker-1"}},
+	})
+	if err != nil {
+		t.Fatalf("calling the debug tool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("the debug tool was refused: %s", resultText(result))
+	}
+
+	seen := recorder.seen()
+	if len(seen) != 1 {
+		t.Fatalf("the gather ran %d times, want once", len(seen))
+	}
+	if !seen[0].NoExec {
+		t.Error("the gather behind the debug tool was allowed to exec into a pod")
+	}
+	if seen[0].Node != "worker-1" {
+		t.Errorf("the gather was narrowed to %q, want worker-1", seen[0].Node)
+	}
+	if seen[0].ArtifactDir == "" {
+		t.Error("the gather was given no artifacts directory: the server has to pin one")
+	}
+}
+
+// toolProperties reads the input schema of one tool as the session serves it.
+func toolProperties(t *testing.T, session *sdk.ClientSession, name string) map[string]any {
+	t.Helper()
+
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listing the tools: %v", err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name != name {
+			continue
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshalling the schema of %s: %v", name, err)
+		}
+		var decoded struct {
+			Properties map[string]any `json:"properties"`
+		}
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("decoding the schema of %s: %v", name, err)
+		}
+		if decoded.Properties == nil {
+			return map[string]any{}
+		}
+
+		return decoded.Properties
+	}
+
+	t.Fatalf("the server lists no tool named %q", name)
+
+	return nil
 }
