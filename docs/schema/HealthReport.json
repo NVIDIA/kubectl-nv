@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/health/health-report",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "HealthReport"
+    },
+    "apiVersion": {
+      "type": "string",
+      "const": "kubectl-nv.nvidia.com/v1alpha1"
+    },
+    "metadata": {
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "creationTimestamp": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "findings": {
+      "items": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "component": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "docs": {
+            "type": "string"
+          },
+          "next": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence"
+        ]
+      },
+      "type": "array"
+    },
+    "partial": {
+      "type": "boolean"
+    },
+    "unreachable": {
+      "items": {
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "properties": {
+        "errors": {
+          "type": "integer"
+        },
+        "warnings": {
+          "type": "integer"
+        },
+        "infos": {
+          "type": "integer"
+        },
+        "nodesChecked": {
+          "type": "integer"
+        },
+        "gpuCapacity": {
+          "type": "integer"
+        },
+        "gpuAllocatable": {
+          "type": "integer"
+        },
+        "gpuRequested": {
+          "type": "integer"
+        },
+        "gpuRequestedKnown": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "errors",
+        "warnings",
+        "infos",
+        "nodesChecked",
+        "gpuCapacity",
+        "gpuAllocatable",
+        "gpuRequested",
+        "gpuRequestedKnown"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "findings",
+    "summary"
+  ]
+}

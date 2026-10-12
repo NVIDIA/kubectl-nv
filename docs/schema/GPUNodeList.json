@@ -1,0 +1,426 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/inventory/gpu-node-list",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "GPUNodeList"
+    },
+    "apiVersion": {
+      "type": "string",
+      "const": "kubectl-nv.nvidia.com/v1alpha1"
+    },
+    "metadata": {
+      "properties": {
+        "continue": {
+          "type": "string"
+        },
+        "remainingItemCount": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "items": {
+      "items": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "GPUNode"
+          },
+          "apiVersion": {
+            "type": "string",
+            "const": "kubectl-nv.nvidia.com/v1alpha1"
+          },
+          "metadata": {
+            "properties": {
+              "annotations": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "creationTimestamp": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "labels": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "name": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "product": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "capacity": {
+            "type": "integer"
+          },
+          "allocatable": {
+            "type": "integer"
+          },
+          "requested": {
+            "type": "integer"
+          },
+          "requestedKnown": {
+            "type": "boolean"
+          },
+          "driverVersion": {
+            "type": "string"
+          },
+          "cudaVersion": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "mig": {
+            "properties": {
+              "strategy": {
+                "type": "string"
+              },
+              "config": {
+                "type": "string"
+              },
+              "configState": {
+                "type": "string"
+              },
+              "capable": {
+                "type": "boolean"
+              },
+              "resources": {
+                "additionalProperties": {
+                  "properties": {
+                    "capacity": {
+                      "type": "integer"
+                    },
+                    "allocatable": {
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": [
+                    "capacity",
+                    "allocatable"
+                  ]
+                },
+                "type": "object"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "strategy",
+              "config",
+              "configState",
+              "capable",
+              "resources"
+            ]
+          },
+          "sharing": {
+            "properties": {
+              "strategy": {
+                "type": "string"
+              },
+              "replicas": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "strategy",
+              "replicas"
+            ]
+          },
+          "upgradeState": {
+            "type": "string"
+          },
+          "deploy": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "clique": {
+            "type": "string"
+          },
+          "topology": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "unschedulable": {
+            "type": "boolean"
+          },
+          "taints": {
+            "items": {
+              "properties": {
+                "key": {
+                  "type": "string"
+                },
+                "value": {
+                  "type": "string"
+                },
+                "effect": {
+                  "type": "string"
+                },
+                "timeAdded": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "key",
+                "effect"
+              ]
+            },
+            "type": "array"
+          },
+          "conditions": {
+            "items": {
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                },
+                "lastHeartbeatTime": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "lastTransitionTime": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "type",
+                "status"
+              ]
+            },
+            "type": "array"
+          },
+          "operands": {
+            "items": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "namespace": {
+                  "type": "string"
+                },
+                "component": {
+                  "type": "string"
+                },
+                "phase": {
+                  "type": "string"
+                },
+                "restarts": {
+                  "type": "integer"
+                },
+                "images": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "ready": {
+                  "type": "boolean"
+                },
+                "lastTermination": {
+                  "properties": {
+                    "observed": {
+                      "type": "boolean"
+                    },
+                    "exitCode": {
+                      "type": "integer"
+                    },
+                    "reason": {
+                      "type": "string"
+                    },
+                    "finishedAt": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "type": "object",
+                  "required": [
+                    "observed",
+                    "exitCode",
+                    "reason",
+                    "finishedAt"
+                  ]
+                },
+                "initContainers": {
+                  "items": {
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "exitCode": {
+                        "type": "integer"
+                      },
+                      "reason": {
+                        "type": "string"
+                      },
+                      "lastTermination": {
+                        "properties": {
+                          "observed": {
+                            "type": "boolean"
+                          },
+                          "exitCode": {
+                            "type": "integer"
+                          },
+                          "reason": {
+                            "type": "string"
+                          },
+                          "finishedAt": {
+                            "type": "string"
+                          }
+                        },
+                        "additionalProperties": false,
+                        "type": "object",
+                        "required": [
+                          "observed",
+                          "exitCode",
+                          "reason",
+                          "finishedAt"
+                        ]
+                      }
+                    },
+                    "additionalProperties": false,
+                    "type": "object",
+                    "required": [
+                      "name",
+                      "reason",
+                      "lastTermination"
+                    ]
+                  },
+                  "type": "array"
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "name",
+                "namespace",
+                "component",
+                "phase",
+                "restarts",
+                "images",
+                "ready",
+                "lastTermination",
+                "initContainers"
+              ]
+            },
+            "type": "array"
+          },
+          "resourceSlices": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "hinted": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "apiVersion",
+          "kind",
+          "product",
+          "count",
+          "capacity",
+          "allocatable",
+          "requested",
+          "requestedKnown",
+          "driverVersion",
+          "cudaVersion",
+          "mode",
+          "mig",
+          "sharing",
+          "upgradeState",
+          "deploy",
+          "clique",
+          "topology",
+          "ready",
+          "unschedulable",
+          "taints",
+          "conditions",
+          "operands",
+          "resourceSlices",
+          "hinted"
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "items"
+  ]
+}

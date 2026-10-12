@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/topology/topology-report",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "TopologyReport"
+    },
+    "apiVersion": {
+      "type": "string",
+      "const": "kubectl-nv.nvidia.com/v1alpha1"
+    },
+    "metadata": {
+      "properties": {
+        "annotations": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "creationTimestamp": {
+          "oneOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        },
+        "name": {
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "levels": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          },
+          "groups": {
+            "items": {
+              "properties": {
+                "value": {
+                  "type": "string"
+                },
+                "nodes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "nodeCount": {
+                  "type": "integer"
+                },
+                "allocatable": {
+                  "type": "integer"
+                },
+                "requested": {
+                  "type": "integer"
+                },
+                "free": {
+                  "type": "integer"
+                },
+                "largestFreeNode": {
+                  "type": "integer"
+                },
+                "requestedKnown": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "value",
+                "nodes",
+                "nodeCount",
+                "allocatable",
+                "requested",
+                "free",
+                "largestFreeNode",
+                "requestedKnown"
+              ]
+            },
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "label",
+          "source",
+          "groups"
+        ]
+      },
+      "type": "array"
+    },
+    "partialNodes": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "present": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "missing": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "present",
+          "missing"
+        ]
+      },
+      "type": "array"
+    },
+    "kueue": {
+      "properties": {
+        "installed": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "installed"
+      ]
+    },
+    "fit": {
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pods": {
+          "type": "integer"
+        },
+        "gpusPerPod": {
+          "type": "integer"
+        },
+        "levels": {
+          "items": {
+            "properties": {
+              "level": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "groups": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "level",
+              "label",
+              "groups"
+            ]
+          },
+          "type": "array"
+        },
+        "smallest": {
+          "type": "string"
+        },
+        "excluded": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "namespace",
+        "name",
+        "pods",
+        "gpusPerPod",
+        "levels",
+        "smallest",
+        "excluded"
+      ]
+    },
+    "status": {
+      "properties": {
+        "findings": {
+          "items": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "component": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "evidence": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "docs": {
+                "type": "string"
+              },
+              "next": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object",
+            "required": [
+              "evidence"
+            ]
+          },
+          "type": "array"
+        },
+        "partial": {
+          "type": "boolean"
+        },
+        "unreachable": {
+          "items": {
+            "properties": {
+              "resource": {
+                "type": "string"
+              },
+              "node": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false,
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "findings"
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "levels",
+    "partialNodes",
+    "kueue",
+    "status"
+  ]
+}
