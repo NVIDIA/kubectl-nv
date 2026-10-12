@@ -66,6 +66,52 @@ func TestInfoRefusesALimit(t *testing.T) {
 	}
 }
 
+// The refusal comes before anything is read.
+//
+// The cluster given holds no such node, so a check made after the read would
+// answer about the node and not about the flag. On a real cluster that
+// difference is the caller waiting for a scan they then get no answer from,
+// which is the whole reason the flags are validated against a prototype.
+func TestInfoRefusesALimitBeforeReadingAnything(t *testing.T) {
+	t.Parallel()
+
+	_, err := runInfo(t, nil, "worker-1", "--limit", "1", "-o", "json")
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+	if !strings.Contains(err.Error(), "--limit") {
+		t.Errorf("the error is %q: it is about the node, so the flag was checked after the read", err)
+	}
+}
+
+// --fields has nothing to do on the table this command prints, which is a
+// description of one node rather than a row of columns. Saying so is the
+// honest answer: applying it to nothing would hand back the whole node to a
+// caller that asked for one field of it.
+func TestInfoRefusesFieldsOnItsDescription(t *testing.T) {
+	t.Parallel()
+
+	_, err := runInfo(t, cluster(), "worker-1", "--fields", "capacity")
+
+	var usage *output.UsageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("error is %T (%v), want an output.UsageError", err, err)
+	}
+	for _, want := range []string{"--fields", "-o json"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the error does not mention %q: %v", want, err)
+		}
+	}
+
+	// And it is accepted where there is something to project, or this would
+	// pass on a command that refused the flag outright.
+	if _, err := runInfo(t, cluster(), "worker-1", "--fields", "capacity", "-o", "json"); err != nil {
+		t.Errorf("--fields with -o json: %v", err)
+	}
+}
+
 // --fields does reach a single object: there is nesting to project away even
 // when there is only one of the thing.
 func TestInfoProjectsFields(t *testing.T) {
