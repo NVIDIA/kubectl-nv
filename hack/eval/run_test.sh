@@ -13,17 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Tests for hack/eval/run.sh and hack/eval/render-results.sh.
+# Tests for hack/eval/run.sh, hack/eval/kubectl-nv-shim.sh and
+# hack/eval/render-results.sh.
 #
 # No cluster is created and no model is called. kubectl is a PATH shim, the
 # fault scripts are fakes that record their calls and flip a state file, the
 # binary under evaluation is a fake that reports findings from that state, and
-# the agent is a stub that prints whatever answer the case fixes.
+# claude is a stub that reads the fake binary through the real shim and prints
+# an ANSWER line.
 #
 # The fake pieces are wired to each other the way the real ones are: the fault
-# script is what makes the finding appear, and the binary is what the harness
-# polls, so a subject that scored without injecting, or that never waited for
-# the fault, gets a different answer and the assertions notice.
+# script is what makes the finding appear, the binary is what the harness
+# polls, and the claude stub reaches the binary only through the checked-in
+# shim. A harness that scored without injecting, that never waited for the
+# fault, or that handed the agent an unguarded binary gets a different answer
+# and the assertions notice.
 #
 # The subject is resolved relative to THIS file, never through $HOME: a test
 # that green-lights a deployed copy says nothing about the tree it ships from.
@@ -36,6 +40,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN="${SCRIPT_DIR}/run.sh"
 RENDER="${SCRIPT_DIR}/render-results.sh"
+SHIM_TEMPLATE="${SCRIPT_DIR}/kubectl-nv-shim.sh"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 PASS=0
@@ -50,8 +55,8 @@ FAKE_HOME="${WORK}/home"
 FAULTS_DIR="${WORK}/faults"
 RESULTS_DIR="${WORK}/results"
 STATE_DIR="${WORK}/state"
+OVERRIDE_DIR="${WORK}/answers"
 BIN="${WORK}/kubectl-nv"
-AGENT_STUB="${WORK}/agent-stub"
 SKILL="${WORK}/SKILL.md"
 LANE_KUBECONFIG="${WORK}/kubeconfig-faults"
 
@@ -60,6 +65,9 @@ export EVAL_STATE_DIR="${STATE_DIR}"
 
 # The five codes the harness runs, in the order it has to run them.
 EXPECTED_ORDER="NV-NODE-002 NV-NODE-003 NV-OP-001 NV-DCGM-001 NV-DRV-001"
+
+WORKER="kubectl-nv-faults-worker"
+LANE_CONTEXT="kind-kubectl-nv-faults"
 
 # ---------------------------------------------------------------------------
 # Assertions
@@ -116,13 +124,20 @@ assert_not_logged() {
     fi
 }
 
+assert_eq() {
+    local got="$1" want="$2" name="$3"
+    if [ "${got}" = "${want}" ]; then
+        ok "${name}"
+    else
+        nope "${name}: got '${got}', want '${want}'"
+    fi
+}
+
 # assert_jq <filter> <want> <name>
-# Runs a jq filter over the results file this run wrote and compares the raw
-# output against a literal.
 assert_jq() {
     local filter="$1" want="$2" name="$3" got
-    if [ ! -f "${RESULT_FILE}" ]; then
-        nope "${name}: no results file at ${RESULT_FILE}"
+    if [ -z "${RESULT_FILE}" ] || [ ! -f "${RESULT_FILE}" ]; then
+        nope "${name}: no results file was written"
         return
     fi
     got="$(jq -r "${filter}" < "${RESULT_FILE}" 2>&1)"
@@ -138,13 +153,13 @@ assert_jq() {
 # ---------------------------------------------------------------------------
 
 # make_tool_dir
-# Symlinks to exactly the system tools the subject and the fakes need. The
-# subject's PATH is this plus the shim directory and nothing else, so a real
-# kubectl on the machine running these tests can never be reached, and with it
-# the developer's own clusters.
+# Symlinks to exactly the system tools the subject, the fakes and the agent
+# need. The subject's PATH is this plus the shim directory and nothing else,
+# so a real kubectl or a real claude on the machine running these tests can
+# never be reached, and with them the developer's own clusters and account.
 EVAL_SYSTEM_TOOLS="bash sh env date mktemp grep sed awk cat sleep rm mkdir
 chmod tr wc head tail cut sort dirname basename shasum stat ls printf jq cp
-find touch id"
+find touch id kill uniq readlink seq"
 
 make_tool_dir() {
     mkdir -p "${TOOL_DIR}"
@@ -158,9 +173,9 @@ make_tool_dir() {
 }
 
 # make_kubectl_shim
-# Answers the two questions the harness asks kubectl: which context the lane
-# kubeconfig is on, and which workers the lane has. Both answers are driven by
-# fixture variables so a case can make the context wrong.
+# Answers the three questions the harness asks kubectl: which context the lane
+# kubeconfig is on, what the whole minified config looks like, and which
+# workers the lane has.
 make_kubectl_shim() {
     mkdir -p "${SHIM_DIR}"
     cat > "${SHIM_DIR}/kubectl" << 'SHIM'
@@ -172,6 +187,19 @@ case "${args}" in
         printf '%s\n' "${FAKE_CONTEXT-kind-kubectl-nv-faults}"
         exit 0
         ;;
+    *"config view"*)
+        # One context, one cluster, on a loopback server, unless a fixture
+        # says otherwise. This is what the lane guard reads.
+        printf 'apiVersion: v1\nkind: Config\ncurrent-context: %s\ncontexts:\n' \
+            "${FAKE_CONTEXT-kind-kubectl-nv-faults}"
+        printf -- '- name: %s\n' "${FAKE_CONTEXT-kind-kubectl-nv-faults}"
+        if [ -n "${FAKE_EXTRA_CONTEXT:-}" ]; then
+            printf -- '- name: %s\n' "${FAKE_EXTRA_CONTEXT}"
+        fi
+        printf 'clusters:\n- cluster:\n    server: %s\n' \
+            "${FAKE_SERVER-https://127.0.0.1:52193}"
+        exit 0
+        ;;
     *"get nodes"*)
         # The control plane is only left out when the selector asks for it, so
         # a subject that forgets the selector picks it up and the assertions
@@ -181,7 +209,7 @@ case "${args}" in
             *'!node-role.kubernetes.io/control-plane'*) ;;
             *) nodes="kubectl-nv-faults-control-plane ${nodes}" ;;
         esac
-        printf '%s\n' "${nodes}"
+        printf '%s\n' ${nodes}
         exit 0
         ;;
 esac
@@ -191,30 +219,67 @@ SHIM
 }
 
 # make_claude_shim
-# Stands in for the default agent, so that the default KUBECTL_NV_EVAL_AGENT
-# is exercised rather than taken on trust. It records its whole argv, which is
-# what lets the test see that the allow-list reached it as one argument
-# rather than being split or eaten by the shell.
+# Stands in for the agent. It is given nothing but the scrubbed environment
+# the harness builds, so it has to do what a real agent would: run
+# ./kubectl-nv (the harness's shim, never the binary itself) and report what
+# it found as an ANSWER line.
+#
+# A case that needs a wrong answer puts the line it should print in
+# ${OVERRIDE_DIR}/<code>; the stub still has to derive the code correctly to
+# find it, so an override does not let it skip the work. The override
+# directory is baked in rather than passed through the environment, because
+# the harness scrubs the environment and that is the point.
 make_claude_shim() {
     mkdir -p "${SHIM_DIR}"
-    cat > "${SHIM_DIR}/claude" << 'SHIM'
-#!/bin/bash
-echo "claude $*" >> "${EVAL_CALL_LOG}"
+    {
+        printf '#!/bin/bash\n'
+        printf 'CALL_LOG=%s\n' "${EVAL_CALL_LOG}"
+        printf 'OVERRIDE_DIR=%s\n' "${OVERRIDE_DIR}"
+    } > "${SHIM_DIR}/claude"
+    cat >> "${SHIM_DIR}/claude" << 'SHIM'
+echo "claude $*" >> "${CALL_LOG}"
 for a in "$@"; do
-    echo "claude-arg ${a}" >> "${EVAL_CALL_LOG}"
+    echo "claude-arg ${a}" >> "${CALL_LOG}"
 done
+env | sort | while read -r line; do echo "claude-env ${line}" >> "${CALL_LOG}"; done
+echo "claude-cwd $(pwd)" >> "${CALL_LOG}"
+ls -A | sort | while read -r e; do echo "claude-sees ${e}" >> "${CALL_LOG}"; done
+if [ -L ./kubectl-nv ]; then
+    echo "claude-sees-symlink kubectl-nv" >> "${CALL_LOG}"
+fi
 cat > /dev/null
-key="FAKE_ANSWER_$(printf '%s' "${KUBECTL_NV_EVAL_CODE}" | tr 'A-Z-' 'a-z_')"
-printf '%s\n' "${!key-}"
+
+if [ -f "${OVERRIDE_DIR}/.hang" ]; then
+    sleep 600
+fi
+
+report="$(./kubectl-nv health --fail-on info -o json 2> /dev/null)"
+code="$(printf '%s' "${report}" | jq -r '.findings[0].code // empty')"
+node="$(printf '%s' "${report}" | jq -r '.findings[0].node // "-"')"
+component="$(printf '%s' "${report}" | jq -r '.findings[0].component // empty')"
+[ -n "${node}" ] || node="-"
+
+if [ -f "${OVERRIDE_DIR}/.rc" ]; then
+    echo "the agent failed" >&2
+    exit "$(cat "${OVERRIDE_DIR}/.rc")"
+fi
+
+if [ -n "${code}" ] && [ -f "${OVERRIDE_DIR}/${code}" ]; then
+    cat "${OVERRIDE_DIR}/${code}"
+    exit 0
+fi
+
+printf 'I looked at the cluster with ./kubectl-nv health.\n'
+printf 'ANSWER node=%s component=%s code=%s\n' "${node}" "${component}" "${code}"
 SHIM
     chmod +x "${SHIM_DIR}/claude"
 }
 
 # make_fault_scripts
-# One fake per code, with the same interface as the real ones:
-#   <code in lower case>.sh inject|recover <node>
-# Each records its call and flips a state file that the fake binary reads, so
-# the finding only appears after inject and only disappears after recover.
+# One fake per code, with the same interface as E3's:
+#   MOKKA_KUBECONFIG=<path> <code in lower case>.sh inject|recover <node>
+# E3's scripts exit 2 when MOKKA_KUBECONFIG is unset, with no fallback, so
+# these do too: a harness that forgot to pass it must not pass these tests.
 make_fault_scripts() {
     mkdir -p "${FAULTS_DIR}"
     local code lower
@@ -223,16 +288,28 @@ make_fault_scripts() {
         cat > "${FAULTS_DIR}/${lower}.sh" << SHIM
 #!/bin/bash
 echo "fault ${code} \$*" >> "\${EVAL_CALL_LOG}"
+if [ -z "\${MOKKA_KUBECONFIG:-}" ]; then
+    echo "${lower}.sh: MOKKA_KUBECONFIG is not set" >&2
+    exit 2
+fi
+echo "fault-kubeconfig ${code} \${MOKKA_KUBECONFIG}" >> "\${EVAL_CALL_LOG}"
 mkdir -p "\${EVAL_STATE_DIR}"
 case "\${1:-}" in
     inject)
-        if [ -n "\${FAKE_INJECT_FAIL_CODE:-}" ] && [ "\${FAKE_INJECT_FAIL_CODE}" = "${code}" ]; then
+        if [ "\${FAKE_INJECT_FAIL_CODE:-}" = "${code}" ]; then
             echo "inject failed on purpose" >&2
             exit 1
         fi
         printf '%s\n' "\${2:-}" > "\${EVAL_STATE_DIR}/${code}"
         ;;
     recover)
+        if [ "\${FAKE_RECOVER_FAIL_CODE:-}" = "${code}" ]; then
+            echo "recover failed on purpose" >&2
+            exit 1
+        fi
+        if [ "\${FAKE_RECOVER_NOOP_CODE:-}" = "${code}" ]; then
+            exit 0
+        fi
         rm -f "\${EVAL_STATE_DIR}/${code}"
         ;;
     *)
@@ -248,11 +325,12 @@ SHIM
 
 # make_binary
 # A fake kubectl-nv. `health -o json` prints a HealthReport whose findings are
-# exactly the faults currently injected, so the harness's wait and its recovery
-# wait both have something real to converge on.
+# exactly the faults currently injected, so the harness's wait and its
+# recovery wait both have something real to converge on.
 #
-# FAKE_OBSERVE_DELAY makes the first N health calls for a code report nothing,
-# which is how "wait until the fault is observable" is driven.
+# NV-OP-001 is emitted without a node, the way the real cluster-scoped rule
+# does, which is what makes the per-case expected node matter. The components
+# are the real inventory.Component* values.
 make_binary() {
     cat > "${BIN}" << 'SHIM'
 #!/bin/bash
@@ -279,52 +357,26 @@ for f in "${EVAL_STATE_DIR}"/NV-*; do
     fi
 
     component="node"
+    node_field="\"node\":\"${node}\","
     case "${code}" in
-        NV-OP-001) component="gpu-operator" ;;
-        NV-DCGM-001) component="dcgm-exporter" ;;
-        NV-DRV-001) component="driver" ;;
+        NV-OP-001)
+            component="gpu-operator"
+            # Cluster scoped: the real rule sets no node at all.
+            node_field=""
+            ;;
+        NV-DCGM-001) component="nvidia-dcgm-exporter" ;;
+        NV-DRV-001) component="nvidia-driver-daemonset" ;;
     esac
-    entry="{\"code\":\"${code}\",\"severity\":\"error\",\"node\":\"${node}\",\"component\":\"${component}\",\"message\":\"fake\",\"evidence\":{}}"
+    entry="{\"code\":\"${code}\",\"severity\":\"error\",${node_field}\"component\":\"${component}\",\"message\":\"fake\",\"evidence\":{}}"
     if [ -n "${findings}" ]; then findings="${findings},"; fi
     findings="${findings}${entry}"
 done
 
-printf '{"apiVersion":"kubectl-nv.nvidia.com/v1alpha1","kind":"HealthReport","metadata":{"name":"health"},"findings":[%s],"summary":{"errors":0,"warnings":0,"infos":0}}\n' "${findings}"
+printf '{"apiVersion":"kubectl-nv.nvidia.com/v1alpha1","kind":"HealthReport","metadata":{"name":"cluster"},"findings":[%s],"summary":{"errors":0,"warnings":0,"infos":0}}\n' "${findings}"
 if [ -n "${findings}" ]; then exit 1; fi
 exit 0
 SHIM
     chmod +x "${BIN}"
-}
-
-# make_agent_stub
-# Prints a canned answer and records the working directory it was run in, so
-# the test can assert what the agent was given. FAKE_ANSWER_<code with hyphens
-# as underscores> overrides the answer for one case; FAKE_ANSWER is the
-# default, and the placeholders are filled from the state file the fault wrote.
-make_agent_stub() {
-    cat > "${AGENT_STUB}" << 'SHIM'
-#!/bin/bash
-echo "agent $*" >> "${EVAL_CALL_LOG}"
-echo "agent-cwd $(pwd)" >> "${EVAL_CALL_LOG}"
-# Record exactly what the agent can see, sorted, one entry per line.
-(cd "$(pwd)" && ls -A | sort | while read -r e; do echo "agent-sees ${e}" >> "${EVAL_CALL_LOG}"; done)
-# Drain the prompt so the harness never blocks writing it.
-prompt="$(cat)"
-echo "agent-prompt-bytes ${#prompt}" >> "${EVAL_CALL_LOG}"
-
-if [ "${FAKE_AGENT_RC-0}" != "0" ]; then
-    echo "the agent failed" >&2
-    exit "${FAKE_AGENT_RC}"
-fi
-
-key="FAKE_ANSWER_$(printf '%s' "${KUBECTL_NV_EVAL_CODE}" | tr 'A-Z-' 'a-z_')"
-answer="${!key-}"
-if [ -z "${answer}" ]; then
-    answer="${FAKE_ANSWER-}"
-fi
-printf '%s\n' "${answer}"
-SHIM
-    chmod +x "${AGENT_STUB}"
 }
 
 # ---------------------------------------------------------------------------
@@ -332,33 +384,57 @@ SHIM
 # ---------------------------------------------------------------------------
 
 RESULT_FILE=""
+RC=0
+OUT=""
+ERR=""
 
 reset_fixtures() {
-    unset FAKE_CONTEXT FAKE_WORKERS FAKE_OBSERVE_DELAY FAKE_AGENT_RC
-    unset FAKE_INJECT_FAIL_CODE FAKE_ANSWER
-    local v
-    for v in $(env | sed -n 's/^\(FAKE_ANSWER_[a-z0-9_]*\)=.*/\1/p'); do
-        unset "${v}"
-    done
-    rm -rf "${STATE_DIR}" "${RESULTS_DIR}"
-    mkdir -p "${STATE_DIR}" "${RESULTS_DIR}"
+    unset FAKE_CONTEXT FAKE_WORKERS FAKE_OBSERVE_DELAY FAKE_SERVER FAKE_EXTRA_CONTEXT
+    unset FAKE_INJECT_FAIL_CODE FAKE_RECOVER_FAIL_CODE FAKE_RECOVER_NOOP_CODE
+    rm -rf "${STATE_DIR}" "${RESULTS_DIR}" "${OVERRIDE_DIR}"
+    mkdir -p "${STATE_DIR}" "${RESULTS_DIR}" "${OVERRIDE_DIR}"
     : > "${EVAL_CALL_LOG}"
 }
 
-# run_subject
-# The fixtures are exported by the caller; the subject itself takes no
-# arguments, and a case that needs to pass one builds its own invocation.
+# override_answer <code> <line>
+override_answer() {
+    printf '%s\n' "$2" > "${OVERRIDE_DIR}/$1"
+}
+
+# subject_env
+# The fixtures every invocation shares, one assignment per line.
+subject_env() {
+    printf '%s\n' \
+        "KUBECTL_NV_EVAL_BIN=${BIN}" \
+        "KUBECTL_NV_EVAL_SKILL=${SKILL}" \
+        "KUBECTL_NV_EVAL_FAULTS_DIR=${FAULTS_DIR}" \
+        "KUBECTL_NV_EVAL_KUBECONFIG=${LANE_KUBECONFIG}" \
+        "KUBECTL_NV_EVAL_RESULTS_DIR=${RESULTS_DIR}" \
+        "KUBECTL_NV_EVAL_POLL_INTERVAL=0" \
+        "KUBECTL_NV_EVAL_OBSERVE_TIMEOUT=30" \
+        "KUBECTL_NV_EVAL_RECOVER_TIMEOUT=30" \
+        "KUBECTL_NV_EVAL_AGENT_TIMEOUT=60"
+}
+
+# run_subject [VAR=VALUE]...
+# Runs the harness with the default agent, which the claude stub on PATH
+# stands in for. Later assignments win, so a case can override a default.
+#
+# CI is removed rather than left alone, so that this suite passes under CI and
+# only the refusal case sets it.
 run_subject() {
-    PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
-        KUBECTL_NV_EVAL_BIN="${BIN}" \
-        KUBECTL_NV_EVAL_SKILL="${SKILL}" \
-        KUBECTL_NV_EVAL_FAULTS_DIR="${FAULTS_DIR}" \
-        KUBECTL_NV_EVAL_KUBECONFIG="${LANE_KUBECONFIG}" \
-        KUBECTL_NV_EVAL_RESULTS_DIR="${RESULTS_DIR}" \
-        KUBECTL_NV_EVAL_AGENT="${AGENT_STUB}" \
-        KUBECTL_NV_EVAL_POLL_INTERVAL=0 \
-        KUBECTL_NV_EVAL_OBSERVE_TIMEOUT=30 \
-        KUBECTL_NV_EVAL_RECOVER_TIMEOUT=30 \
+    local -a env_args=()
+    local line
+    while IFS= read -r line; do
+        env_args+=("${line}")
+    done < <(subject_env)
+    env_args+=("$@")
+
+    env -u CI -u KUBECTL_NV_EVAL_AGENT -i \
+        PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
+        EVAL_CALL_LOG="${EVAL_CALL_LOG}" EVAL_STATE_DIR="${EVAL_STATE_DIR}" \
+        TMPDIR="${TMPDIR:-/tmp}" \
+        "${env_args[@]}" \
         "${RUN}" > "${WORK}/out" 2> "${WORK}/err"
     RC=$?
     OUT="$(cat "${WORK}/out")"
@@ -375,59 +451,145 @@ make_kubectl_shim
 make_claude_shim
 make_fault_scripts
 make_binary
-make_agent_stub
 
 mkdir -p "${FAKE_HOME}/.kube"
 printf '%s\n' 'SENTINEL do not touch the default kubeconfig' > "${FAKE_HOME}/.kube/config"
 SENTINEL_BEFORE="$(shasum -a 256 < "${FAKE_HOME}/.kube/config" | awk '{print $1}')"
 
-printf '%s\n' 'apiVersion: v1' 'current-context: kind-kubectl-nv-faults' > "${LANE_KUBECONFIG}"
+printf '%s\n' 'apiVersion: v1' "current-context: ${LANE_CONTEXT}" > "${LANE_KUBECONFIG}"
 cp "${REPO_ROOT}/SKILL.md" "${SKILL}"
 
-WORKER="kubectl-nv-faults-worker"
-
-# A complete answer for one code, filled in by the caller.
-answer_for() {
-    local code="$1" component="$2" node="${3:-${WORKER}}"
-    printf 'The GPU problem is on node %s. The failing component is %s and the finding code is %s.' \
-        "${node}" "${component}" "${code}"
-}
-
-set_passing_answers() {
-    export FAKE_ANSWER_nv_node_002 FAKE_ANSWER_nv_node_003 FAKE_ANSWER_nv_op_001
-    export FAKE_ANSWER_nv_dcgm_001 FAKE_ANSWER_nv_drv_001
-    FAKE_ANSWER_nv_node_002="$(answer_for NV-NODE-002 node)"
-    FAKE_ANSWER_nv_node_003="$(answer_for NV-NODE-003 node)"
-    FAKE_ANSWER_nv_op_001="$(answer_for NV-OP-001 gpu-operator)"
-    FAKE_ANSWER_nv_dcgm_001="$(answer_for NV-DCGM-001 dcgm-exporter)"
-    FAKE_ANSWER_nv_drv_001="$(answer_for NV-DRV-001 driver)"
-}
-
 # ---------------------------------------------------------------------------
-echo "# the subject exists and is executable"
+echo "# the subjects exist and are executable"
 # ---------------------------------------------------------------------------
 
-if [ -x "${RUN}" ]; then
-    ok "hack/eval/run.sh is executable"
-else
-    nope "hack/eval/run.sh is missing or not executable"
+missing=0
+for s in "${RUN}" "${RENDER}" "${SHIM_TEMPLATE}"; do
+    if [ -x "${s}" ]; then
+        ok "$(basename "${s}") is executable"
+    else
+        nope "$(basename "${s}") is missing or not executable"
+        missing=1
+    fi
+done
+if [ "${missing}" -ne 0 ]; then
     echo
     echo "passed: ${PASS}  failed: ${FAIL}"
     exit 1
 fi
 
-if [ -x "${RENDER}" ]; then
-    ok "hack/eval/render-results.sh is executable"
+# ---------------------------------------------------------------------------
+echo "# the checked-in shim refuses what would take the agent off the lane"
+# ---------------------------------------------------------------------------
+#
+# The shim is exercised standalone, with the real binary replaced by a
+# recorder, so that each refusal is a test of its own rather than something
+# only a whole run could reach.
+
+SHIM_REAL="${WORK}/shim-real"
+cat > "${SHIM_REAL}" << 'SHIM'
+#!/bin/bash
+echo "real $*" >> "${EVAL_CALL_LOG}"
+exit 0
+SHIM
+chmod +x "${SHIM_REAL}"
+
+# run_shim <args...>
+run_shim() {
+    env PATH="${TOOL_DIR}" \
+        EVAL_CALL_LOG="${EVAL_CALL_LOG}" \
+        KUBECTL_NV_SHIM_REAL="${SHIM_REAL}" \
+        KUBECTL_NV_SHIM_KUBECONFIG="${LANE_KUBECONFIG}" \
+        KUBECTL_NV_SHIM_CONTEXT="${LANE_CONTEXT}" \
+        bash "${SHIM_TEMPLATE}" "$@" > "${WORK}/out" 2> "${WORK}/err"
+    RC=$?
+    OUT="$(cat "${WORK}/out")"
+    ERR="$(cat "${WORK}/err")"
+}
+
+: > "${EVAL_CALL_LOG}"
+run_shim health -o json
+assert_rc 0 "the shim passes a plain health through"
+assert_logged "real health" "the plain command reaches the real binary"
+assert_logged "--kubeconfig ${LANE_KUBECONFIG}" "the shim fixes the lane kubeconfig"
+assert_logged "--context ${LANE_CONTEXT}" "the shim fixes the lane context"
+
+# Every connection flag ConfigFlags registers, plus the two host directory
+# flags. A flag that stopped being refused would let the agent point the
+# binary at another cluster or write outside the directory it was given.
+for flag in --kubeconfig --context --cluster --server --token --user \
+    --as --as-group --as-uid --as-user-extra --certificate-authority \
+    --client-certificate --client-key --insecure-skip-tls-verify \
+    --tls-server-name --proxy-url --cache-dir --request-timeout \
+    --disable-compression --write-dir --artifacts-dir; do
+    : > "${EVAL_CALL_LOG}"
+    run_shim health "${flag}" value
+    if [ "${RC}" -eq 2 ]; then
+        ok "the shim refuses ${flag}"
+    else
+        nope "the shim accepted ${flag}: rc=${RC}" "stderr: ${ERR}"
+    fi
+    assert_not_logged "real " "the shim does not reach the binary for ${flag}"
+done
+
+# The equals spelling is the same flag.
+: > "${EVAL_CALL_LOG}"
+run_shim health --server=https://evil.example.com
+assert_rc 2 "the shim refuses --server=value"
+assert_not_logged "real " "the shim does not reach the binary for --server=value"
+
+# The short spellings.
+for flag in -k -s; do
+    : > "${EVAL_CALL_LOG}"
+    run_shim health "${flag}" value
+    if [ "${RC}" -eq 2 ]; then
+        ok "the shim refuses ${flag}"
+    else
+        nope "the shim accepted ${flag}: rc=${RC}" "stderr: ${ERR}"
+    fi
+done
+
+# The commands that can exec into a pod.
+for cmd in "adm must-gather" "debug worker-1"; do
+    : > "${EVAL_CALL_LOG}"
+    # shellcheck disable=SC2086
+    run_shim ${cmd}
+    if [ "${RC}" -eq 2 ]; then
+        ok "the shim refuses '${cmd}'"
+    else
+        nope "the shim accepted '${cmd}': rc=${RC}" "stderr: ${ERR}"
+    fi
+    assert_not_logged "real " "the shim does not reach the binary for '${cmd}'"
+done
+
+# A refusal names the flag, never its value: echoing a rejected --token back
+# would copy the secret into the model's context.
+: > "${EVAL_CALL_LOG}"
+run_shim health --token s3cr3t-do-not-echo
+assert_rc 2 "the shim refuses --token"
+if printf '%s%s' "${OUT}" "${ERR}" | grep -qF 's3cr3t-do-not-echo'; then
+    nope "the shim echoed the value of a rejected --token back"
 else
-    nope "hack/eval/render-results.sh is missing or not executable"
+    ok "the shim names the rejected flag without its value"
 fi
+
+# Read-only commands that are not exec capable still pass.
+for cmd in "list -o json" "info worker-1 -o json" "explain NV-NODE-002" "topology -o json"; do
+    : > "${EVAL_CALL_LOG}"
+    # shellcheck disable=SC2086
+    run_shim ${cmd}
+    if [ "${RC}" -eq 0 ]; then
+        ok "the shim passes '${cmd}' through"
+    else
+        nope "the shim refused '${cmd}': rc=${RC}" "stderr: ${ERR}"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 echo "# every case passes when the agent answers completely"
 # ---------------------------------------------------------------------------
 
 reset_fixtures
-set_passing_answers
 run_subject
 
 assert_rc 0 "a run where every answer is complete exits 0"
@@ -436,75 +598,139 @@ assert_jq '.summary.passed' '5' "the results file records five passes"
 assert_jq '.summary.failed' '0' "the results file records no failures"
 assert_jq '[.cases[].code] | join(" ")' "${EXPECTED_ORDER}" "the cases are recorded in the declared order"
 assert_jq '.cases[2].component' 'gpu-operator' "the component comes from the report, not from a table in the harness"
-assert_jq '[.cases[].node] | unique | join(" ")' "${WORKER}" "every case ran against the lane worker"
-assert_jq '.context' 'kind-kubectl-nv-faults' "the results file records the context"
+assert_jq '.cases[2].expectedNode' '-' "the cluster scoped case expects no node"
+assert_jq '.cases[0].expectedNode' "${WORKER}" "a node scoped case expects the lane worker"
+assert_jq '.context' "${LANE_CONTEXT}" "the results file records the context"
+
+assert_eq "$(basename "${RESULT_FILE}")" "$(date -u +%Y-%m-%d).json" "the results file is named for the date"
+assert_jq '.schemaVersion' '1' "the results file declares its schema version"
+assert_jq '.startedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")' 'true' \
+    "startedAt is RFC3339 in UTC"
+assert_jq '.finishedAt | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")' 'true' \
+    "finishedAt is RFC3339 in UTC"
+assert_jq '.cases[0] | keys | join(",")' \
+    'agentSeconds,code,component,error,expectedNode,named,node,observedPolls,pass,recoverError' \
+    "a case carries exactly the documented keys"
+assert_jq '.cases[0].named | keys | join(",")' 'code,component,node' \
+    "the named map carries exactly the three parts"
 
 # ---------------------------------------------------------------------------
 echo "# sequencing: one fault at a time, injected then recovered in order"
 # ---------------------------------------------------------------------------
 
 INJECTS="$(grep '^fault .* inject ' "${EVAL_CALL_LOG}" | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
-if [ "${INJECTS}" = "${EXPECTED_ORDER}" ]; then
-    ok "the faults are injected in the declared order"
-else
-    nope "injection order is '${INJECTS}', want '${EXPECTED_ORDER}'"
-fi
+assert_eq "${INJECTS}" "${EXPECTED_ORDER}" "the faults are injected in the declared order"
 
 RECOVERS="$(grep '^fault .* recover ' "${EVAL_CALL_LOG}" | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
-if [ "${RECOVERS}" = "${EXPECTED_ORDER}" ]; then
-    ok "every fault is recovered, in the same order"
-else
-    nope "recovery order is '${RECOVERS}', want '${EXPECTED_ORDER}'"
-fi
+assert_eq "${RECOVERS}" "${EXPECTED_ORDER}" "every fault is recovered, in the same order"
 
-# An inject of the next code must never appear before the recover of the one
-# before it: the harness runs one fault at a time, not five at once.
 ORDERED="$(grep -E '^fault .* (inject|recover) ' "${EVAL_CALL_LOG}" | awk '{print $2, $3}' | tr '\n' '|')"
 EXPECT_PAIRS=""
 for code in ${EXPECTED_ORDER}; do
     EXPECT_PAIRS="${EXPECT_PAIRS}${code} inject|${code} recover|"
 done
-if [ "${ORDERED}" = "${EXPECT_PAIRS}" ]; then
-    ok "each fault is recovered before the next is injected"
+assert_eq "${ORDERED}" "${EXPECT_PAIRS}" "each fault is recovered before the next is injected"
+
+# E3's scripts exit 2 without MOKKA_KUBECONFIG, so every call has to carry it.
+FAULT_CALLS="$(grep -cE '^fault .* (inject|recover) ' "${EVAL_CALL_LOG}")"
+KUBECONFIG_CALLS="$(grep -cF "fault-kubeconfig " "${EVAL_CALL_LOG}")"
+WRONG_KUBECONFIG="$(grep -F 'fault-kubeconfig ' "${EVAL_CALL_LOG}" | grep -cv " ${LANE_KUBECONFIG}\$" || true)"
+if [ "${FAULT_CALLS}" -eq 10 ] && [ "${KUBECONFIG_CALLS}" -eq 10 ] && [ "${WRONG_KUBECONFIG}" -eq 0 ]; then
+    ok "all ten fault script calls carried the lane MOKKA_KUBECONFIG"
 else
-    nope "inject and recover interleave as '${ORDERED}'" "want '${EXPECT_PAIRS}'"
+    nope "${KUBECONFIG_CALLS} of ${FAULT_CALLS} fault calls carried MOKKA_KUBECONFIG, ${WRONG_KUBECONFIG} with the wrong path; want 10, 10, 0"
 fi
 
 # ---------------------------------------------------------------------------
-echo "# the agent is given the binary, the skill and the kubeconfig, and nothing else"
+echo "# what the agent is given, and what it is not"
 # ---------------------------------------------------------------------------
 
-SEEN="$(grep '^agent-sees ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-if [ "${SEEN}" = "SKILL.md kubeconfig kubectl-nv" ]; then
-    ok "the agent working directory holds exactly the binary, the skill and the kubeconfig"
+SEEN="$(grep '^claude-sees ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "${SEEN}" "SKILL.md kubeconfig kubectl-nv" \
+    "the agent directory holds exactly the shim, the skill and the kubeconfig"
+
+assert_not_logged "claude-sees-symlink" \
+    "the binary in the case directory is a copy, not a link out of it"
+
+CWDS="$(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u | wc -l | tr -d ' ')"
+assert_eq "${CWDS}" "5" "each case gets its own working directory"
+
+# The case directory is its own temporary directory, not a subdirectory of
+# the harness scratch, so a cleanup bug in one cannot cover the other.
+BAD_CASE_DIR=0
+for d in $(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u); do
+    case "${d}" in
+        */kubectl-nv-eval-case.*) ;;
+        *) BAD_CASE_DIR=$((BAD_CASE_DIR + 1)) ;;
+    esac
+done
+assert_eq "${BAD_CASE_DIR}" "0" "every case directory is its own temporary directory"
+
+# The environment the agent runs in: an allow-list, and nothing else.
+AGENT_ENV_KEYS="$(grep '^claude-env ' "${EVAL_CALL_LOG}" | sed 's/^claude-env //' | cut -d= -f1 |
+    grep -vE '^(PWD|SHLVL|_)$' | sort -u | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "${AGENT_ENV_KEYS}" "HOME KUBECONFIG LANG PATH" \
+    "the agent environment is PATH, LANG, HOME and KUBECONFIG and nothing else"
+
+assert_not_logged "claude-env KUBECTL_NV_EVAL_CODE" \
+    "the answer key is not in the agent environment"
+assert_not_logged "claude-env KUBECTL_NV_EVAL_BIN" \
+    "the harness configuration is not in the agent environment"
+assert_not_logged "claude-env EVAL_CALL_LOG" \
+    "the test fixtures are not in the agent environment"
+
+AGENT_HOMES="$(grep '^claude-env HOME=' "${EVAL_CALL_LOG}" | sed 's/^claude-env HOME=//' | sort -u)"
+if [ -z "${AGENT_HOMES}" ]; then
+    nope "the agent recorded no HOME at all"
+elif [ "${AGENT_HOMES}" = "${FAKE_HOME}" ]; then
+    nope "the agent inherited the caller's HOME, so it can read its settings"
 else
-    nope "the agent saw '${SEEN}', want 'SKILL.md kubeconfig kubectl-nv'"
+    ok "the agent runs with a HOME of its own"
 fi
 
-CWDS="$(grep '^agent-cwd ' "${EVAL_CALL_LOG}" | awk '{print $2}' | sort -u | wc -l | tr -d ' ')"
-if [ "${CWDS}" = "5" ]; then
-    ok "each case gets its own working directory"
+assert_eq "$(grep -c '^claude-env KUBECONFIG=./kubeconfig$' "${EVAL_CALL_LOG}")" "5" \
+    "KUBECONFIG points at the copy in the case directory"
+
+CASE_DIR_SAMPLE="$(grep '^claude-cwd ' "${EVAL_CALL_LOG}" | head -1 | awk '{print $2}')"
+if [ -n "${CASE_DIR_SAMPLE}" ] && [ -e "${CASE_DIR_SAMPLE}" ]; then
+    nope "the case directory ${CASE_DIR_SAMPLE} survived the run"
 else
-    nope "the agent ran in ${CWDS} distinct directories, want 5"
+    ok "the case directories are removed when the run ends"
 fi
+
+# ---------------------------------------------------------------------------
+echo "# the default agent command is a command line that runs"
+# ---------------------------------------------------------------------------
+
+assert_logged "claude-arg -p" "the default agent runs claude in print mode"
+assert_logged "claude-arg --restricted" "the default agent runs restricted"
+assert_logged "claude-arg Bash,Read" "the default agent is given only Bash and Read"
+assert_logged "claude-arg Bash(./kubectl-nv:*)" \
+    "the tool allow-list reaches claude as one argument, parentheses and all"
+assert_logged "claude-arg dontAsk" "the default agent never stops to ask"
+assert_logged "claude-arg --strict-mcp-config" "the default agent ignores configured MCP servers"
+assert_logged 'claude-arg {"mcpServers":{}}' "the default agent is handed an empty MCP config"
+assert_not_logged "claude-arg --max-turns" "the default agent does not pass a flag claude does not have"
+
+FIRST_ARGV="$(grep -m1 '^claude ' "${EVAL_CALL_LOG}" | sed 's/^claude //')"
+assert_eq "${FIRST_ARGV}" \
+    '-p --restricted --tools Bash,Read --allowedTools Bash(./kubectl-nv:*) --permission-mode dontAsk --strict-mcp-config --mcp-config {"mcpServers":{}}' \
+    "the whole default argv is what it is documented to be"
+
+assert_jq '.agent | test("--restricted")' 'true' "the results file records the agent that ran"
 
 # ---------------------------------------------------------------------------
 echo "# the harness waits for the fault to become observable"
 # ---------------------------------------------------------------------------
 
 reset_fixtures
-set_passing_answers
-export FAKE_OBSERVE_DELAY=2
-run_subject
-unset FAKE_OBSERVE_DELAY
+run_subject FAKE_OBSERVE_DELAY=2
 
 assert_rc 0 "a fault that takes a few polls to appear still passes"
 assert_jq '[.cases[].observedPolls] | map(select(. >= 3)) | length' '5' \
     "each case records that it polled until the finding appeared"
 
-# The agent must never be started before the finding is observable: a run that
-# scored on a cluster that was still healthy proves nothing.
-FIRST_AGENT="$(grep -n '^agent ' "${EVAL_CALL_LOG}" | head -1 | cut -d: -f1)"
+FIRST_AGENT="$(grep -n '^claude ' "${EVAL_CALL_LOG}" | head -1 | cut -d: -f1)"
 THIRD_HEALTH="$(grep -n '^kubectl-nv .*health' "${EVAL_CALL_LOG}" | head -3 | tail -1 | cut -d: -f1)"
 if [ -n "${FIRST_AGENT}" ] && [ -n "${THIRD_HEALTH}" ] && [ "${FIRST_AGENT}" -gt "${THIRD_HEALTH}" ]; then
     ok "the agent starts only after the finding is observable"
@@ -513,81 +739,82 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "# scoring"
+echo "# scoring reads the ANSWER line and nothing else"
 # ---------------------------------------------------------------------------
 
-# An answer that names the wrong node is not an answer about this cluster.
+# A shotgun answer that names everything is not a diagnosis.
 reset_fixtures
-set_passing_answers
-export FAKE_ANSWER_nv_node_002
-FAKE_ANSWER_nv_node_002="$(answer_for NV-NODE-002 node "kubectl-nv-faults-worker2")"
+override_answer NV-NODE-002 \
+    "It might be NV-NODE-002 or NV-NODE-003 on kubectl-nv-faults-worker or worker2, component node or gpu-operator."
+run_subject
+assert_rc 1 "an answer with no ANSWER line fails its case"
+assert_jq '.cases[0].pass' 'false' "a shotgun answer that never commits does not pass"
+assert_jq '.cases[0].named.code' 'false' "the code is not credited from prose around the answer"
+assert_jq '.summary.passed' '4' "the other four cases still pass"
+
+# The wrong node.
+reset_fixtures
+override_answer NV-NODE-002 "ANSWER node=kubectl-nv-faults-worker2 component=node code=NV-NODE-002"
 run_subject
 assert_rc 1 "a run with one failed case exits 1"
 assert_jq '.cases[0].pass' 'false' "an answer naming the wrong node does not pass"
 assert_jq '.cases[0].named.node' 'false' "the wrong node is recorded as the part that was missing"
 assert_jq '.cases[0].named.code' 'true' "the code it did name is still recorded as named"
-assert_jq '.summary.passed' '4' "the other four cases still pass"
 
-# An answer that names the wrong code points at the wrong problem.
+# The node match is exact, not case folded: a node name is a DNS label.
 reset_fixtures
-set_passing_answers
-export FAKE_ANSWER_nv_op_001
-FAKE_ANSWER_nv_op_001="$(answer_for NV-NODE-002 gpu-operator)"
+override_answer NV-NODE-002 "ANSWER node=KUBECTL-NV-FAULTS-WORKER component=node code=NV-NODE-002"
+run_subject
+assert_jq '.cases[0].named.node' 'false' "a node named in the wrong case is not the node"
+
+# A longer code that starts with the right one is a different code.
+reset_fixtures
+override_answer NV-OP-001 "ANSWER node=- component=gpu-operator code=NV-OP-0010"
 run_subject
 assert_rc 1 "a run with a wrong code exits 1"
-assert_jq '.cases[2].pass' 'false' "an answer naming the wrong code does not pass"
-assert_jq '.cases[2].named.code' 'false' "the wrong code is recorded as the part that was missing"
+assert_jq '.cases[2].named.code' 'false' "NV-OP-0010 is not credited as NV-OP-001"
 
-# An answer that leaves the component out is half an answer.
+# A lower case code is the same code.
 reset_fixtures
-set_passing_answers
-export FAKE_ANSWER_nv_dcgm_001
-FAKE_ANSWER_nv_dcgm_001="The GPU problem is on node ${WORKER} and the finding code is NV-DCGM-001."
+override_answer NV-DRV-001 "ANSWER node=${WORKER} component=nvidia-driver-daemonset code=nv-drv-001"
 run_subject
-assert_rc 1 "a run with a missing component exits 1"
-assert_jq '.cases[3].pass' 'false' "an answer with no component does not pass"
-assert_jq '.cases[3].named.component' 'false' "the missing component is recorded"
+assert_rc 0 "a code written in lower case is still the code"
+assert_jq '.cases[4].named.code' 'true' "the code match ignores case"
+
+# The component has to be the field verbatim.
+reset_fixtures
+override_answer NV-DCGM-001 "ANSWER node=${WORKER} component=dcgm code=NV-DCGM-001"
+run_subject
+assert_rc 1 "a run with a wrong component exits 1"
+assert_jq '.cases[3].named.component' 'false' "an abbreviated component is not the component"
 assert_jq '.cases[3].named.node' 'true' "the node it did name is still recorded as named"
 
-# An empty answer names nothing at all.
+# The cluster scoped case expects a dash, and naming a node there is wrong.
 reset_fixtures
-set_passing_answers
-export FAKE_ANSWER_nv_drv_001=""
+override_answer NV-OP-001 "ANSWER node=${WORKER} component=gpu-operator code=NV-OP-001"
 run_subject
-assert_rc 1 "an empty answer fails its case"
-assert_jq '.cases[4].pass' 'false' "an empty answer does not pass"
+assert_rc 1 "naming a node for a cluster scoped finding fails the case"
+assert_jq '.cases[2].named.node' 'false' "the cluster scoped case wants a dash, not a node"
 
 # ---------------------------------------------------------------------------
 echo "# recovery happens whatever went wrong"
 # ---------------------------------------------------------------------------
 
 reset_fixtures
-set_passing_answers
-export FAKE_AGENT_RC=7
+printf '7\n' > "${OVERRIDE_DIR}/.rc"
 run_subject
-unset FAKE_AGENT_RC
+rm -f "${OVERRIDE_DIR}/.rc"
 
 assert_rc 1 "a run where the agent fails exits 1"
 RECOVERS="$(grep '^fault .* recover ' "${EVAL_CALL_LOG}" | awk '{print $2}' | tr '\n' ' ' | sed 's/ $//')"
-if [ "${RECOVERS}" = "${EXPECTED_ORDER}" ]; then
-    ok "an agent that fails still leaves every fault recovered"
-else
-    nope "after an agent failure the recovered faults are '${RECOVERS}', want '${EXPECTED_ORDER}'"
-fi
+assert_eq "${RECOVERS}" "${EXPECTED_ORDER}" "an agent that fails still leaves every fault recovered"
 LEFTOVER="$(find "${STATE_DIR}" -name 'NV-*' 2> /dev/null | wc -l | tr -d ' ')"
-if [ "${LEFTOVER}" = "0" ]; then
-    ok "no fault is left injected after an agent failure"
-else
-    nope "${LEFTOVER} faults are still injected after an agent failure"
-fi
+assert_eq "${LEFTOVER}" "0" "no fault is left injected after an agent failure"
 assert_jq '.cases[0].error' 'the agent command exited 7' "the agent failure is recorded on the case"
 
 # A fault that cannot be injected is a failed case, and the rest still run.
 reset_fixtures
-set_passing_answers
-export FAKE_INJECT_FAIL_CODE=NV-OP-001
-run_subject
-unset FAKE_INJECT_FAIL_CODE
+run_subject FAKE_INJECT_FAIL_CODE=NV-OP-001
 
 assert_rc 1 "a run where one injection fails exits 1"
 assert_jq '.cases[2].pass' 'false' "the case whose injection failed does not pass"
@@ -596,17 +823,61 @@ assert_logged "fault NV-OP-001 recover" "a failed injection is still recovered"
 assert_logged "fault NV-DCGM-001 inject" "the run continues to the next fault"
 
 # ---------------------------------------------------------------------------
-echo "# the default agent command is a command line that runs"
+echo "# a lane that cannot be put back stops the run"
 # ---------------------------------------------------------------------------
 #
-# The default is a claude -p line carrying a tool allow-list with parentheses
-# in it. The harness evaluates the agent command as a shell command line, so an
-# allow-list that is not quoted is a syntax error rather than a run, and no
-# amount of reading the string says which.
+# Injecting the next fault onto a lane still carrying the last one measures
+# nothing, and leaves a broken cluster behind for whoever looks next.
 
 reset_fixtures
-set_passing_answers
-PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
+run_subject FAKE_RECOVER_FAIL_CODE=NV-NODE-003
+
+assert_rc 1 "a failed recover ends the run with exit 1"
+assert_jq '.cases[1].pass' 'false' "the case whose recover failed does not pass"
+assert_jq '.cases[1].recoverError | length > 0' 'true' "the recovery failure is recorded on the case"
+assert_jq '.summary.cases' '2' "the run stops at the fault it could not recover"
+assert_not_logged "fault NV-OP-001 inject" "nothing is injected after a failed recover"
+if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
+    ok "a run stopped by a failed recover still writes its results"
+else
+    nope "a run stopped by a failed recover wrote no results"
+fi
+
+# A recover that reports success but leaves the finding in place is the same
+# problem wearing a zero exit code.
+reset_fixtures
+run_subject FAKE_RECOVER_NOOP_CODE=NV-NODE-002 KUBECTL_NV_EVAL_RECOVER_TIMEOUT=1
+
+assert_rc 1 "a finding that outlives the recover timeout ends the run"
+assert_jq '.cases[0].recoverError | length > 0' 'true' "the finding that would not clear is recorded"
+assert_jq '.summary.cases' '1' "the run stops rather than injecting onto a dirty lane"
+assert_not_logged "fault NV-NODE-003 inject" "nothing is injected after a recover that did not take"
+
+# ---------------------------------------------------------------------------
+echo "# the agent is bounded by the wall clock"
+# ---------------------------------------------------------------------------
+
+reset_fixtures
+touch "${OVERRIDE_DIR}/.hang"
+run_subject KUBECTL_NV_EVAL_AGENT_TIMEOUT=2
+rm -f "${OVERRIDE_DIR}/.hang"
+
+assert_rc 1 "an agent that never returns fails its case"
+assert_jq '[.cases[].error] | map(select(test("timed out"))) | length > 0' 'true' \
+    "the timeout is recorded on the case"
+LEFTOVER="$(find "${STATE_DIR}" -name 'NV-*' 2> /dev/null | wc -l | tr -d ' ')"
+assert_eq "${LEFTOVER}" "0" "a timed out agent still leaves the lane recovered"
+
+# ---------------------------------------------------------------------------
+echo "# an interrupted run recovers and leaves no kubeconfig behind"
+# ---------------------------------------------------------------------------
+
+reset_fixtures
+touch "${OVERRIDE_DIR}/.hang"
+env -u CI -u KUBECTL_NV_EVAL_AGENT -i \
+    PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
+    EVAL_CALL_LOG="${EVAL_CALL_LOG}" EVAL_STATE_DIR="${EVAL_STATE_DIR}" \
+    TMPDIR="${TMPDIR:-/tmp}" \
     KUBECTL_NV_EVAL_BIN="${BIN}" \
     KUBECTL_NV_EVAL_SKILL="${SKILL}" \
     KUBECTL_NV_EVAL_FAULTS_DIR="${FAULTS_DIR}" \
@@ -614,28 +885,35 @@ PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
     KUBECTL_NV_EVAL_RESULTS_DIR="${RESULTS_DIR}" \
     KUBECTL_NV_EVAL_POLL_INTERVAL=0 \
     KUBECTL_NV_EVAL_OBSERVE_TIMEOUT=30 \
-    KUBECTL_NV_EVAL_RECOVER_TIMEOUT=30 \
-    "${RUN}" > "${WORK}/out" 2> "${WORK}/err"
+    KUBECTL_NV_EVAL_AGENT_TIMEOUT=120 \
+    "${RUN}" > "${WORK}/out" 2> "${WORK}/err" &
+SUBJECT_PID=$!
+for _ in $(seq 1 200); do
+    if grep -q '^claude ' "${EVAL_CALL_LOG}" 2> /dev/null; then break; fi
+    sleep 0.1
+done
+kill -TERM "${SUBJECT_PID}" 2> /dev/null
+wait "${SUBJECT_PID}"
 RC=$?
 OUT="$(cat "${WORK}/out")"
 ERR="$(cat "${WORK}/err")"
-RESULT_FILE="$(find "${RESULTS_DIR}" -name '*.json' -type f 2> /dev/null | sort | tail -1)"
+rm -f "${OVERRIDE_DIR}/.hang"
 
-assert_rc 0 "the default agent command runs and its answers score"
-assert_logged "claude-arg -p" "the default agent runs claude in print mode"
-assert_logged "claude-arg Bash(./kubectl-nv:*)" \
-    "the tool allow-list reaches claude as one argument, parentheses and all"
-assert_jq '.agent | test("claude")' 'true' "the results file records the agent that ran"
+assert_rc 130 "an interrupted run exits 130"
+assert_eq "$(grep -c '^fault .* recover ' "${EVAL_CALL_LOG}")" "1" \
+    "an interrupted run recovers the one fault it had injected, once"
+LEFTOVER="$(find "${STATE_DIR}" -name 'NV-*' 2> /dev/null | wc -l | tr -d ' ')"
+assert_eq "${LEFTOVER}" "0" "an interrupted run leaves no fault injected"
+
+STRAY="$(find "${TMPDIR:-/tmp}" -maxdepth 2 -path '*kubectl-nv-eval-case.*' -name 'kubeconfig' 2> /dev/null | wc -l | tr -d ' ')"
+assert_eq "${STRAY}" "0" "an interrupted run leaves no copy of the lane kubeconfig behind"
 
 # ---------------------------------------------------------------------------
 echo "# the harness refuses to run where it must not"
 # ---------------------------------------------------------------------------
 
 reset_fixtures
-set_passing_answers
-export CI=true
-run_subject
-unset CI
+run_subject CI=true
 
 assert_rc 2 "CI set is a refusal"
 assert_says "CI" "the refusal says what it refused"
@@ -647,70 +925,97 @@ else
 fi
 
 reset_fixtures
-set_passing_answers
-export CI=""
-run_subject
-unset CI
+run_subject CI=
 assert_rc 0 "an empty CI is not set, so the run proceeds"
 
 reset_fixtures
-set_passing_answers
-export FAKE_CONTEXT="docker-desktop"
-run_subject
-unset FAKE_CONTEXT
-
+run_subject FAKE_CONTEXT=docker-desktop
 assert_rc 2 "a context that is not a kubectl-nv lane is a refusal"
 assert_says "docker-desktop" "the refusal names the context it refused"
 assert_not_logged "inject" "nothing is injected against a cluster that is not a lane"
 
+# The context has to be the lane's own, not merely something under the
+# prefix: kind-kubectl-nv-faults-evil.example.com is somebody else's cluster.
 reset_fixtures
-set_passing_answers
-export FAKE_CONTEXT="kind-kubectl-nv-faults-evil.example.com"
-run_subject
-unset FAKE_CONTEXT
-assert_rc 0 "a context under the kubectl-nv lane prefix is accepted"
+run_subject FAKE_CONTEXT=kind-kubectl-nv-faults-evil.example.com
+assert_rc 2 "a context that only starts with the lane name is refused"
+assert_not_logged "inject" "nothing is injected against a lookalike context"
 
 reset_fixtures
-set_passing_answers
-export FAKE_CONTEXT="prod-kind-kubectl-nv-faults"
-run_subject
-unset FAKE_CONTEXT
+run_subject FAKE_CONTEXT=prod-kind-kubectl-nv-faults
 assert_rc 2 "a context that merely contains the lane prefix is refused"
 
-# A missing binary cannot be evaluated, and must not be worked around.
+# A kubeconfig that can reach a cluster that is not a local kind lane is not
+# a lane kubeconfig, whatever its context is called.
 reset_fixtures
-set_passing_answers
-PATH="${SHIM_DIR}:${TOOL_DIR}" HOME="${FAKE_HOME}" \
-    KUBECTL_NV_EVAL_BIN="${WORK}/no-such-binary" \
-    KUBECTL_NV_EVAL_SKILL="${SKILL}" \
-    KUBECTL_NV_EVAL_FAULTS_DIR="${FAULTS_DIR}" \
-    KUBECTL_NV_EVAL_KUBECONFIG="${LANE_KUBECONFIG}" \
-    KUBECTL_NV_EVAL_RESULTS_DIR="${RESULTS_DIR}" \
-    KUBECTL_NV_EVAL_AGENT="${AGENT_STUB}" \
-    "${RUN}" > "${WORK}/out" 2> "${WORK}/err"
-RC=$?
-OUT="$(cat "${WORK}/out")"
-ERR="$(cat "${WORK}/err")"
+run_subject FAKE_SERVER=https://k8s.prod.example.com
+assert_rc 2 "a kubeconfig pointing off the loopback is refused"
+assert_says "server" "the refusal says the server is wrong"
+assert_not_logged "inject" "nothing is injected through a kubeconfig that is not loopback"
+
+# More than one context means the file can reach more than the lane, and that
+# file is handed to an agent.
+reset_fixtures
+run_subject FAKE_EXTRA_CONTEXT=prod
+assert_rc 2 "a kubeconfig carrying a second context is refused"
+assert_not_logged "inject" "nothing is injected through a multi context kubeconfig"
+
+# ---------------------------------------------------------------------------
+echo "# what cannot be run is exit 3, and nothing is touched"
+# ---------------------------------------------------------------------------
+
+reset_fixtures
+run_subject KUBECTL_NV_EVAL_BIN="${WORK}/no-such-binary"
 assert_rc 3 "a missing binary is exit 3"
 assert_not_logged "inject" "nothing is injected when the binary is missing"
+
+reset_fixtures
+run_subject KUBECTL_NV_EVAL_SKILL="${WORK}/no-such-skill.md"
+assert_rc 3 "a missing skill file is exit 3"
+assert_says "skill" "the refusal names the skill"
+assert_not_logged "inject" "nothing is injected when the skill is missing"
+
+reset_fixtures
+run_subject KUBECTL_NV_EVAL_KUBECONFIG="${WORK}/no-such-kubeconfig"
+assert_rc 3 "a missing lane kubeconfig is exit 3"
+assert_not_logged "inject" "nothing is injected when the kubeconfig is missing"
+
+reset_fixtures
+EMPTY_FAULTS="${WORK}/no-faults"
+mkdir -p "${EMPTY_FAULTS}"
+run_subject KUBECTL_NV_EVAL_FAULTS_DIR="${EMPTY_FAULTS}"
+assert_rc 3 "a fault script that is not there is exit 3"
+assert_says "NV-NODE-002" "the refusal names the first script it could not find"
+assert_not_logged "inject" "nothing is injected when a fault script is missing"
 
 # ---------------------------------------------------------------------------
 echo "# the default kubeconfig is never touched"
 # ---------------------------------------------------------------------------
 
-SENTINEL_AFTER="$(shasum -a 256 < "${FAKE_HOME}/.kube/config" | awk '{print $1}')"
-if [ "${SENTINEL_BEFORE}" = "${SENTINEL_AFTER}" ]; then
-    ok "the default kubeconfig is byte for byte what it was"
-else
-    nope "the default kubeconfig changed: ${SENTINEL_BEFORE} -> ${SENTINEL_AFTER}"
-fi
+reset_fixtures
+run_subject
+assert_rc 0 "the full run used for the kubeconfig assertions below passed"
 
-KUBECTL_WITHOUT_KUBECONFIG="$(grep '^kubectl ' "${EVAL_CALL_LOG}" | grep -cv -- '--kubeconfig' || true)"
-if [ "${KUBECTL_WITHOUT_KUBECONFIG}" = "0" ]; then
-    ok "every kubectl call names the lane kubeconfig"
+SENTINEL_AFTER="$(shasum -a 256 < "${FAKE_HOME}/.kube/config" | awk '{print $1}')"
+assert_eq "${SENTINEL_AFTER}" "${SENTINEL_BEFORE}" "the default kubeconfig is byte for byte what it was"
+
+KUBECTL_CALLS="$(grep -c '^kubectl ' "${EVAL_CALL_LOG}")"
+if [ "${KUBECTL_CALLS}" -lt 3 ]; then
+    nope "only ${KUBECTL_CALLS} kubectl calls were recorded, so the check below proves nothing"
 else
-    nope "${KUBECTL_WITHOUT_KUBECONFIG} kubectl calls were made without --kubeconfig"
+    ok "${KUBECTL_CALLS} kubectl calls were recorded to check"
 fi
+KUBECTL_WITHOUT_KUBECONFIG="$(grep '^kubectl ' "${EVAL_CALL_LOG}" | grep -cv -- '--kubeconfig' || true)"
+assert_eq "${KUBECTL_WITHOUT_KUBECONFIG}" "0" "every kubectl call names the lane kubeconfig"
+
+NV_CALLS="$(grep -c '^kubectl-nv ' "${EVAL_CALL_LOG}")"
+if [ "${NV_CALLS}" -lt 5 ]; then
+    nope "only ${NV_CALLS} binary calls were recorded, so the check below proves nothing"
+else
+    ok "${NV_CALLS} binary calls were recorded to check"
+fi
+NV_WITHOUT_KUBECONFIG="$(grep '^kubectl-nv ' "${EVAL_CALL_LOG}" | grep -cv -- '--kubeconfig' || true)"
+assert_eq "${NV_WITHOUT_KUBECONFIG}" "0" "every binary call names the lane kubeconfig"
 
 # ---------------------------------------------------------------------------
 echo "# rendering the README table"
@@ -754,38 +1059,53 @@ else
     nope "rendering ate the content after the end marker"
 fi
 
+# A run with one failure renders one exact row, naming the code that failed.
 reset_fixtures
-set_passing_answers
+override_answer NV-DCGM-001 "ANSWER node=${WORKER} component=dcgm code=NV-DCGM-001"
 run_subject
+assert_rc 1 "the run used for the renderer row had one failure"
+RENDER_RESULTS="${WORK}/render-results"
+rm -rf "${RENDER_RESULTS}"
+mkdir -p "${RENDER_RESULTS}"
+cp "${RESULT_FILE}" "${RENDER_RESULTS}/2026-10-12.json"
 write_readme_fixture
-PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${RESULTS_DIR}" --readme "${README_FIXTURE}" \
+PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${RENDER_RESULTS}" --readme "${README_FIXTURE}" \
     > "${WORK}/out" 2> "${WORK}/err"
 RC=$?
-OUT="$(cat "${WORK}/out")"
-ERR="$(cat "${WORK}/err")"
 assert_rc 0 "rendering a recorded run succeeds"
-if grep -q '| 5 | 5 |' "${README_FIXTURE}"; then
-    ok "the rendered table carries the case and pass counts"
-else
-    nope "the rendered table has no row for the recorded run" "$(cat "${README_FIXTURE}")"
-fi
+
+ROW="$(grep '^| 2026-10-12 ' "${README_FIXTURE}")"
+EXPECTED_ROW='| 2026-10-12 | `claude -p --restricted --tools Bash,Read --allowedTools '"'"'Bash(./kubectl-nv:*)'"'"' --permission-mode dontAsk --strict-mcp-config --mcp-config '"'"'{"mcpServers":{}}'"'"'` | 5 | 4 | NV-DCGM-001 |'
+assert_eq "${ROW}" "${EXPECTED_ROW}" "the rendered row is exactly the run that was recorded"
+
 if grep -q 'No evaluation run has been recorded' "${README_FIXTURE}"; then
     nope "the empty note survived a recorded run"
 else
     ok "the empty note is gone once a run is recorded"
 fi
 
-# Rendering twice must give the same file: the markers are replaced, not
-# appended to.
 BEFORE_SECOND="$(shasum -a 256 < "${README_FIXTURE}" | awk '{print $1}')"
-PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${RESULTS_DIR}" --readme "${README_FIXTURE}" \
+PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${RENDER_RESULTS}" --readme "${README_FIXTURE}" \
     > /dev/null 2>&1
 AFTER_SECOND="$(shasum -a 256 < "${README_FIXTURE}" | awk '{print $1}')"
-if [ "${BEFORE_SECOND}" = "${AFTER_SECOND}" ]; then
-    ok "rendering is idempotent"
+assert_eq "${AFTER_SECOND}" "${BEFORE_SECOND}" "rendering is idempotent"
+
+# A pipe inside a cell has to be escaped or it splits the row in two.
+PIPE_RESULTS="${WORK}/pipe-results"
+rm -rf "${PIPE_RESULTS}"
+mkdir -p "${PIPE_RESULTS}"
+jq '.agent = "my-agent --print | tee log"' < "${RESULT_FILE}" > "${PIPE_RESULTS}/2026-10-13.json"
+write_readme_fixture
+PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${PIPE_RESULTS}" --readme "${README_FIXTURE}" \
+    > /dev/null 2>&1
+PIPE_ROW="$(grep '^| 2026-10-13 ' "${README_FIXTURE}")"
+if printf '%s' "${PIPE_ROW}" | grep -qF -- '\|'; then
+    ok "a pipe in a cell is escaped"
 else
-    nope "rendering twice gave two different files"
+    nope "a pipe in a cell was not escaped, so the row has the wrong columns" "row: ${PIPE_ROW}"
 fi
+PIPE_COLUMNS="$(printf '%s' "${PIPE_ROW}" | sed 's/\\|//g' | tr -cd '|' | wc -c | tr -d ' ')"
+assert_eq "${PIPE_COLUMNS}" "6" "the row still has five columns"
 
 # ---------------------------------------------------------------------------
 echo "# the shipped README carries the markers the renderer needs"
@@ -804,7 +1124,7 @@ echo "# static analysis"
 
 if command -v shellcheck > /dev/null 2>&1; then
     for dir in / "${SCRIPT_DIR}"; do
-        if (cd "${dir}" && shellcheck -x "${RUN}" "${RENDER}" "${SCRIPT_DIR}/run_test.sh"); then
+        if (cd "${dir}" && shellcheck -x "${RUN}" "${RENDER}" "${SHIM_TEMPLATE}" "${SCRIPT_DIR}/run_test.sh"); then
             ok "shellcheck -x is clean from ${dir}"
         else
             nope "shellcheck -x reported findings from ${dir}"
