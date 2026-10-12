@@ -163,16 +163,30 @@ func readAgentsDoc(t *testing.T) string {
 	return string(raw)
 }
 
-// sentencesAbout returns the sentences of the page that name a subject. The
-// page is prose with hard wrapped lines, so the newlines are flattened first
-// or a sentence spanning two lines would be two.
+// sentencesAbout returns the parts of the page that name a subject.
+//
+// A paragraph is prose with hard wrapped lines, so its newlines are flattened
+// before it is split into sentences, or a sentence spanning two lines would be
+// two. A table is not prose: each row is about one kind, and flattening a
+// table would make every row a statement about every kind in it.
 func sentencesAbout(doc, subject string) []string {
-	flat := strings.ReplaceAll(doc, "\n", " ")
-
 	var out []string
-	for _, sentence := range strings.Split(flat, ". ") {
-		if strings.Contains(sentence, subject) {
-			out = append(out, sentence)
+	for _, block := range strings.Split(doc, "\n\n") {
+		if strings.HasPrefix(strings.TrimSpace(block), "|") {
+			for _, row := range strings.Split(block, "\n") {
+				if strings.Contains(row, subject) {
+					out = append(out, row)
+				}
+			}
+
+			continue
+		}
+
+		flat := strings.ReplaceAll(block, "\n", " ")
+		for _, sentence := range strings.Split(flat, ". ") {
+			if strings.Contains(sentence, subject) {
+				out = append(out, sentence)
+			}
 		}
 	}
 
