@@ -316,10 +316,33 @@ func TestMIGConfigNotAppliedReportsMixedWithOnlyZeroMIGResources(t *testing.T) {
 		t.Errorf("Message is %q", got)
 	}
 
-	// The leftover is still named, because it is what a reader will see on
-	// the node and wonder about.
-	if got := finding.Evidence["migResources"]; got != "nvidia.com/mig-1g.10gb" {
-		t.Errorf("evidence migResources is %q, want the zeroed leftover named", got)
+	// The zeroed leftover is not a resource the node advertises, so it is not
+	// in the evidence either. Listing it would contradict the finding in its
+	// own proof: the message says the node advertises no MIG profile and the
+	// evidence would name one.
+	if _, present := finding.Evidence["migResources"]; present {
+		t.Errorf("a zero-capacity profile is not advertised, so it is left out: %v", finding.Evidence)
+	}
+}
+
+// The same filter on the other branch: a single-strategy node is reported for
+// the profiles it really advertises, and a zeroed leftover beside them is not
+// one of them.
+func TestMIGConfigNotAppliedNamesOnlyTheAdvertisedProfiles(t *testing.T) {
+	t.Parallel()
+
+	node := migNode("worker-1",
+		withMIG("single", "all-1g.5gb", "success", true),
+		withMIGResources(map[string]inventory.ResourceCount{
+			"nvidia.com/mig-1g.5gb":  {Capacity: 56, Allocatable: 56},
+			"nvidia.com/mig-2g.10gb": {Capacity: 0, Allocatable: 0},
+		}),
+	)
+
+	finding := only(t, evaluate(rules.NewMIGConfigNotApplied(), migInput(node)))
+
+	if got := finding.Evidence["migResources"]; got != "nvidia.com/mig-1g.5gb" {
+		t.Errorf("evidence migResources is %q, want the advertised profile alone", got)
 	}
 }
 

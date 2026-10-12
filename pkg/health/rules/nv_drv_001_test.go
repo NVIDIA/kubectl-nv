@@ -377,18 +377,36 @@ func TestDriverPodNotReadyDropsToInfoMidUpgrade(t *testing.T) {
 	}
 }
 
-// upgrade-done is not an upgrade in progress. A driver that is not ready on a
-// node the controller has finished with is an ordinary error.
+// Neither terminal state is an upgrade in progress. A driver that is not
+// ready on a node the controller has finished with is an ordinary error, and
+// that holds whichever way the upgrade ended.
+//
+// upgrade-failed is the one that matters here. It is the state of a node whose
+// upgrade is over and did not work, which is exactly when a driver that will
+// not come up is a fault rather than a step: lowering it to info there hid the
+// worst case behind the rule meant to excuse a rollout.
 func TestDriverPodNotReadyStaysAnErrorAfterTheUpgrade(t *testing.T) {
 	t.Parallel()
 
-	node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))
-	withUpgradeState("upgrade-done")(&node)
+	for _, state := range []string{"upgrade-done", "upgrade-failed"} {
+		t.Run(state, func(t *testing.T) {
+			t.Parallel()
 
-	finding := only(t, evaluate(rules.NewDriverPodNotReady(), drvInput(node)))
+			node := driverNode("worker-1", driverPod(inventory.ComponentDriver, false, 0))
+			withUpgradeState(state)(&node)
 
-	if finding.Severity != output.SeverityError {
-		t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+			finding := only(t, evaluate(rules.NewDriverPodNotReady(), drvInput(node)))
+
+			if finding.Severity != output.SeverityError {
+				t.Errorf("Severity is %q, want %q", finding.Severity, output.SeverityError)
+			}
+
+			// The downgrade writes the label into the evidence to say why it
+			// happened, so its absence is the second half of the assertion.
+			if _, present := finding.Evidence[inventory.LabelUpgradeState]; present {
+				t.Errorf("the finding was lowered for an upgrade that is over: %v", finding.Evidence)
+			}
+		})
 	}
 }
 
