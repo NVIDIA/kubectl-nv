@@ -459,7 +459,7 @@ func TestUnknownFieldIsAUsageErrorListingTheValidOnes(t *testing.T) {
 	}
 	want := "unknown --fields path \"status.redy\": want one of " +
 		"apiVersion, kind, metadata.annotations, metadata.creationTimestamp, metadata.labels, " +
-		"metadata.name, metadata.namespace, spec.driver, status.gpus"
+		"metadata.name, metadata.namespace, spec, spec.driver, status, status.gpus"
 	if err.Error() != want {
 		t.Errorf("error is %q,\nwant %q", err.Error(), want)
 	}
@@ -494,7 +494,9 @@ func TestFieldPathsOfAListAreTheItemPaths(t *testing.T) {
 		"metadata.labels",
 		"metadata.name",
 		"metadata.namespace",
+		"spec",
 		"spec.driver",
+		"status",
 		"status.gpus",
 	}
 
@@ -642,7 +644,9 @@ func TestFieldPathsSeeThroughAKindThatMarshalsItself(t *testing.T) {
 		"metadata.labels",
 		"metadata.name",
 		"metadata.namespace",
+		"spec",
 		"spec.driver",
+		"status",
 		"status.gpus",
 	}
 	if !reflect.DeepEqual(paths, want) {
@@ -823,7 +827,7 @@ func (r stampedReport) MarshalJSON() ([]byte, error) {
 func (r *stampedReport) DeepCopyObject() runtime.Object { clone := *r; return &clone }
 
 func (r *stampedReport) TableColumns(bool) []Column {
-	return []Column{{Header: "NAME", Field: "metadata.name"}}
+	return []Column{OneField("NAME", "metadata.name")}
 }
 
 func (r *stampedReport) TableRows(bool) [][]string { return [][]string{{r.Name}} }
@@ -843,6 +847,7 @@ func TestASingleKindThatMarshalsItselfStillHasFields(t *testing.T) {
 		"metadata.labels",
 		"metadata.name",
 		"metadata.namespace",
+		"status",
 		"status.gpus",
 	}
 	if !reflect.DeepEqual(paths, want) {

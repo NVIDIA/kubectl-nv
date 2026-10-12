@@ -316,13 +316,15 @@ func TestEveryTableColumnNamesAFieldAUserCanAskFor(t *testing.T) {
 
 	for _, wide := range []bool{false, true} {
 		for _, column := range report.TableColumns(wide) {
-			if column.Field == "" {
+			if len(column.Fields) == 0 {
 				t.Errorf("column %q (wide=%v) names no field", column.Header, wide)
 				continue
 			}
-			if !known[column.Field] {
-				t.Errorf("column %q (wide=%v) names field %q, which is not one of %v",
-					column.Header, wide, column.Field, valid)
+			for _, field := range column.Fields {
+				if !known[field] {
+					t.Errorf("column %q (wide=%v) names field %q, which is not one of %v",
+						column.Header, wide, field, valid)
+				}
 			}
 		}
 	}

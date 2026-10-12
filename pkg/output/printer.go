@@ -102,11 +102,23 @@ func NewPrinter(value string) (Printer, error) {
 type Column struct {
 	// Header is the column title.
 	Header string
-	// Field is the dotted JSON path this column renders, for instance
+	// Fields are the dotted JSON paths this column renders, for instance
 	// "status.ready". It is what --fields matches a column against, so a column
 	// that leaves it empty cannot be asked for by name and is dropped as soon as
 	// --fields is given.
-	Field string
+	//
+	// A cell often renders more than one path: a GPU count showing requested
+	// out of allocatable out of capacity is three of them. All of them are
+	// named, and the column survives --fields only when every one was asked
+	// for, because a table has nowhere to put half a cell and a column kept by
+	// one of its paths would print the other two to a caller that named
+	// neither.
+	Fields []string
+}
+
+// OneField is a column rendering a single path, which is most of them.
+func OneField(header, path string) Column {
+	return Column{Header: header, Fields: []string{path}}
 }
 
 // TableRows is implemented by a kind that can render itself as a table. It is
@@ -121,9 +133,9 @@ type TableRows interface {
 
 // nameAndAgeColumns is the table of a kind that carries nothing but a name.
 func nameAndAgeColumns(wide bool) []Column {
-	columns := []Column{{Header: "NAME", Field: "metadata.name"}}
+	columns := []Column{OneField("NAME", "metadata.name")}
 	if wide {
-		columns = append(columns, Column{Header: "AGE", Field: "metadata.creationTimestamp"})
+		columns = append(columns, OneField("AGE", "metadata.creationTimestamp"))
 	}
 
 	return columns
@@ -173,7 +185,7 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	kept := keptColumns(p.Fields)
 	headers := make([]string, 0, len(columns))
 	for i, c := range columns {
-		if len(p.Fields) > 0 && !kept[c.Field] {
+		if len(p.Fields) > 0 && !keepsColumn(kept, c) {
 			continue
 		}
 		keep = append(keep, i)
@@ -203,6 +215,22 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	}
 
 	return nil
+}
+
+// keepsColumn reports whether a column survives a projection: every path it
+// renders has to have been asked for, or the cell would carry a value the
+// caller did not name.
+func keepsColumn(kept map[string]bool, c Column) bool {
+	if len(c.Fields) == 0 {
+		return false
+	}
+	for _, path := range c.Fields {
+		if !coveredBy(kept, path) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // namePrinter prints one "kind/name" line per item, with the kind lowercased

@@ -221,29 +221,23 @@ func (r *HealthReport) ExitCode(failOn output.Severity) int {
 // needs every row to have one.
 const noNode = "-"
 
-// findingsField is the projection path every column of this table renders
-// from. --fields matches a column against it, and output.FieldPaths stops at
-// the findings slice rather than descending into a Finding, so "findings" is
-// the only path that names any of these columns. All of them carry it: asking
-// for --fields findings keeps the table whole, and asking for anything else
-// drops it whole, which is the only honest answer when the projection cannot
-// address one column of it.
-const findingsField = "findings"
-
-// TableColumns implements output.TableRows.
+// TableColumns implements output.TableRows. Each column names the one field of
+// a finding it renders, so --fields findings.code keeps the CODE column and
+// nothing else, and --fields findings keeps none of them: the paths a caller
+// names are fields of a finding, not the list of them.
 func (r *HealthReport) TableColumns(wide bool) []output.Column {
 	columns := []output.Column{
-		{Header: "NODE", Field: findingsField},
-		{Header: "CODE", Field: findingsField},
-		{Header: "SEVERITY", Field: findingsField},
-		{Header: "COMPONENT", Field: findingsField},
-		{Header: "MESSAGE", Field: findingsField},
+		output.OneField("NODE", "findings.node"),
+		output.OneField("CODE", "findings.code"),
+		output.OneField("SEVERITY", "findings.severity"),
+		output.OneField("COMPONENT", "findings.component"),
+		output.OneField("MESSAGE", "findings.message"),
 	}
 
 	// The next command is the whole point of a finding and the widest thing in
 	// it, so it waits for -o wide rather than pushing the message off screen.
 	if wide {
-		columns = append(columns, output.Column{Header: "NEXT", Field: findingsField})
+		columns = append(columns, output.OneField("NEXT", "findings.next"))
 	}
 
 	return columns

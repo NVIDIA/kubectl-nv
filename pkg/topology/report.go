@@ -123,27 +123,31 @@ func NewTopologyReport() *TopologyReport {
 // when a job was asked about, so that the ordinary table is not a column of
 // one repeated word.
 func (r *TopologyReport) TableColumns(wide bool) []output.Column {
-	// Every column that comes out of a level names "levels", and the fit
-	// column names "fit". Those are the paths output.FieldPaths offers for
-	// this kind: a level and a group each marshal themselves, which is how
-	// they guarantee no nulls, and a type that marshals itself is a leaf to
-	// the path walker. So --fields here selects whole sections of the report
-	// rather than single numbers, and a column naming a finer path would be
-	// one no user could ask for.
+	// Each column names the field it renders, down to the number. The path
+	// walker descends into a Level and a Group by their wire shape rather than
+	// stopping at their MarshalJSON, so "levels.groups.free" is a path a
+	// caller can ask for and this is the column it keeps.
 	columns := []output.Column{
-		{Header: "LEVEL", Field: "levels"},
-		{Header: "GROUP", Field: "levels"},
-		{Header: "NODES", Field: "levels"},
-		{Header: "ALLOCATABLE", Field: "levels"},
-		{Header: "REQUESTED", Field: "levels"},
-		{Header: "FREE", Field: "levels"},
-		{Header: "LARGEST-FREE", Field: "levels"},
+		output.OneField("LEVEL", "levels.name"),
+		output.OneField("GROUP", "levels.groups.value"),
+		output.OneField("NODES", "levels.groups.nodeCount"),
+		output.OneField("ALLOCATABLE", "levels.groups.allocatable"),
+		// The three that are printed as "unknown" until the requests were
+		// read name that fact as well as the number, because a cell showing
+		// "unknown" is showing requestedKnown and not only its own field.
+		{Header: "REQUESTED", Fields: []string{"levels.groups.requested", "levels.groups.requestedKnown"}},
+		{Header: "FREE", Fields: []string{"levels.groups.free", "levels.groups.requestedKnown"}},
+		{Header: "LARGEST-FREE", Fields: []string{
+			"levels.groups.largestFreeNode", "levels.groups.requestedKnown",
+		}},
 	}
 	if wide {
-		columns = append(columns, output.Column{Header: "NODE-NAMES", Field: "levels"})
+		columns = append(columns, output.OneField("NODE-NAMES", "levels.groups.nodes"))
 	}
 	if r.Fit != nil {
-		columns = append(columns, output.Column{Header: "FITS", Field: "fit"})
+		columns = append(columns, output.Column{Header: "FITS", Fields: []string{
+			"fit.levels.level", "fit.levels.groups",
+		}})
 	}
 
 	return columns

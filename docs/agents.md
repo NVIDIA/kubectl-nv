@@ -145,13 +145,24 @@ instance `status.ready` or `metadata.labels`. `apiVersion`, `kind` and
 `metadata.name` survive whatever is asked for: without them a consumer cannot
 tell what it is holding or which thing the values belong to.
 
+A path reaches inside a repeated part as well as into a nested object, so
+`levels.groups.free` is one number of every group of every level, and the
+arrays on the way down are kept in their own order. A section is a path too:
+`levels` takes the levels whole, which is what a caller that wants a section
+rather than a field asks for.
+
 A path a kind does not have is exit 2, with the valid paths listed. A typo
 would otherwise return an item missing the field the caller branches on, which
 is worse than no answer.
 
 Both flags work for every format. For `table` and `wide`, `--fields`
-restricts the columns to the ones that render a requested path, always keeping
-the name. For `name` there is nothing left to project.
+restricts the columns to the ones every path of which was asked for, always
+keeping the name. A cell often renders several paths, such as a GPU count
+showing requested out of allocatable out of capacity, and a column is kept only
+when all of them were named: a table has nowhere to put half a cell, and a
+column kept by one of its paths would print the others to a caller that named
+neither. Asking for a section keeps the columns inside it. For `name` there is
+nothing left to project.
 
 Run `kubectl nv schema <kind>` to see which paths a kind offers.
 

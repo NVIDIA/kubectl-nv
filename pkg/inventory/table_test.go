@@ -18,6 +18,7 @@ package inventory
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
@@ -215,18 +216,22 @@ func TestColumnsCarryTheirField(t *testing.T) {
 	node.Topology = map[string]string{"fabric.topograph.run/tier-0": "switch-a"}
 	list.Items = append(list.Items, *node)
 
-	want := map[string]string{
-		"NODE":                        "metadata.name",
-		"PRODUCT":                     "product",
-		"GPUS":                        "capacity",
-		"DRIVER":                      "driverVersion",
-		"CUDA":                        "cudaVersion",
-		"MODE":                        "mode",
-		"MIG":                         "mig",
-		"UPGRADE":                     "upgradeState",
-		"STATUS":                      "ready",
-		"CLIQUE":                      "clique",
-		"FABRIC.TOPOGRAPH.RUN/TIER-0": "topology",
+	// Every path each cell renders, not only the one a reader would ask for.
+	// GPUS prints requested out of allocatable out of capacity and STATUS
+	// prints the Ready condition and the cordon; a column naming fewer paths
+	// than it prints is kept by --fields and then shows a number nobody named.
+	want := map[string][]string{
+		"NODE":                        {"metadata.name"},
+		"PRODUCT":                     {"product"},
+		"GPUS":                        {"requested", "allocatable", "capacity"},
+		"DRIVER":                      {"driverVersion"},
+		"CUDA":                        {"cudaVersion"},
+		"MODE":                        {"mode"},
+		"MIG":                         {"mig.strategy"},
+		"UPGRADE":                     {"upgradeState"},
+		"STATUS":                      {"ready", "unschedulable"},
+		"CLIQUE":                      {"clique"},
+		"FABRIC.TOPOGRAPH.RUN/TIER-0": {"topology"},
 	}
 
 	for _, wide := range []bool{false, true} {
@@ -238,8 +243,8 @@ func TestColumnsCarryTheirField(t *testing.T) {
 				continue
 			}
 
-			if c.Field != expected {
-				t.Errorf("column %q has field %q, want %q", c.Header, c.Field, expected)
+			if !slices.Equal(c.Fields, expected) {
+				t.Errorf("column %q names %v, want %v", c.Header, c.Fields, expected)
 			}
 		}
 	}
@@ -267,14 +272,17 @@ func TestColumnFieldsArePathsOfTheKind(t *testing.T) {
 	}
 
 	for _, c := range list.TableColumns(true) {
-		if c.Field == "" {
+		if len(c.Fields) == 0 {
 			t.Errorf("column %q names no field", c.Header)
 
 			continue
 		}
 
-		if !valid[c.Field] {
-			t.Errorf("column %q names field %q, which is not a path of this kind: %v", c.Header, c.Field, paths)
+		for _, field := range c.Fields {
+			if !valid[field] {
+				t.Errorf("column %q names field %q, which is not a path of this kind: %v",
+					c.Header, field, paths)
+			}
 		}
 	}
 }
@@ -285,7 +293,7 @@ func TestGPUNodeSingleColumnsCarryTheirField(t *testing.T) {
 	t.Parallel()
 
 	for _, c := range NewGPUNode("n1").TableColumns(false) {
-		if c.Field == "" {
+		if len(c.Fields) == 0 {
 			t.Errorf("column %q names no field", c.Header)
 		}
 	}
