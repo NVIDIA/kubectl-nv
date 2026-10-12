@@ -18,8 +18,13 @@ project_name: kubectl-nv
 
 builds:
   - id: kubectl-nv
-    main: ./cmd
+    main: ./cmd/kubectl-nv
     binary: kubectl-nv
+    # The released binary reports the tag it was cut from; an unstamped build
+    # says "dev". -s -w drop the symbol table and DWARF, which no user of a
+    # released plugin reads and which carry build paths.
+    ldflags:
+      - -s -w -X main.version={{.Version}}
     env:
       - CGO_ENABLED=0
     goos:

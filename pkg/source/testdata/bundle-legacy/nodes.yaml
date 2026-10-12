@@ -1,0 +1,20 @@
+# The retired format: cmd/adm/mustgather used to marshal a corev1.NodeList with
+# gopkg.in/yaml.v2, which ignores the json tags and lowercases the Go field
+# names. No release ever shipped it, and it is no longer read: the keys below
+# match no json tag, so every node decodes empty.
+typemeta:
+  kind: ""
+  apiversion: ""
+listmeta:
+  selflink: ""
+  resourceversion: ""
+items:
+- objectmeta:
+    name: worker-capacity
+    resourceversion: "1002"
+    labels:
+      nvidia.com/gpu.present: "true"
+  status:
+    capacity:
+      nvidia.com/gpu:
+        format: DecimalSI

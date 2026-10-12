@@ -26,6 +26,25 @@ every action pinned to a commit. `make release-snapshot` produced the four binar
 device names in tracked files. `bin/kubectl-nv` (85 MB) left git. `ROADMAP.md` is the 2026-10-10 draft with the
 krew bullet replaced by release-page install and two unbuilt items marked as from v0.2.0.
 
+## M1: cobra skeleton, output contract, source interface, Mokka lane (2026-10-11)
+
+Track B replaced urfave/cli with cobra and `genericclioptions.ConfigFlags`, so every command takes the kubectl
+connection flags; `adm must-gather` kept `--kubeconfig`/`-k`, `KUBECONFIG`, `--artifacts-dir`, `ARTIFACT_DIR` and
+`--debug`/`-d`, and moved from `cmd/adm/mustgather` to `pkg/mustgather`. The version now comes from ldflags. Exit
+codes are 0 ok, 1 findings, 2 usage (`pkg/output/exitcode.go:34`), 3 partial (`:38`) and 4 could not run (`:42`);
+`main` recovers a panic into 4 (`cmd/kubectl-nv/main.go:54`). `pkg/output` holds the envelope with `apiVersion:
+kubectl-nv.nvidia.com/v1alpha1`, the printers (`-o name` prints `gpunode/<name>`), `ReportStatus` and a stderr-only
+logger that strips control characters. `pkg/source` reads live (paginated at 500 with `FullListIfExpired`, no
+`Get`) or from a bundle; a GPU node has `nvidia.com/gpu` capacity above zero or a `gpu.nvidia.com` ResourceSlice,
+and the PCI and `gpu.present` labels alone make a hinted node (`pkg/source/source.go:197`). must-gather writes
+Kubernetes-native YAML, a `resourceslices.yaml`, artifacts 0700/0600, and says so on stderr when there are no driver
+pods (`pkg/mustgather/mustgather.go:911`). A guard runs every leaf command against fakes and fails on any write
+(`pkg/cmd/readonly_test.go:86`). `hack/mokka` brings up a kind cluster with the Mokka node image pinned by digest
+(`hack/mokka/lib.sh:43`), nvml-mock 0.4.0 and GPU Operator v26.3.3, in its own kubeconfig, and `make e2e-mokka`
+(`Makefile:91`) runs the e2e suite against it and deletes it. The milestone is 59 commits on 1be66bd: 78 files and
+12124 insertions outside `vendor/`, and 21489 vendored lines removed with urfave/cli and yaml.v2. The acceptance run
+on 8d6f3ee passed `make build lint test check-vendor e2e-mokka`, the e2e suite in 8.5 s.
+
 ## Facts observed
 
 - Toolchain on the build Mac: go 1.27.2, golangci-lint 2.14.0 (0 issues), goreleaser 2.18.3, kind v0.33.0,
@@ -37,4 +56,27 @@ krew bullet replaced by release-page install and two unbuilt items marked as fro
 - `cmd/main.go:41` hard-codes version 0.1.0; a tag does not change what `--version` prints.
 - Open for Track C: when both the driver and the vGPU manager DaemonSets fail, the returned error names only the
   driver failure (both still reach the error log); per-container log collection still stops at the first failing
-  container; `executeRemoteCommand` ignores `--kubeconfig` and sends no container name (`k8sUtils.go:125-157`).
+  container; `executeRemoteCommand` sends no container name (it now uses the shared REST config, fixed in M1).
+- Mokka lane timings on the build Mac, t4 profile: cluster create 18 to 26 s; nvml-mock 63 to 138 s; GPU Operator
+  v26.3.3 228 s warm, 297 s and 427 s cold; DaemonSet and per-worker assertions under 1 s; delete 1 to 2 s;
+  ClusterPolicy reached `ready` in every run.
+- Operands on the lane: device plugin, GFD, dcgm-exporter and operator validator on the two workers only; NFD master,
+  worker and gc; no `nvidia-dcgm` and no container toolkit pods (values file disables them).
+- GFD labels on a t4 worker: `nvidia.com/gpu.product=NVIDIA-T4`, `gpu.count=4`, `gpu.memory=16384`,
+  `gpu.family=turing`, `gpu.compute.major=7`/`minor=5`, `cuda.driver-version.full=550.163.01`,
+  `cuda.runtime-version.full=12.4`, `gpu.replicas=1`, `gpu.sharing-strategy=none`, `mig.capable=true`,
+  `vgpu.present=false`, and `gpu.deploy.*=true` for every operand.
+- The nvml-mock DaemonSet tolerates every taint, so the control plane gets `nvidia.com/gpu.present=true` and
+  `pci-10de.present=true` with no allocatable GPUs. Carlos's decision: keep the chart default, count a node as a GPU
+  node only by capacity or ResourceSlice, and treat the labels as hints. Track E's `NV-NODE-002` must not fire on a
+  node the GPU Operator never targets.
+- `mokka-kind-node` has no release tags; the lane pins `sha256:8bd91085...` (equal to `sha-0960c63`).
+- Incident: the first lane run called `kind create cluster` without `--kubeconfig`, which wrote into
+  `~/.kube/config` and left its current-context unset after `kind delete`. Fixed with a lane-only kubeconfig and a
+  sentinel test; every later run left `~/.kube/config` byte-identical (sha256 `cef9726e...`).
+- client-go fixes its default kubeconfig path at package init, so `HOME` alone does not isolate a test; tests point
+  `KUBECONFIG` at a temp file (`cmd/kubectl-nv/isolation_test.go`).
+- The shared module cache under `/tmp/claude-502/gomodcache` failed `go mod verify` on 2026-10-11 and `go mod
+  vendor` from it deleted vendored files; the acceptance ran on a fresh cache.
+- Open for later: the e2e workflow has never run on GitHub and its gb300 leg is unexercised; a cancelled run
+  uploads no diagnostics; Ctrl-C during `up.sh` leaves the lane up; the workflow comment's timeout arithmetic is off.

@@ -1,0 +1,12 @@
+# The ClusterPolicy as "kubectl get clusterpolicies -o yaml" prints it.
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  driver:
+    enabled: true
+  devicePlugin:
+    enabled: true
+status:
+  state: ready

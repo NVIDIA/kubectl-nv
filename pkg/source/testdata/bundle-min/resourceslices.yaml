@@ -1,0 +1,35 @@
+# Kubernetes-native YAML, as "kubectl get resourceslices -o yaml" prints it,
+# at the resource.k8s.io/v1 version pkg/source lists against a live cluster.
+apiVersion: v1
+kind: List
+metadata:
+  resourceVersion: ""
+items:
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    name: worker-slice-only-gpu-nvidia-com-abc12
+    resourceVersion: "3001"
+  spec:
+    driver: gpu.nvidia.com
+    nodeName: worker-slice-only
+    pool:
+      name: worker-slice-only
+      generation: 1
+      resourceSliceCount: 1
+    devices:
+    - name: gpu-0
+- apiVersion: resource.k8s.io/v1
+  kind: ResourceSlice
+  metadata:
+    name: plain-worker-other-example-com-xyz34
+    resourceVersion: "3002"
+  spec:
+    driver: other.example.com
+    nodeName: plain-worker
+    pool:
+      name: plain-worker
+      generation: 1
+      resourceSliceCount: 1
+    devices:
+    - name: widget-0
