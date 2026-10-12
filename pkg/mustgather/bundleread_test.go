@@ -31,9 +31,10 @@ import (
 // and kubectl nv health read it comes back incomplete, and names what was
 // missing.
 //
-// The two reads are the ones behind the two commands: the inventory, which
-// needs every pod that asks for GPUs, and the node events, which is where
-// NV-UPG-001 dates an upgrade step. Both have to be complete for either
+// The reads are the ones behind the two commands: the inventory, which needs
+// every pod that asks for GPUs; the node events, which is where NV-UPG-001
+// dates an upgrade step; the ComputeDomains NV-CD-001 reads; and the
+// ClusterPolicy. Every one of them has to come back complete for either
 // command to exit 0.
 func readsPartially(t *testing.T, dir string) error {
 	t.Helper()
@@ -52,8 +53,18 @@ func readsPartially(t *testing.T, dir string) error {
 
 	_, eventsErr := source.ReadNodeEvents(ctx, bundle)
 	_, operatorErr := bundle.Pods(ctx, "", "app=gpu-operator")
+	_, domainsErr := source.ReadComputeDomains(ctx, bundle)
 
-	return errors.Join(buildErr, eventsErr, operatorErr)
+	// A cluster that serves no ClusterPolicy CRD is an answer, not a denial,
+	// and health treats it as one. A bundle has to be able to say the same,
+	// or a cluster without the operator could never produce one that reads as
+	// complete.
+	_, policyErr := bundle.ClusterPolicies(ctx)
+	if errors.Is(policyErr, source.ErrNotInstalled) {
+		policyErr = nil
+	}
+
+	return errors.Join(buildErr, eventsErr, operatorErr, domainsErr, policyErr)
 }
 
 // A bundle holding everything the readers need reads as complete. Until the
@@ -118,8 +129,8 @@ func TestAnOldBundleStillReadsAsPartial(t *testing.T) {
 
 	// An old bundle is this one without the two files, which is exactly what
 	// kubectl-nv wrote before they existed.
-	for _, name := range []string{gpuPodsFile, nodeEventsFile} {
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+	for _, name := range []string{gpuPodsFile, nodeEventsFile, computeDomainsFile} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("removing %s: %v", name, err)
 		}
 	}
