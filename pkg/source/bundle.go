@@ -42,6 +42,10 @@ const (
 	fileOperandPods    = "gpu_operand_pods.yaml"
 	fileClusterPolicy  = "cluster_policy.yaml"
 	fileResourceSlices = "resourceslices.yaml"
+	// fileGPUPods holds every pod of the cluster that asks for GPUs, in every
+	// namespace. A bundle carrying it can answer what is in use on a node; one
+	// gathered before it existed cannot, and says so.
+	fileGPUPods = "gpu_pods.yaml"
 
 	// defaultMaxFileBytes caps a single file read. A must-gather directory
 	// arrives in a support ticket, so its size is not this process's to
@@ -312,14 +316,21 @@ func (b *Bundle) ResourceSlices(ctx context.Context) ([]resourcev1.ResourceSlice
 	return out, nil
 }
 
-// Pods returns the operand pods recorded in gpu_operand_pods.yaml, filtered by
-// namespace and selector the way the API server would have filtered them.
+// Pods returns the pods the bundle recorded, filtered by namespace and
+// selector the way the API server would have filtered them.
 //
-// must-gather records the operator namespace and nothing else, so the bundle
-// cannot answer for the rest of the cluster. A question about another
-// namespace, or about every namespace, is answered with what is there plus a
-// PartialError naming pods: an empty result would otherwise read as "no such
-// pods" when it means "this bundle never looked".
+// What a bundle holds is every pod of the operator namespace, from
+// gpu_operand_pods.yaml, and every pod of the cluster that asks for GPUs, from
+// gpu_pods.yaml. Those two are what this tool asks about: the operands, and
+// the workloads whose requests say how many of a node's GPUs are in use.
+//
+// So a question about every namespace is answered completely once the second
+// file is there, and a question about one namespace only when that namespace
+// is recorded whole. A bundle gathered before gpu_pods.yaml existed can answer
+// neither, and says so with a PartialError naming pods rather than with an
+// empty list: an empty result reads as "no such pods" when it means "this
+// bundle never looked", and a cluster reported idle because nobody looked is
+// worse than a cluster reported unknown.
 func (b *Bundle) Pods(ctx context.Context, namespace, selector string) ([]corev1.Pod, error) {
 	sel := labels.Everything()
 	if selector != "" {
@@ -335,28 +346,62 @@ func (b *Bundle) Pods(ctx context.Context, namespace, selector string) ([]corev1
 		return nil, err
 	}
 
+	// The GPU pods are optional: a bundle without them is an old one, and the
+	// completeness of the answer rather than the answer itself is what changes.
+	var gpuPods corev1.PodList
+	gpuPodsErr := b.readYAML(ctx, fileGPUPods, &gpuPods)
+	if gpuPodsErr != nil && isStructuralBundleError(gpuPodsErr) {
+		return nil, gpuPodsErr
+	}
+
 	recorded := make(map[string]struct{}, 1)
-	out := make([]corev1.Pod, 0, len(list.Items))
 	for i := range list.Items {
-		p := list.Items[i]
-		recorded[p.Namespace] = struct{}{}
-		if namespace != "" && p.Namespace != namespace {
-			continue
-		}
-		if !sel.Matches(labels.Set(p.Labels)) {
-			continue
-		}
-		out = append(out, p)
+		recorded[list.Items[i].Namespace] = struct{}{}
 	}
 
-	if _, covered := recorded[namespace]; namespace == "" || !covered {
-		return out, &PartialError{
-			Resource: "pods",
-			Err:      fmt.Errorf("%s holds only %s", fileOperandPods, describeNamespaces(recorded)),
+	// Merged by namespace and name. A GPU-requesting operand pod is in both
+	// files, and a reader counting it twice would double what a node has in
+	// use.
+	seen := make(map[string]struct{}, len(list.Items)+len(gpuPods.Items))
+	out := make([]corev1.Pod, 0, len(list.Items)+len(gpuPods.Items))
+	for _, source := range [][]corev1.Pod{list.Items, gpuPods.Items} {
+		for i := range source {
+			p := source[i]
+			key := p.Namespace + "/" + p.Name
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			if namespace != "" && p.Namespace != namespace {
+				continue
+			}
+			if !sel.Matches(labels.Set(p.Labels)) {
+				continue
+			}
+			out = append(out, p)
 		}
 	}
 
-	return out, nil
+	if _, covered := recorded[namespace]; namespace == "" && gpuPodsErr == nil || covered {
+		return out, nil
+	}
+
+	return out, &PartialError{
+		Resource: "pods",
+		Err:      podsNotRecorded(namespace, recorded, gpuPodsErr),
+	}
+}
+
+// podsNotRecorded says which half of the pod set the bundle is missing, so
+// that a reader of exit 3 can tell an old bundle from a question about a
+// namespace nobody collected.
+func podsNotRecorded(namespace string, recorded map[string]struct{}, gpuPodsErr error) error {
+	if namespace == "" {
+		return fmt.Errorf("%s is not in the bundle, so it holds only %s: %w",
+			fileGPUPods, describeNamespaces(recorded), gpuPodsErr)
+	}
+
+	return fmt.Errorf("%s holds only %s", fileOperandPods, describeNamespaces(recorded))
 }
 
 // describeNamespaces renders the namespaces a bundle recorded, for the error

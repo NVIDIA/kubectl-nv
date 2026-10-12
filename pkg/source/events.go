@@ -100,11 +100,11 @@ func (l *Live) NodeEvents(ctx context.Context) ([]corev1.Event, error) {
 
 // NodeEvents returns the node events a must-gather bundle recorded.
 //
-// pkg/mustgather does not collect them, so today this is always a partial
-// read naming the file that is not there. That is the honest answer and it
-// costs a bundle replay nothing: a bundle's pod list is already partial by
-// construction, because it holds one namespace and the inventory asks for
-// every one.
+// A bundle gathered before pkg/mustgather collected them has no such file, and
+// that is a partial read naming it: a node sitting in a driver upgrade step is
+// not a finding and a node that has been sitting there for an hour is, and
+// only the event says which. Reporting no events as "no events" would answer
+// the second question with the first one'"'"'s evidence.
 func (b *Bundle) NodeEvents(ctx context.Context) ([]corev1.Event, error) {
 	var list corev1.EventList
 	if err := b.readYAML(ctx, fileNodeEvents, &list); err != nil {

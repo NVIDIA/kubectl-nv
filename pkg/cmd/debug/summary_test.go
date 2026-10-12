@@ -88,8 +88,8 @@ func TestSummaryFitsOneScreenWithEveryCollectorBroken(t *testing.T) {
 	for _, c := range mustgather.Collectors() {
 		names = append(names, c.Name)
 	}
-	if len(names) != 17 {
-		t.Fatalf("the registry has %d collectors, this fixture was written for 17: %v", len(names), names)
+	if len(names) != 19 {
+		t.Fatalf("the registry has %d collectors, this fixture was written for 19: %v", len(names), names)
 	}
 
 	// Every one of them not ok, in the three shapes they come in, each with a

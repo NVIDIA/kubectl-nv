@@ -185,6 +185,18 @@ func Collectors() []Collector {
 			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherGPUNodes() },
 		},
 		{
+			Name:      "gpu-pods",
+			Step:      "Gathering the pods that request GPUs",
+			Artifacts: []string{gpuPodsFile},
+			Run:       (*Gatherer).gatherGPUPods,
+		},
+		{
+			Name:      "node-events",
+			Step:      "Gathering the events about nodes",
+			Artifacts: []string{nodeEventsFile},
+			Run:       (*Gatherer).gatherNodeEvents,
+		},
+		{
 			Name:      "operator-pod",
 			Step:      "Gathering the GPU operator pod",
 			Artifacts: []string{"gpu_operator_pod.yaml", "gpu_operator_pod.status"},

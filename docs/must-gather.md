@@ -100,6 +100,29 @@ archive and an upload. A file that arrived truncated and a collector that was
 never allowed to run look the same from the outside without them: a file that
 is not there.
 
+## Reading a bundle back
+
+`kubectl nv list --from-bundle` and `kubectl nv health --from-bundle` answer
+from a bundle instead of from a cluster. For either to exit 0, the bundle has
+to hold what they read:
+
+- `gpu_pods.yaml`, every pod of the cluster that requests `nvidia.com/gpu` or
+  `nvidia.com/gpu.shared`, in every namespace. The inventory needs it to say
+  how many of a node's GPUs are in use; the operand pods are the operator
+  namespace alone, and a tenant's training job is not in it. Only the pods that
+  request GPUs, because the alternative is the whole cluster's pod list in a
+  file somebody mails to support. What counts as a request is
+  `inventory.PodSpecGPURequest`, the same rule the live read uses.
+- `node_events.yaml`, the events whose involved object is a node. `NV-UPG-001`
+  dates a driver upgrade step from them: a node sitting in `cordon-required` is
+  not a finding and a node that has been sitting there for an hour is, and only
+  the event says which.
+
+Both honour `--node`. A bundle written before they existed, or one whose read
+was refused, is still read as partial and exits 3, naming the file that is not
+there: a count of zero requested GPUs read as complete would report an idle
+cluster.
+
 ## Redaction
 
 `--redact` rewrites every file of the bundle after the last collector has
