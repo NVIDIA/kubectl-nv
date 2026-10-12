@@ -106,7 +106,7 @@ func assertProvenance(t *testing.T, name, raw string) {
 	t.Helper()
 
 	var header strings.Builder
-	for _, line := range strings.Split(raw, "\n") {
+	for line := range strings.SplitSeq(raw, "\n") {
 		if !strings.HasPrefix(line, "#") && strings.TrimSpace(line) != "" {
 			break
 		}
@@ -137,17 +137,27 @@ func assertReadOnly(t *testing.T, cmd *cobra.Command) {
 	}
 }
 
-// assertWrapsEveryCommand fails unless the resolved commands are exactly the
-// ones both toolsets are required to offer.
+// assertWrapsEveryCommand fails unless the set of commands the tools resolve
+// to is exactly the one both toolsets are required to offer. More than one
+// tool may wrap the same command, so the list is reduced to a set first.
 func assertWrapsEveryCommand(t *testing.T, name string, got []string) {
 	t.Helper()
 
+	seen := map[string]bool{}
+	var unique []string
+	for _, command := range got {
+		if !seen[command] {
+			seen[command] = true
+			unique = append(unique, command)
+		}
+	}
+
 	want := append([]string{}, wrappedCommands...)
 	sort.Strings(want)
-	sort.Strings(got)
+	sort.Strings(unique)
 
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("%s wraps %v, want exactly %v", name, got, want)
+	if strings.Join(unique, ",") != strings.Join(want, ",") {
+		t.Errorf("%s wraps %v, want exactly %v", name, unique, want)
 	}
 }
 
@@ -158,7 +168,7 @@ func TestHolmesGPTToolset(t *testing.T) {
 
 	// Round one: the exact keys, so a field the upstream model forbids is
 	// caught rather than dropped by a typed unmarshal.
-	var loose map[string]map[string]map[string]interface{}
+	var loose map[string]map[string]map[string]any
 	if err := yaml.Unmarshal([]byte(raw), &loose); err != nil {
 		t.Fatalf("%s is not YAML of the shape toolsets.<name>.<field>: %v", path, err)
 	}
@@ -235,7 +245,7 @@ func TestKubectlAITools(t *testing.T) {
 	raw := readRepoFile(t, path)
 	assertProvenance(t, path, raw)
 
-	var loose []map[string]interface{}
+	var loose []map[string]any
 	if err := yaml.Unmarshal([]byte(raw), &loose); err != nil {
 		t.Fatalf("%s is not a YAML list of tools: %v", path, err)
 	}

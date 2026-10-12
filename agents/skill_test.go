@@ -88,7 +88,7 @@ func splitSkill(t *testing.T) (string, string) {
 func TestSkillFrontmatterFollowsTheAgentSkillsSpec(t *testing.T) {
 	front, _ := splitSkill(t)
 
-	var fields map[string]interface{}
+	var fields map[string]any
 	if err := yaml.Unmarshal([]byte(front), &fields); err != nil {
 		t.Fatalf("SKILL.md frontmatter is not YAML: %v", err)
 	}
