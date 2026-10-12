@@ -82,18 +82,18 @@ Read a finding in this order:
 1. `code` is the stable identifier, in the form `NV-<AREA>-<NNN>`. It never
    changes meaning, so it is the only field worth branching on or grepping
    for. A message is prose and may be reworded.
-2. `severity` is `error`, `warning` or `info`. It decides the exit code
+1. `severity` is `error`, `warning` or `info`. It decides the exit code
    together with `--fail-on`.
-3. `node` is the node the finding is about. It is empty when the finding is
+1. `node` is the node the finding is about. It is empty when the finding is
    about the cluster rather than about one node, for instance a ClusterPolicy
    problem.
-4. `component` is the part of the stack at fault: the node itself, the device
+1. `component` is the part of the stack at fault: the node itself, the device
    plugin, the driver, DCGM, the toolkit, the operator. Two findings on the
    same node with different components are two separate problems.
-5. `evidence` is the map of values the rule concluded from, for instance the
+1. `evidence` is the map of values the rule concluded from, for instance the
    allocatable and capacity counts, a pod phase, a label value. Quote it when
    reporting; it is what makes the answer checkable.
-6. `next` is the command to run next, and `docs` names the catalog entry.
+1. `next` is the command to run next, and `docs` names the catalog entry.
 
 `summary` carries the arithmetic over what was checked: `errors`, `warnings`,
 `infos`, `nodesChecked`, `gpuCapacity`, `gpuAllocatable` and `gpuRequested`.
