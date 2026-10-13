@@ -242,13 +242,6 @@ stdout carries the output object and nothing else. Progress, notes and
 warnings go to stderr, so reading stdout alone never needs filtering. No
 command prompts, and none requires a terminal.
 
-Four commands do not keep to that yet. `kubectl nv version`,
-`kubectl nv explain`, `kubectl nv schema` and `kubectl nv mcp --list-tools`
-print their output on stderr today. Read both streams when you call those
-four, and stdout alone for everything else. `kubectl nv schema` also has no
-kinds registered yet, so it answers any argument with exit 2; the output
-kinds are real and the contract below is what it will print.
-
 ## Bounded output
 
 A whole cluster's report can be large. Two flags cut it down, and they mean
@@ -260,8 +253,28 @@ kubectl nv list --fields status.ready,metadata.labels -o json
 ```
 
 `--limit N` keeps the first N items after the command's own sort. Truncation
-is reported in the output as `metadata.remainingItemCount` as well as on
-stderr, so a reader of stdout alone still sees that there was more.
+is reported twice: a note on stderr, and a remaining count in the output, so
+a reader of stdout alone still sees that there was more. Where that count
+sits depends on the kind:
+
+| Kind | Where the remaining count is |
+|---|---|
+| `GPUNodeList` | `metadata.remainingItemCount` |
+| `HealthReport` | `remainingItemCount`, at the top level |
+| `TopologyReport` | `status.remainingItemCount` |
+| `GPUNode`, `DebugReport` | nowhere: `--limit` is exit 2 on them |
+
+A report that was not truncated carries no such key at all, and no note is
+printed either, so branch on the key being there rather than on its value.
+
+What N counts is the repeated part of the kind: the items of a `GPUNodeList`,
+the findings of a `HealthReport`, the groups of a `TopologyReport`. A
+`HealthReport`'s `summary` is left whole whatever the limit is, so the counts
+still describe the cluster rather than the page you were shown.
+
+`kubectl nv info` and `kubectl nv debug` each print one object, so there is
+nothing for `--limit` to cut and they answer it with exit 2 rather than
+ignoring it.
 
 `--fields` keeps only the named dotted JSON paths on each item. `apiVersion`,
 `kind` and `metadata.name` survive whatever is asked for. A path a kind does

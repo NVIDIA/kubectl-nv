@@ -382,3 +382,65 @@ func TestNoCommandIsWrappedOntoTheNextLine(t *testing.T) {
 		}
 	}
 }
+
+// truncationRowPattern matches a row of the per-kind truncation table, which
+// both SKILL.md and docs/agents.md carry.
+var truncationRowPattern = regexp.MustCompile("(?m)^\\| (`[A-Za-z]+`(?:, `[A-Za-z]+`)*) \\| ([^|]+?) \\|$")
+
+// truncationTable returns the kind-to-location rows of the truncation table
+// in a Markdown file, keyed by the kind column.
+func truncationTable(t *testing.T, text, where string) map[string]string {
+	t.Helper()
+
+	// The table is the one whose header names the remaining count, so another
+	// two-column table in the same file is not read as this one.
+	const header = "| Kind | Where the remaining count is |"
+	start := strings.Index(text, header)
+	if start < 0 {
+		t.Fatalf("%s carries no truncation table (no %q header)", where, header)
+	}
+
+	// Stop at the blank line that ends the table.
+	rest := text[start:]
+	if end := strings.Index(rest, "\n\n"); end >= 0 {
+		rest = rest[:end]
+	}
+
+	out := map[string]string{}
+	for _, row := range truncationRowPattern.FindAllStringSubmatch(rest, -1) {
+		out[row[1]] = strings.TrimSpace(row[2])
+	}
+	if len(out) == 0 {
+		t.Fatalf("%s has a truncation header but no rows under it", where)
+	}
+
+	return out
+}
+
+// TestTheSkillsTruncationTableMatchesTheContract keeps SKILL.md from drifting
+// away from docs/agents.md. Where a kind reports what it dropped is part of
+// the contract a consumer branches on, so two documents disagreeing about it
+// is worse than one of them being silent.
+func TestTheSkillsTruncationTableMatchesTheContract(t *testing.T) {
+	_, body := splitSkill(t)
+
+	skill := truncationTable(t, body, "SKILL.md")
+	contract := truncationTable(t, readRepoFile(t, "docs/agents.md"), "docs/agents.md")
+
+	for kind, want := range contract {
+		got, ok := skill[kind]
+		if !ok {
+			t.Errorf("docs/agents.md says %s reports truncation in %q; SKILL.md has no row for it", kind, want)
+			continue
+		}
+		if got != want {
+			t.Errorf("SKILL.md says %s reports truncation in %q; docs/agents.md says %q", kind, got, want)
+		}
+	}
+
+	for kind := range skill {
+		if _, ok := contract[kind]; !ok {
+			t.Errorf("SKILL.md has a truncation row for %s, which docs/agents.md does not", kind)
+		}
+	}
+}

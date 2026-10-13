@@ -138,10 +138,11 @@ listed in `unreachable`, at the top level of the report. The whole contract,
 including the output kinds, the streams and the bounded output flags, is in
 [docs/agents.md](docs/agents.md).
 
-Data goes to stdout and progress to stderr, with four commands still to catch
-up: `kubectl nv version`, `kubectl nv explain`, `kubectl nv schema` and
-`kubectl nv mcp --list-tools` print on stderr today. `kubectl nv schema` also
-has no kinds registered yet and answers any argument with exit 2.
+Data goes to stdout and progress to stderr. `--limit` reports what it dropped
+both ways, and where the remaining count sits depends on the kind; the table
+is in [docs/agents.md](docs/agents.md). A command that prints one object,
+`kubectl nv info` and `kubectl nv debug`, answers `--limit` with exit 2
+rather than ignoring it.
 
 ## Agent surfaces
 
