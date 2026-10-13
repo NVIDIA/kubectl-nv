@@ -73,7 +73,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 SHIM_TEMPLATE="${SCRIPT_DIR}/kubectl-nv-shim.sh"
 
 # The five faults, in the order they are run.
-EVAL_CODES="NV-NODE-002 NV-NODE-003 NV-OP-001 NV-DCGM-001 NV-DRV-001"
+EVAL_CODES="NV-NODE-002 NV-NODE-003 NV-CTK-001 NV-DCGM-001 NV-DRV-001"
 
 LANE="${KUBECTL_NV_EVAL_LANE:-faults}"
 BIN="${KUBECTL_NV_EVAL_BIN:-${REPO_ROOT}/bin/kubectl-nv}"
@@ -222,9 +222,11 @@ run_fault() {
 # Prints the component of the finding with this code for the node this run is
 # breaking, or nothing when the report does not carry one.
 #
-# A cluster-scoped rule sets no node at all (NV-OP-001 is the one here), so a
-# finding with an empty node counts for whichever node the run is on. Matching
-# only on an equal node would wait forever for a code that never carries one.
+# A cluster-scoped rule sets no node at all, so a finding with an empty node
+# counts for whichever node the run is on. Matching only on an equal node
+# would wait forever for a code that never carries one. None of the five
+# injected codes is cluster scoped today, but NV-OP-001 still turns up beside
+# them as the ClusterPolicy roll-up, and a future case may well be one.
 finding_component() {
     jq -r --arg code "$1" --arg node "${NODE}" \
         'first(.findings[]?

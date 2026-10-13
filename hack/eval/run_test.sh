@@ -64,7 +64,7 @@ export EVAL_CALL_LOG="${WORK}/calls.log"
 export EVAL_STATE_DIR="${STATE_DIR}"
 
 # The five codes the harness runs, in the order it has to run them.
-EXPECTED_ORDER="NV-NODE-002 NV-NODE-003 NV-OP-001 NV-DCGM-001 NV-DRV-001"
+EXPECTED_ORDER="NV-NODE-002 NV-NODE-003 NV-CTK-001 NV-DCGM-001 NV-DRV-001"
 
 WORKER="kubectl-nv-faults-worker"
 LANE_CONTEXT="kind-kubectl-nv-faults"
@@ -349,9 +349,8 @@ SHIM
 # exactly the faults currently injected, so the harness's wait and its
 # recovery wait both have something real to converge on.
 #
-# NV-OP-001 is emitted without a node, the way the real cluster-scoped rule
-# does, which is what makes the per-case expected node matter. The components
-# are the real inventory.Component* values.
+# The components are the real inventory.Component* values, and the severities
+# and co-occurrences are what the faults lane produced on 2026-10-13.
 make_binary() {
     # The paths are baked in rather than read from the environment: the
     # harness runs the agent under env -i, so a fake that needed EVAL_* set
@@ -388,14 +387,21 @@ for f in "${EVAL_STATE_DIR}"/NV-*; do
     component="node"
     node_field="\"node\":\"${node}\","
     case "${code}" in
-        NV-OP-001)
-            component="gpu-operator"
-            # Cluster scoped: the real rule sets no node at all.
-            node_field=""
-            ;;
+        NV-CTK-001) component="nvidia-container-toolkit-daemonset" ;;
         NV-DCGM-001) component="nvidia-dcgm-exporter" ;;
         NV-DRV-001) component="nvidia-driver-daemonset" ;;
     esac
+    # A rule that is about the cluster rather than one node sets no node at
+    # all. None of the five injected codes is one today, so a fixture asks for
+    # it explicitly and keeps the harness's cluster scoped path covered.
+    #
+    # Read from the state directory, not the environment: the harness runs the
+    # agent under env -i, so a fixture passed through the environment would
+    # reach the harness's own polls and not the agent's, and the two would
+    # disagree about the same cluster.
+    if [ "$(cat "${EVAL_STATE_DIR}/.cluster-scoped" 2> /dev/null)" = "${code}" ]; then
+        node_field=""
+    fi
     severity="error"
     # Measured on the faults lane on 2026-10-12: NV-DCGM-001 is a warning, and
     # its injection patches the ClusterPolicy, so NV-OP-001 appears with it at
@@ -440,6 +446,13 @@ reset_fixtures() {
 # override_answer <code> <line>
 override_answer() {
     printf '%s\n' "$2" > "${OVERRIDE_DIR}/$1"
+}
+
+# cluster_scope <code>
+# Makes the fake report this code the way a cluster scoped rule does, with no
+# node at all.
+cluster_scope() {
+    printf '%s\n' "$1" > "${STATE_DIR}/.cluster-scoped"
 }
 
 # subject_env
@@ -638,9 +651,10 @@ assert_jq '.summary.cases' '5' "the results file records five cases"
 assert_jq '.summary.passed' '5' "the results file records five passes"
 assert_jq '.summary.failed' '0' "the results file records no failures"
 assert_jq '[.cases[].code] | join(" ")' "${EXPECTED_ORDER}" "the cases are recorded in the declared order"
-assert_jq '.cases[2].component' 'gpu-operator' "the component comes from the report, not from a table in the harness"
-assert_jq '.cases[2].expectedNode' '-' "the cluster scoped case expects no node"
-assert_jq '.cases[0].expectedNode' "${WORKER}" "a node scoped case expects the lane worker"
+assert_jq '.cases[2].component' 'nvidia-container-toolkit-daemonset' \
+    "the component comes from the report, not from a table in the harness"
+assert_jq '[.cases[].expectedNode] | unique | join(" ")' "${WORKER}" \
+    "every case expects the lane worker, which is where each was injected"
 assert_jq '.context' "${LANE_CONTEXT}" "the results file records the context"
 
 assert_eq "$(basename "${RESULT_FILE}")" "$(date -u +%Y-%m-%d).json" "the results file is named for the date"
@@ -862,10 +876,11 @@ assert_jq '.cases[0].named.node' 'false' "a node named in the wrong case is not 
 
 # A longer code that starts with the right one is a different code.
 reset_fixtures
-override_answer NV-OP-001 "ANSWER node=- component=gpu-operator code=NV-OP-0010"
+override_answer NV-CTK-001 \
+    "ANSWER node=${WORKER} component=nvidia-container-toolkit-daemonset code=NV-CTK-0010"
 run_subject
 assert_rc 1 "a run with a wrong code exits 1"
-assert_jq '.cases[2].named.code' 'false' "NV-OP-0010 is not credited as NV-OP-001"
+assert_jq '.cases[2].named.code' 'false' "NV-CTK-0010 is not credited as NV-CTK-001"
 
 # A lower case code is the same code.
 reset_fixtures
@@ -882,9 +897,21 @@ assert_rc 1 "a run with a wrong component exits 1"
 assert_jq '.cases[3].named.component' 'false' "an abbreviated component is not the component"
 assert_jq '.cases[3].named.node' 'true' "the node it did name is still recorded as named"
 
-# The cluster scoped case expects a dash, and naming a node there is wrong.
+# A cluster scoped finding expects a dash, and naming a node there is wrong.
+# None of the five injected codes is cluster scoped since NV-CTK-001 replaced
+# NV-OP-001, so the fixture makes one of them so: the harness has to read the
+# expected node off the report rather than assume the node it injected on.
 reset_fixtures
-override_answer NV-OP-001 "ANSWER node=${WORKER} component=gpu-operator code=NV-OP-001"
+cluster_scope NV-CTK-001
+run_subject
+assert_rc 0 "a cluster scoped finding is answered with a dash and passes"
+assert_jq '.cases[2].expectedNode' '-' "the harness expects no node for a cluster scoped finding"
+assert_jq '.cases[2].named.node' 'true' "the agent named the dash"
+
+reset_fixtures
+override_answer NV-CTK-001 \
+    "ANSWER node=${WORKER} component=nvidia-container-toolkit-daemonset code=NV-CTK-001"
+cluster_scope NV-CTK-001
 run_subject
 assert_rc 1 "naming a node for a cluster scoped finding fails the case"
 assert_jq '.cases[2].named.node' 'false' "the cluster scoped case wants a dash, not a node"
@@ -907,12 +934,12 @@ assert_jq '.cases[0].error' 'the agent command exited 7' "the agent failure is r
 
 # A fault that cannot be injected is a failed case, and the rest still run.
 reset_fixtures
-run_subject FAKE_INJECT_FAIL_CODE=NV-OP-001
+run_subject FAKE_INJECT_FAIL_CODE=NV-CTK-001
 
 assert_rc 1 "a run where one injection fails exits 1"
 assert_jq '.cases[2].pass' 'false' "the case whose injection failed does not pass"
 assert_jq '.summary.passed' '4' "the other four cases still run and pass"
-assert_logged "fault NV-OP-001 recover" "a failed injection is still recovered"
+assert_logged "fault NV-CTK-001 recover" "a failed injection is still recovered"
 assert_logged "fault NV-DCGM-001 inject" "the run continues to the next fault"
 
 # ---------------------------------------------------------------------------
@@ -929,7 +956,7 @@ assert_rc 1 "a failed recover ends the run with exit 1"
 assert_jq '.cases[1].pass' 'false' "the case whose recover failed does not pass"
 assert_jq '.cases[1].recoverError | length > 0' 'true' "the recovery failure is recorded on the case"
 assert_jq '.summary.cases' '2' "the run stops at the fault it could not recover"
-assert_not_logged "fault NV-OP-001 inject" "nothing is injected after a failed recover"
+assert_not_logged "fault NV-CTK-001 inject" "nothing is injected after a failed recover"
 if [ -n "${RESULT_FILE}" ] && [ -f "${RESULT_FILE}" ]; then
     ok "a run stopped by a failed recover still writes its results"
 else

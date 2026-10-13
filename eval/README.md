@@ -98,12 +98,33 @@ the shotgun above the diagnosis.
   the harness. A rule that changes which component it blames changes what the
   harness expects.
 - `code` ignores case, because a report prints it upper case and prose does
-  not always, but it is still the whole code: `NV-OP-0010` is not
-  `NV-OP-001`.
+  not always, but it is still the whole code: `NV-CTK-0010` is not
+  `NV-CTK-001`.
 
-A finding about the cluster rather than about one node carries no node at all.
-`NV-OP-001` is the one here: it is about the ClusterPolicy. For those the
-expected node is `-`, and an answer that names a node instead is wrong.
+A finding about the cluster rather than about one node carries no node at
+all. For those the expected node is `-`, and an answer that names a node
+instead is wrong. The harness reads that off the report rather than assuming
+the node it injected on, so a rule that stops carrying a node changes what is
+expected without the harness being edited.
+
+## Which faults it runs
+
+| Code | Why it is in the set |
+|---|---|
+| `NV-NODE-002` | a GPU node advertising nothing placeable, the commonest fault |
+| `NV-NODE-003` | fewer GPUs than the node has, and a warning rather than an error |
+| `NV-CTK-001` | a failing operand init container, reported against the toolkit |
+| `NV-DCGM-001` | an operand that is not ready, under a ClusterPolicy roll-up |
+| `NV-DRV-001` | a driver pod that is not ready |
+
+`NV-OP-001` was in this set and was taken out on 2026-10-13. Its reproduction
+and `NV-DCGM-001`'s are the same move, an operand version pointed at an image
+that does not exist, so both produce a report of the same shape: the
+cluster-scoped `NV-OP-001` beside the node-scoped findings of whichever
+operand went down. The two cases wanted different answers from reports an
+agent cannot tell apart, so no reading of the report could score both. The
+roll-up still appears beside `NV-DCGM-001`, which is what that case now
+tests.
 
 ## The result file
 
