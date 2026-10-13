@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -41,16 +42,18 @@ func TestRunExitCodes(t *testing.T) {
 		wantFile string
 	}{
 		{
-			// Nodes are the first thing collected, so failing here means the
-			// bundle holds nothing about the cluster.
+			// Every read refused. The bundle then holds nothing but markers
+			// recording what could not be read, which says nothing about the
+			// cluster, so there is no bundle worth sending.
 			name:     "nothing could be collected",
-			failOn:   "nodes",
+			failOn:   "*",
 			wantCode: output.ExitError,
 		},
 		{
-			// Nodes are already on disk by the time the pods fail.
+			// The daemonsets fail and everything before and after them does
+			// not, so the bundle is worth reading and says what is missing.
 			name:     "part of the cluster was collected",
-			failOn:   "pods",
+			failOn:   "daemonsets",
 			wantCode: output.ExitPartial,
 			wantFile: "nodes.yaml",
 		},
@@ -59,14 +62,23 @@ func TestRunExitCodes(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "artifacts")
+			badDay := errors.New("the API server is having a bad day")
+
 			clientset := fake.NewSimpleClientset(gpuNode("gpu-node-1"))
 			clientset.PrependReactor("list", c.failOn,
 				func(k8stesting.Action) (bool, runtime.Object, error) {
-					return true, nil, errors.New("the API server is having a bad day")
+					return true, nil, badDay
 				})
+			dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+				runtime.NewScheme(), customResourceListKinds())
+			if c.failOn == "*" {
+				dyn.PrependReactor("list", "*", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, badDay
+				})
+			}
 
 			err := Run(&Options{ArtifactDir: dir},
-				stubFactory{clientset: clientset, config: offlineConfig()},
+				stubFactory{clientset: clientset, dynamic: dyn, config: offlineConfig()},
 				discardProgress{})
 			if err == nil {
 				t.Fatal("Run returned nil, want the collection failure")

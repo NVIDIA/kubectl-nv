@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,12 +32,14 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // Options defines the configurable parameters for the must-gather operation.
@@ -44,11 +47,46 @@ type Options struct {
 	ArtifactDir string // Directory to store gathered artifacts/logs.
 	Debug       bool   // Name every artifact as it is written.
 
+	// Node narrows the whole gather to one node: its node object, the operand
+	// pods on it, their logs, its bug report and its device usage. The
+	// cluster-scoped objects are collected whatever it says, because they are
+	// what the node's state has to be read against.
+	Node string
+
+	// Since bounds the window of the current container logs. Zero means the
+	// whole log.
+	Since time.Duration
+
+	// NoExec keeps the gather out of the driver pods: no bug report and no
+	// device usage, and the manifest records both as skipped by flag.
+	NoExec bool
+
+	// ExecTimeout bounds one exec or one copy out of a driver pod. Zero means
+	// DefaultExecTimeout. A pod that accepted the connection and never answers
+	// costs one file rather than the whole bundle.
+	ExecTimeout time.Duration
+
+	// ToolVersion is the kubectl-nv version the manifest records the bundle as
+	// having been collected by.
+	ToolVersion string
+
+	// Context is the kubeconfig context the bundle was collected through, for
+	// the manifest. A bundle that does not say which cluster it came from is a
+	// bundle that gets filed against the wrong one.
+	Context string
+
 	// FetchPodFile replaces the live exec-and-copy that pulls a bug report out
 	// of a driver pod. It is the seam the tests drive the gatherer through
 	// without a cluster to exec into; a nil value means the live one.
 	FetchPodFile PodFileFetcher
+
+	// RunInPod replaces the live exec used by the device usage collector.
+	RunInPod PodCommandRunner
 }
+
+// PodCommandRunner runs command in one container of pod and returns its
+// standard output. It stops when ctx is done.
+type PodCommandRunner func(ctx context.Context, pod *v1.Pod, container, command string) (string, error)
 
 // Clients hands the gatherer the clients it works through. The command layer
 // has a factory that satisfies this; a test supplies fakes. It is declared
@@ -65,8 +103,10 @@ type Clients interface {
 type RunFunc func(opts *Options) error
 
 // PodFileFetcher runs the bug-report command inside pod and copies the resulting
-// file out of the pod to destPath on the local filesystem.
-type PodFileFetcher func(pod *v1.Pod, destPath string) error
+// file out of the pod to destPath on the local filesystem. It stops when ctx is
+// done, which is how a pod that never answers costs one artifact rather than
+// the gather.
+type PodFileFetcher func(ctx context.Context, pod *v1.Pod, destPath string) error
 
 // podLogStreamer opens a log stream for the given pod. The caller owns the
 // returned stream and is responsible for closing it.
@@ -89,19 +129,25 @@ type Gatherer struct {
 	// tells a bundle worth sending from no bundle at all.
 	collected bool
 
-	// fetchPodFile and streamPodLogs are injection seams for tests. When nil the
-	// Gatherer falls back to the live cluster implementations.
+	// fetchPodFile, streamPodLogs and runInPod are injection seams for tests.
+	// When nil the Gatherer falls back to the live cluster implementations.
 	fetchPodFile  PodFileFetcher
 	streamPodLogs podLogStreamer
+	runInPod      PodCommandRunner
+
+	// results is the per-collector record the manifest is written from, and
+	// current is the collector whose artifacts are being counted.
+	results []CollectorStatus
+	current *CollectorStatus
 }
 
 // fetchBugReport copies the bug report generated inside pod to destPath, using
 // the injected fetcher when one is set.
-func (g *Gatherer) fetchBugReport(pod *v1.Pod, destPath string) error {
+func (g *Gatherer) fetchBugReport(ctx context.Context, pod *v1.Pod, destPath string) error {
 	if g.fetchPodFile != nil {
-		return g.fetchPodFile(pod, destPath)
+		return g.fetchPodFile(ctx, pod, destPath)
 	}
-	return g.execAndCopyBugReport(pod, destPath)
+	return g.execAndCopyBugReport(ctx, pod, destPath)
 }
 
 // podLogs opens a log stream for the given pod, using the injected streamer when
@@ -116,7 +162,7 @@ func (g *Gatherer) podLogs(ctx context.Context, namespace, podName string, opts 
 // execAndCopyBugReport is the live-cluster PodFileFetcher: it runs
 // nvidia-bug-report.sh inside the pod and copies /tmp/nvidia-bug-report.log.gz
 // out to destPath.
-func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
+func (g *Gatherer) execAndCopyBugReport(ctx context.Context, pod *v1.Pod, destPath string) error {
 	nullFile, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0666)
 	var outpipe *os.File
 	if err != nil {
@@ -130,12 +176,14 @@ func (g *Gatherer) execAndCopyBugReport(pod *v1.Pod, destPath string) error {
 		Out:    outpipe,
 		ErrOut: os.Stderr,
 	}
-	o := NewCopyOptions(iostream)
+	o := copyOptionsFor(iostream, pod)
 	o.Clientset = g.clientset
 	o.ClientConfig = g.config
+	container := o.Container
 
 	// Execute remote command to run the bug report script.
-	outLog, errLog, err := executeRemoteCommand(g.config, pod, "cd /tmp && nvidia-bug-report.sh")
+	outLog, errLog, err := executeRemoteCommand(
+		ctx, g.config, pod, container, "cd /tmp && nvidia-bug-report.sh")
 	if err != nil {
 		if _, lerr := g.errLogFile.WriteString(errLog); lerr != nil {
 			err = fmt.Errorf("%v+ error writing error output to stderr log file: %v", err, lerr)
@@ -175,6 +223,12 @@ type PodInfo struct {
 // 3. Take the clients from the factory.
 // If any step fails, any opened file resources are closed before returning.
 func NewGatherer(opts *Options, f Clients, progress Progress) (*Gatherer, error) {
+	// Before anything is created: a directory that already holds a bundle
+	// would end up holding two runs' files with nothing to tell them apart.
+	if err := checkArtifactDir(opts.ArtifactDir); err != nil {
+		return nil, err
+	}
+
 	// Create the ARTIFACT_DIR.
 	// The bundle holds cluster data and lands under /tmp, where every account on
 	// the machine can look.
@@ -234,6 +288,7 @@ func NewGatherer(opts *Options, f Clients, progress Progress) (*Gatherer, error)
 		dynClient:    dynClient,
 		progress:     progress,
 		fetchPodFile: opts.FetchPodFile,
+		runInPod:     opts.RunInPod,
 	}, nil
 }
 
@@ -251,34 +306,20 @@ func logTo(errLogFile *os.File, format string, err error) error {
 func (g *Gatherer) gatherOpenShiftVersion() error {
 	// Determine if the cluster is OpenShift.
 	oversion, isOpenShift := isOpenShiftCluster(g.config)
-	if isOpenShift {
-		// Construct the file path for the OpenShift version file.
-		versionFilePath := filepath.Join(g.opts.ArtifactDir, "openshift_version.yaml")
-		// Create the file.
-		file, err := g.createArtifact(versionFilePath)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating openshift_version.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer file.Close() // Ensure the file is closed when done.
-
-		// Write the OpenShift version information into the file.
-		if _, err := file.WriteString(oversion); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing openshift_version.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+	if !isOpenShift {
+		return skip("not an OpenShift cluster")
 	}
-	return nil
+	return g.writeArtifactFile("openshift_version.yaml", func(w io.Writer) error {
+		_, werr := io.WriteString(w, oversion)
+		return werr
+	})
 }
 
 // gatherNodeInfo collects node information.
 // For OpenShift clusters, it retrieves machine data; otherwise, it lists Kubernetes nodes.
 func (g *Gatherer) gatherNodeInfo() error {
-	// Determine if the cluster is OpenShift.
+	// An OpenShift cluster is described by its machines; anywhere else the
+	// nodes are the whole answer.
 	_, isOpenShift := isOpenShiftCluster(g.config)
 	if isOpenShift {
 		// Get machines data from an OpenShift cluster.
@@ -290,22 +331,10 @@ func (g *Gatherer) gatherNodeInfo() error {
 			return err
 		}
 
-		// Create machines.yaml file.
-		machinesFile, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, "machines.yaml"))
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating machines.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer machinesFile.Close() // Ensure file closure.
-
-		if _, err = machinesFile.Write(machines); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing machines.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+		return g.writeArtifactFile("machines.yaml", func(w io.Writer) error {
+			_, werr := w.Write(machines)
+			return werr
+		})
 	} else {
 		listFunc := func(opts metav1.ListOptions) (v1.NodeList, string, error) {
 			nl, err := g.clientset.CoreV1().Nodes().List(context.Background(), opts)
@@ -324,35 +353,20 @@ func (g *Gatherer) gatherNodeInfo() error {
 			}
 			return err
 		}
-
-		// Create nodes.yaml file.
-		nodesFile, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, "nodes.yaml"))
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating nodes.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		defer nodesFile.Close() // Ensure file closure.
+		nodes.Items = g.nodesWanted(nodes.Items)
 
 		// Marshal nodes into YAML format.
 		stampNodeList(&nodes)
-		data, err := yaml.Marshal(nodes)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling nodes: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
+		data, merr := yaml.Marshal(nodes)
+		if merr != nil {
+			return g.logError("error marshalling nodes: %v", merr)
 		}
 
-		if _, err = nodesFile.Write(data); err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing nodes.yaml: %v\n", err); lerr != nil {
-				err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
+		return g.writeArtifactFile("nodes.yaml", func(w io.Writer) error {
+			_, werr := w.Write(data)
+			return werr
+		})
 	}
-	return nil
 }
 
 // gatherOperatorNamespace retrieves the namespace of the operator pods
@@ -397,98 +411,20 @@ func (g *Gatherer) gatherOperatorNamespace() (string, error) {
 	return operatorNamespace, nil
 }
 
-// logError writes an error message to g.errLogFile with the provided format and returns the wrapped error.
+// logError records err in the stderr log under the caller's description and
+// returns it wrapped in that description.
+//
+// format carries the caller's own verb for the error, as in "error getting
+// nodes: %v". Appending a second verb to it, which this used to do, left every
+// error ending in a formatting fault and broke errors.Is: nothing downstream
+// could tell a NotFound from a Forbidden through one of these.
 func (g *Gatherer) logError(format string, err error) error {
-	_, lerr := fmt.Fprintf(g.errLogFile, format, err)
-	if lerr != nil {
+	if _, lerr := fmt.Fprintf(g.errLogFile, format+"\n", err); lerr != nil {
 		return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
 	}
-	return fmt.Errorf(format+": %w", err)
-}
-
-// gatherGPUOperatorCRDs collects the GPU operator custom resources:
-// the ClusterPolicy and NvidiaDriver CRs. These resources are cluster-scoped,
-// so we do not specify a namespace.
-func (g *Gatherer) gatherGPUOperatorCRDs() error {
-	dynClient := g.dynClient
-
-	// Set a context with timeout for our dynamic calls.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// ---------------------------
-	// ClusterPolicy CR handling
-	// ---------------------------
-	clusterPolicyGVR := schema.GroupVersionResource{
-		Group:    "nvidia.com",
-		Version:  "v1",
-		Resource: "clusterpolicies",
-	}
-
-	cr, err := dynClient.Resource(clusterPolicyGVR).
-		Get(ctx, "cluster-policy", metav1.GetOptions{})
-	if err != nil {
-		// Write marker file to indicate missing ClusterPolicy CR.
-		missingPath := filepath.Join(g.opts.ArtifactDir, "cluster_policy.missing")
-		_ = g.writeArtifact(missingPath, []byte{})
-		_, lerr := fmt.Fprintf(g.errLogFile, "Error getting clusterPolicy: %v\n", err)
-		if lerr != nil {
-			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		// Continue processing to collect the other CR.
-	} else {
-		data, err := yaml.Marshal(cr.Object)
-		if err != nil {
-			return g.logError("error marshalling clusterPolicy: %v", err)
-		}
-		clusterPolicyFilePath := filepath.Join(g.opts.ArtifactDir, "cluster_policy.yaml")
-		clusterPolicyFile, err := g.createArtifact(clusterPolicyFilePath)
-		if err != nil {
-			return g.logError("error creating cluster_policy.yaml: %v", err)
-		}
-		defer clusterPolicyFile.Close()
-		if _, err = clusterPolicyFile.Write(data); err != nil {
-			return g.logError("error writing cluster_policy.yaml: %v", err)
-		}
-	}
-
-	// ---------------------------
-	// NvidiaDriver CR handling
-	// ---------------------------
-	nvidiaDriverGVR := schema.GroupVersionResource{
-		Group:    "nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "nvidiadrivers",
-	}
-
-	cr, err = dynClient.Resource(nvidiaDriverGVR).
-		Get(ctx, "nvidia-driver", metav1.GetOptions{})
-	if err != nil {
-		// Write marker file to indicate missing NvidiaDriver CR.
-		missingPath := filepath.Join(g.opts.ArtifactDir, "nvidia_driver.missing")
-		_ = g.writeArtifact(missingPath, []byte{})
-		_, lerr := fmt.Fprintf(g.errLogFile, "Error getting nvidiaDriver: %v\n", err)
-		if lerr != nil {
-			return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		// Not returning error since absence is acceptable.
-	} else {
-		data, err := yaml.Marshal(cr.Object)
-		if err != nil {
-			return g.logError("error marshalling nvidiaDriver: %v", err)
-		}
-		nvidiaDriverFilePath := filepath.Join(g.opts.ArtifactDir, "nvidia_driver.yaml")
-		nvidiaDriverFile, err := g.createArtifact(nvidiaDriverFilePath)
-		if err != nil {
-			return g.logError("error creating nvidia_driver.yaml: %v", err)
-		}
-		defer nvidiaDriverFile.Close()
-		if _, err = nvidiaDriverFile.Write(data); err != nil {
-			return g.logError("error writing nvidia_driver.yaml: %v", err)
-		}
-	}
-
-	return nil
+	// The description without its verb becomes the wrapper, so the cause is
+	// carried by %w exactly once and stays reachable.
+	return fmt.Errorf("%s: %w", strings.TrimSuffix(strings.TrimSpace(fmt.Sprintf(format, "")), ":"), err)
 }
 
 // gatherGPUNodes collects nodes that have NVIDIA PCI labels and writes the result as YAML to a file.
@@ -520,193 +456,137 @@ func (g *Gatherer) gatherGPUNodes() error {
 		gpuNodes.Items = append(gpuNodes.Items, nl.Items...)
 	}
 
-	// If no GPU nodes were found, log and return an error.
+	// A node carrying more than one of the PCI labels is listed once. The
+	// script deduplicates by node name and a bundle that reports the same node
+	// twice makes a reader count GPU nodes wrong.
+	gpuNodes.Items = g.nodesWanted(dedupeNodes(gpuNodes.Items))
+
 	if len(gpuNodes.Items) == 0 {
 		if _, lerr := fmt.Fprintf(g.errLogFile, "No nodes found with NVIDIA PCI label\n"); lerr != nil {
 			_ = fmt.Errorf("error writing to stderr log file: %v", lerr)
 		}
-		return fmt.Errorf("no nodes found with NVIDIA PCI label")
-	}
-
-	// Create the file to store the GPU node information.
-	gpuNodesFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_nodes.yaml")
-	gpuNodesFile, err := g.createArtifact(gpuNodesFilePath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_nodes.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
+		// Nothing to survey is a fact about the cluster, not a failure of the
+		// gather. A cluster whose feature discovery has not labelled a node yet
+		// is exactly the cluster someone runs a must-gather on, and its
+		// ClusterPolicy and operator logs are what say why. Reporting this as
+		// an error used to take them with it.
+		if g.opts.Node != "" {
+			return skip("%s carries no NVIDIA PCI label", g.opts.Node)
 		}
-		return err
+		return skip("no GPU nodes")
 	}
-	defer gpuNodesFile.Close()
 
 	// Marshal the collected GPU nodes into YAML.
-	stampNodeList(&gpuNodes)
-	data, err := yaml.Marshal(gpuNodes)
+	stamped := gpuNodes
+	stampNodeList(&stamped)
+	data, err := yaml.Marshal(stamped)
 	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling gpuNodes: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
+		return g.logError("error marshalling gpuNodes: %v", err)
+	}
+
+	if werr := g.writeArtifactFile("gpu_nodes.yaml", func(w io.Writer) error {
+		_, e := w.Write(data)
+		return e
+	}); werr != nil {
+		return werr
+	}
+
+	return g.gatherGPUNodeText(gpuNodes.Items)
+}
+
+// gatherGPUNodeText writes the three files the script gets from a jsonpath of
+// the labels, from "kubectl get -o wide" and from "kubectl describe". They are
+// what a support engineer reads before opening any YAML.
+func (g *Gatherer) gatherGPUNodeText(nodes []v1.Node) error {
+	if err := g.writeArtifactFile("gpu_nodes.labels", func(w io.Writer) error {
+		return writeNodeLabels(w, nodes)
+	}); err != nil {
 		return err
 	}
 
-	// Write the YAML data to the file.
-	if _, err = gpuNodesFile.Write(data); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing gpu_nodes.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
+	if err := g.writeArtifactFile("gpu_nodes.status", func(w io.Writer) error {
+		return writeNodeTable(w, nodes)
+	}); err != nil {
 		return err
 	}
 
+	return g.writeArtifactFile("gpu_nodes.descr", func(w io.Writer) error {
+		return describeEach(w, nodes, func(node v1.Node) (string, error) {
+			return g.describeNode(node.Name)
+		})
+	})
+}
+
+// writeNodeLabels writes each node's name and then its labels, one per line, in
+// the form the script's sed pipeline produces. The labels are sorted so that
+// two bundles of the same cluster can be diffed.
+func writeNodeLabels(w io.Writer, nodes []v1.Node) error {
+	for i := range nodes {
+		node := &nodes[i]
+		if _, err := fmt.Fprintf(w, "%s\n", node.Name); err != nil {
+			return fmt.Errorf("writing the node name: %w", err)
+		}
+		keys := make([]string, 0, len(node.Labels))
+		for key := range node.Labels {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if _, err := fmt.Fprintf(w, "- %s=%s\n", key, node.Labels[key]); err != nil {
+				return fmt.Errorf("writing a node label: %w", err)
+			}
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return fmt.Errorf("writing the node separator: %w", err)
+		}
+	}
 	return nil
 }
 
-// gatherPodInfo retrieves all pods from the provided operatorNamespace.
-// It writes the entire pod list (operands) to "gpu_operand_pods.yaml" and
-// the GPU operator pods (filtered with label "app=gpu-operator") to "gpu_operator_pod.yaml".
-// It returns a PodInfo struct containing both pod lists.
-func (g *Gatherer) gatherPodInfo(operatorNamespace string) (*PodInfo, error) {
-	listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
-		pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
-		if err != nil {
-			return v1.PodList{}, "", err
+// dedupeNodes keeps the first appearance of each node name.
+func dedupeNodes(nodes []v1.Node) []v1.Node {
+	seen := make(map[string]bool, len(nodes))
+	kept := make([]v1.Node, 0, len(nodes))
+	for _, node := range nodes {
+		if seen[node.Name] {
+			continue
 		}
-		return *pl, pl.Continue, nil
+		seen[node.Name] = true
+		kept = append(kept, node)
 	}
-	appendFunc := func(all *v1.PodList, page v1.PodList) {
-		all.Items = append(all.Items, page.Items...)
-	}
-	operandsPodList, err := listAllPaginated[v1.PodList](500, "", listFunc, appendFunc)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pods: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-
-	// Write the operands pod list to "gpu_operand_pods.yaml".
-	operandFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_operand_pods.yaml")
-	operandFile, err := g.createArtifact(operandFilePath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operand_pods.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-	defer operandFile.Close()
-
-	stampPodList(&operandsPodList)
-	data, err := yaml.Marshal(operandsPodList)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling operands pod list: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-
-	if _, err = operandFile.Write(data); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing gpu_operand_pods.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-
-	// Retrieve GPU operator pods using the label selector "app=gpu-operator".
-	listFuncOp := func(opts metav1.ListOptions) (v1.PodList, string, error) {
-		pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
-		if err != nil {
-			return v1.PodList{}, "", err
-		}
-		return *pl, pl.Continue, nil
-	}
-	operatorPodList, err := listAllPaginated[v1.PodList](500, "app=gpu-operator", listFuncOp, appendFunc)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting GPU operator pods: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-	if len(operatorPodList.Items) == 0 {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "No pods found with label app=gpu-operator\n"); lerr != nil {
-			_ = fmt.Errorf("no pods found with label app=gpu-operator + error writing to stderr log file: %v", lerr)
-		}
-		return nil, fmt.Errorf("no pods found with label app=gpu-operator")
-	}
-
-	// Write the operator pod list to "gpu_operator_pod.yaml".
-	operatorFilePath := filepath.Join(g.opts.ArtifactDir, "gpu_operator_pod.yaml")
-	operatorFile, err := g.createArtifact(operatorFilePath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating gpu_operator_pod.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-	defer operatorFile.Close()
-
-	stampPodList(&operatorPodList)
-	data, err = yaml.Marshal(operatorPodList)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling GPU operator pod list: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-
-	if _, err = operatorFile.Write(data); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing gpu_operator_pod.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return nil, err
-	}
-
-	// Return the pod info struct containing both operands and operator pods.
-	podInfo := &PodInfo{
-		OperandPods:  &operandsPodList,
-		OperatorPods: &operatorPodList,
-	}
-	return podInfo, nil
+	return kept
 }
 
-// gatherPodLogs collects logs from the GPU operator pod (both current and previous logs)
-// and from each GPU operand pod. It uses the provided PodInfo data structure and writes logs
-// to files under the artifact directory, one file per container. The operatorNamespace is
-// used for operator pod log collection.
-func (g *Gatherer) gatherPodLogs(podInfo *PodInfo, operatorNamespace string) error {
-	// Expecting at least one operator pod; use the first one.
-	if podInfo.OperatorPods == nil || len(podInfo.OperatorPods.Items) == 0 {
-		return fmt.Errorf("no operator pods available for log collection")
+// nodesWanted narrows a node list to --node when one was given.
+func (g *Gatherer) nodesWanted(nodes []v1.Node) []v1.Node {
+	if g.opts.Node == "" {
+		return nodes
 	}
-	operatorPod := podInfo.OperatorPods.Items[0]
-
-	// Collect current logs from the GPU Operator Pod.
-	for _, container := range containerNames(&operatorPod) {
-		fileName := fmt.Sprintf("gpu_operator_logs_%s.log", container)
-		if err := g.collectContainerLogs(operatorNamespace, &operatorPod, container, fileName, false); err != nil {
-			return err
+	kept := make([]v1.Node, 0, 1)
+	for _, node := range nodes {
+		if g.wantsNode(node.Name) {
+			kept = append(kept, node)
 		}
 	}
+	return kept
+}
 
-	// Collect previous logs from the GPU Operator Pod.
-	for _, container := range containerNames(&operatorPod) {
-		fileName := fmt.Sprintf("gpu_operator_logs_%s.previous.log", container)
-		if err := g.collectContainerLogs(operatorNamespace, &operatorPod, container, fileName, true); err != nil {
-			return err
-		}
+// writeArtifactFile creates one artifact and hands it to write. It is the shape
+// every text artifact of the bundle is produced in, so that none of them can
+// forget the mode or the manifest entry.
+func (g *Gatherer) writeArtifactFile(name string, write func(io.Writer) error) error {
+	file, err := g.createArtifact(filepath.Join(g.opts.ArtifactDir, name))
+	if err != nil {
+		return g.logError(fmt.Sprintf("error creating %s: %%v", name), err)
 	}
 
-	// Collect logs for each GPU Operand Pod.
-	if podInfo.OperandPods != nil {
-		for i := range podInfo.OperandPods.Items {
-			pod := podInfo.OperandPods.Items[i]
-			for _, container := range containerNames(&pod) {
-				fileName := fmt.Sprintf("%s_%s.log", pod.Name, container)
-				if err := g.collectContainerLogs(pod.Namespace, &pod, container, fileName, false); err != nil {
-					return err
-				}
-			}
-		}
+	if werr := write(file); werr != nil {
+		file.discard()
+		return g.logError(fmt.Sprintf("error writing %s: %%v", name), werr)
 	}
-
+	if cerr := file.commit(); cerr != nil {
+		return g.logError(fmt.Sprintf("error writing %s: %%v", name), cerr)
+	}
 	return nil
 }
 
@@ -724,61 +604,6 @@ func containerNames(pod *v1.Pod) []string {
 		names = append(names, c.Name)
 	}
 	return names
-}
-
-// collectContainerLogs writes the logs of a single container to fileName under
-// the artifact directory. The log request always names its container, because
-// the API server refuses a request without one for a pod running more than one
-// container, and always asks for timestamps.
-func (g *Gatherer) collectContainerLogs(namespace string, pod *v1.Pod, container, fileName string, previous bool) error {
-	logPath := filepath.Join(g.opts.ArtifactDir, fileName)
-	logFile, err := g.createArtifact(logPath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating %s: %v\n", fileName, err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-	defer logFile.Close()
-
-	podLogOpts := v1.PodLogOptions{
-		Container:  container,
-		Timestamps: true,
-		Previous:   previous,
-	}
-	stream, err := g.podLogs(context.Background(), namespace, pod.Name, &podLogOpts)
-	if err != nil || stream == nil {
-		if previous {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting previous logs for pod %s container %s: %v\n", pod.Name, container, err); lerr != nil {
-				return fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-			}
-			// If no previous logs, write a message and continue.
-			return writeStringToFile(logFile, "No previous logs available\n")
-		}
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting logs for pod %s container %s: %v\n", pod.Name, container, err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-	defer stream.Close()
-
-	writer := bufio.NewWriter(logFile)
-	if err := writePrefixedLines(writer, stream, pod.Name, container); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing %s: %v\n", fileName, err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-	// The buffer holds the tail of the log until this point, so a failure here
-	// truncates the artifact silently.
-	if err := writer.Flush(); err != nil {
-		err = fmt.Errorf("error flushing %s: %w", fileName, err)
-		if _, lerr := fmt.Fprintf(g.errLogFile, "%v\n", err); lerr != nil {
-			err = fmt.Errorf("%v + error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-	return nil
 }
 
 // writePrefixedLines copies src to dst, prefixing every line with the
@@ -802,256 +627,146 @@ func writePrefixedLines(dst io.Writer, src io.Reader, podName, container string)
 	}
 }
 
-// writeStringToFile is a helper function that writes a string to the provided file.
-func writeStringToFile(file *os.File, s string) error {
+// writeStringToFile is a helper function that writes a string to the provided
+// writer.
+func writeStringToFile(file io.StringWriter, s string) error {
 	if _, err := file.WriteString(s); err != nil {
 		return fmt.Errorf("error writing string to file: %w", err)
 	}
 	return nil
 }
 
-// gatherDaemonSets collects daemon sets from the operatorNamespace and writes the result to "daemonsets.yaml".
-func (g *Gatherer) gatherDaemonSets(operatorNamespace string) error {
-	listFunc := func(opts metav1.ListOptions) (appsv1.DaemonSetList, string, error) {
-		ds, err := g.clientset.AppsV1().DaemonSets(operatorNamespace).List(context.Background(), opts)
-		if err != nil {
-			return appsv1.DaemonSetList{}, "", err
-		}
-		return *ds, ds.Continue, nil
-	}
-	appendFunc := func(all *appsv1.DaemonSetList, page appsv1.DaemonSetList) {
-		all.Items = append(all.Items, page.Items...)
-	}
-	daemonSets, err := listAllPaginated[appsv1.DaemonSetList](500, "", listFunc, appendFunc)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting daemonSets: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-
-	// Create the file to store the daemon sets data.
-	daemonSetsFilePath := filepath.Join(g.opts.ArtifactDir, "daemonsets.yaml")
-	daemonSetsFile, err := g.createArtifact(daemonSetsFilePath)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error creating daemonsets.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-	defer daemonSetsFile.Close()
-
-	// Marshal the daemonSets object into YAML.
-	stampDaemonSetList(&daemonSets)
-	data, err := yaml.Marshal(daemonSets)
-	if err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error marshalling daemonSets: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-
-	// Write the YAML data to the file.
-	if _, err = daemonSetsFile.Write(data); err != nil {
-		if _, lerr := fmt.Fprintf(g.errLogFile, "Error writing daemonsets.yaml: %v\n", err); lerr != nil {
-			err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-		}
-		return err
-	}
-
-	return nil
-}
-
-// gatherBugReportFromDaemonSet runs a remote command on pods matching
-// the labels "app=nvidia-driver-daemonset" and "app=nvidia-vgpu-manager-daemonset"
-// to generate a bug report, and then copies the resulting file from the pod
-// to the artifact directory.
-func (g *Gatherer) gatherBugReportFromDaemonSet(operatorNamespace string) error {
-	labels := []string{
-		"app=nvidia-driver-daemonset",
-		"app=nvidia-vgpu-manager-daemonset",
-	}
-	appendFunc := func(all *v1.PodList, page v1.PodList) {
-		all.Items = append(all.Items, page.Items...)
-	}
-	var errs []error
-	// One ledger of destination names for every daemonset: a node can run both a
-	// driver pod and a vGPU manager pod, and each pass must see what the previous
-	// one already wrote.
-	taken := make(map[string]bool)
-	// found counts the pods the labels matched, so that a cluster running no
-	// driver at all can be told apart from one whose collection failed.
-	found := 0
-	for _, label := range labels {
-		listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
-			pl, err := g.clientset.CoreV1().Pods(operatorNamespace).List(context.Background(), opts)
-			if err != nil {
-				return v1.PodList{}, "", err
-			}
-			return *pl, pl.Continue, nil
-		}
-		podList, err := listAllPaginated[v1.PodList](500, label, listFunc, appendFunc)
-		if err != nil {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Error getting pods for label %s: %v\n", label, err); lerr != nil {
-				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-			}
-			return err
-		}
-		found += len(podList.Items)
-		if err := g.collectBugReports(label, podList.Items, taken); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	// A cluster installed with driver.enabled=false, or one running a
-	// preinstalled driver on the host, has no pod to ask for a bug report. That
-	// is a complete gather, not a failed one, but the bundle then holds no
-	// nvidia-bug-report file and the reader has to be told why rather than left
-	// to guess whether the collector broke.
-	if found == 0 {
-		g.note("no driver pods found (labels %s); skipping nvidia-bug-report", strings.Join(labels, ", "))
-	}
-	return errors.Join(errs...)
-}
-
-// collectBugReports copies the bug report out of each of the given daemonset
-// pods into the artifact directory. label identifies the daemonset the pods
-// belong to and is used for error reporting. taken carries the destination
-// names already used across every daemonset, and is added to here.
-func (g *Gatherer) collectBugReports(label string, pods []v1.Pod, taken map[string]bool) error {
-	var errs []error
-
-	for i := range pods {
-		pod := pods[i]
-
-		// A pod that never got scheduled has no node to name a report after, and
-		// one that is not running cannot answer an exec. Record the gap and move on
-		// rather than spending a doomed exec on it.
-		if pod.Spec.NodeName == "" {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Skipping pod %s (label %s): not scheduled to a node\n", pod.Name, label); lerr != nil {
-				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
-			}
-			continue
-		}
-		if pod.Status.Phase != v1.PodRunning {
-			if _, lerr := fmt.Fprintf(g.errLogFile, "Skipping pod %s (label %s): pod is %s, not Running\n", pod.Name, label, pod.Status.Phase); lerr != nil {
-				errs = append(errs, fmt.Errorf("error writing to stderr log file: %w", lerr))
-			}
-			continue
-		}
-
-		// Name the report after the node the pod runs on, matching the gpu-operator
-		// must-gather script. Naming it after the daemonset instead would make every
-		// pod of that daemonset write to the same file. A node already collected
-		// from, because it runs a second pod of this daemonset mid-rollout or a pod
-		// of another one, gets the pod name too.
-		destFileName := fmt.Sprintf("nvidia-bug-report_%s.log.gz", pod.Spec.NodeName)
-		if taken[destFileName] {
-			destFileName = fmt.Sprintf("nvidia-bug-report_%s_%s.log.gz", pod.Spec.NodeName, pod.Name)
-		}
-		taken[destFileName] = true
-		destPath := filepath.Join(g.opts.ArtifactDir, destFileName)
-
-		// One unreachable pod must not cost us the reports of the nodes behind it,
-		// so collect what we can and report the failures together at the end.
-		if err := g.fetchBugReport(&pod, destPath); err != nil {
-			err = fmt.Errorf("collecting bug report from pod %s (label %s): %w", pod.Name, label, err)
-			if _, lerr := fmt.Fprintf(g.errLogFile, "%v\n", err); lerr != nil {
-				err = fmt.Errorf("%v+ error writing to stderr log file: %v", err, lerr)
-			}
-			errs = append(errs, err)
-			continue
-		}
-	}
-
-	return errors.Join(errs...)
-}
-
 // Run collects everything NVIDIA support asks for from the cluster the factory
 // points at, into opts.ArtifactDir. progress carries the running commentary;
 // the artifacts themselves go to files under the artifact directory.
 func Run(opts *Options, f Clients, progress Progress) error {
-	// Initialize the Gatherer with the provided options.
 	g, err := NewGatherer(opts, f, progress)
 	if err != nil {
+		// A usage error is the user's to fix and carries its own exit code;
+		// wrapping it as a failed gather would report a typo as a cluster that
+		// could not be read.
+		var usage *output.UsageError
+		if errors.As(err, &usage) {
+			return err
+		}
 		// Nothing was collected, so there is no bundle to send.
 		return &Error{Err: fmt.Errorf("failed to initialize Gatherer: %w", err)}
 	}
 	defer g.Close()
 
-	if err := g.collect(); err != nil {
-		return g.failed(err)
+	// The manifest is written whichever way the gather ended, including a
+	// panic on the way out. A bundle that stops halfway is exactly the one
+	// whose reader most needs to know which collectors ran, and an index
+	// written only on the success path is one a later early return can lose.
+	defer func() {
+		if err := g.writeManifest(); err != nil {
+			g.note("could not write %s: %v", ManifestFileName, err)
+		}
+	}()
+
+	if err := g.checkNode(); err != nil {
+		return err
+	}
+
+	collectErr := g.collect()
+
+	if collectErr != nil {
+		return g.failed(collectErr)
 	}
 	return nil
 }
 
-// collect runs every collector in turn. The first failure stops the gather:
-// what was written before it stays on disk, and the caller decides what that
-// is worth from the exit code.
+// checkNode makes sure --node names a node the cluster has. A typo used to run
+// the whole gather and produce a complete-looking bundle holding nothing about
+// any node, which reads as a cluster with no GPUs rather than as a name that
+// does not exist.
+func (g *Gatherer) checkNode() error {
+	if g.opts.Node == "" {
+		return nil
+	}
+	if !usableInAName(g.opts.Node) {
+		return output.NewUsageError("--node %q is not a usable node name", g.opts.Node)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), customResourceTimeout)
+	defer cancel()
+
+	_, err := g.clientset.CoreV1().Nodes().Get(ctx, g.opts.Node, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		return nil
+	case apierrors.IsNotFound(err):
+		return output.NewUsageError("--node %s: the cluster has no such node", g.opts.Node)
+	default:
+		// Anything else is the cluster being unreadable, which the collectors
+		// report in their own way; one failed GET must not stop the gather.
+		g.note("could not check that node %s exists: %v", g.opts.Node, err)
+		return nil
+	}
+}
+
+// collect runs every collector of the registry in turn, recording what each
+// one did. A collector that had nothing to do is noted and the gather carries
+// on; a collector that failed stops it, and what was written before it stays
+// on disk for the caller to decide what it is worth from the exit code.
 func (g *Gatherer) collect() error {
-	// 1. Gather OpenShift version (if applicable).
-	g.step("Gathering the OpenShift version")
-	if err := g.gatherOpenShiftVersion(); err != nil {
-		return err
+	s := &gatherState{}
+	var failed []string
+
+	for _, c := range Collectors() {
+		g.begin(c.Name)
+		if c.Step != "" {
+			g.step("%s", c.Step)
+		}
+
+		err := c.Run(g, s)
+		var skipped errSkipped
+		switch {
+		case err == nil:
+			g.end(StatusOK)
+		case errors.As(err, &skipped):
+			g.end(statusSkipped + skipped.reason)
+		default:
+			// One collector that failed must not cost the user every artifact
+			// behind it. The failure is recorded against its own collector and
+			// the gather carries on; the exit code below says the bundle is
+			// incomplete and the manifest says which part.
+			g.end(statusError + err.Error())
+			g.note("%s: %v", c.Name, err)
+			failed = append(failed, c.Name)
+		}
 	}
 
-	// 2. Gather node information.
-	g.step("Gathering node information")
-	if err := g.gatherNodeInfo(); err != nil {
-		return err
+	// Being told no is not the same as asking for no. A bundle missing the
+	// driver evidence because RBAC refused the exec is incomplete, and a script
+	// that files it as complete files an unanswerable support ticket.
+	// A denied exec is reported on its own, because its cause is one thing the
+	// user can act on rather than a list of collectors that each failed for
+	// their own reason.
+	if len(s.execDenied) > 0 {
+		return fmt.Errorf("not allowed to exec into the driver pods; these collectors were skipped: %s",
+			strings.Join(s.execDenied, ", "))
 	}
 
-	// 3. Retrieve the operator namespace.
-	//    (Assumes getOperatorNamespace returns (string, error).)
-	operatorNamespace, err := g.gatherOperatorNamespace()
-	if err != nil {
-		return err
-	}
-	g.step("Found the GPU operator in namespace %s", operatorNamespace)
-
-	// 4. Collect GPU Operator CRDs (ClusterPolicy and NvidiaDriver).
-	g.step("Gathering the GPU operator custom resources")
-	if err := g.gatherGPUOperatorCRDs(); err != nil {
-		return err
-	}
-
-	// 5. Gather GPU node information.
-	g.step("Gathering GPU node information")
-	if err := g.gatherGPUNodes(); err != nil {
-		return err
-	}
-
-	// 6. Retrieve pod information (both operand and operator pods).
-	g.step("Gathering pod information")
-	podInfo, err := g.gatherPodInfo(operatorNamespace)
-	if err != nil {
-		return err
-	}
-
-	// 7. Collect logs from the pods using the obtained PodInfo.
-	g.step("Gathering pod logs")
-	if err := g.gatherPodLogs(podInfo, operatorNamespace); err != nil {
-		return err
-	}
-
-	// 8. Gather information about DaemonSets.
-	g.step("Gathering daemonsets")
-	if err := g.gatherDaemonSets(operatorNamespace); err != nil {
-		return err
-	}
-
-	// 9. Collect the DRA resource slices, when the cluster has them.
-	g.step("Gathering resource slices")
-	if err := g.gatherResourceSlices(); err != nil {
-		return err
-	}
-
-	// 10. Run remote command on daemonset pods to generate and collect bug report.
-	g.step("Gathering bug reports from the driver daemonsets")
-	if err := g.gatherBugReportFromDaemonSet(operatorNamespace); err != nil {
-		return err
+	if len(failed) > 0 {
+		return fmt.Errorf("these collectors failed: %s", strings.Join(failed, ", "))
 	}
 
 	return nil
+}
+
+// begin starts counting the artifacts of one collector.
+func (g *Gatherer) begin(name string) {
+	g.results = append(g.results, CollectorStatus{Name: name, Artifacts: []string{}})
+	g.current = &g.results[len(g.results)-1]
+}
+
+// end records how the current collector finished.
+func (g *Gatherer) end(status string) {
+	if g.current != nil {
+		g.current.Status = status
+		g.current = nil
+	}
 }
 
 // Close releases any resources held by the Gatherer.
@@ -1120,29 +835,99 @@ func stampDaemonSetList(l *appsv1.DaemonSetList) {
 	}
 }
 
-// createArtifact makes one collected artifact and records that the bundle now
-// holds something.
-func (g *Gatherer) createArtifact(path string) (*os.File, error) {
-	file, err := createArtifactFile(path)
+// artifactTempSuffix marks a file that is still being written. A reader of a
+// bundle never sees one: it is renamed into place when the write finishes and
+// removed when it does not.
+const artifactTempSuffix = ".part"
+
+// artifactFile is one artifact being written.
+//
+// It lands under a temporary name and is renamed into place by commit. A
+// collector that starts writing and then fails used to leave a half-written
+// file behind, and the manifest, written afterwards, indexed it with the
+// digest it actually had: the bundle was self-consistent and a reader took a
+// truncated YAML for the cluster's whole state.
+type artifactFile struct {
+	file  *os.File
+	final string
+	g     *Gatherer
+}
+
+// Write implements io.Writer.
+func (a *artifactFile) Write(p []byte) (int, error) { return a.file.Write(p) }
+
+// WriteString implements io.StringWriter.
+func (a *artifactFile) WriteString(s string) (int, error) { return a.file.WriteString(s) }
+
+// commit puts the artifact in place under its own name and records it.
+func (a *artifactFile) commit() error {
+	if err := a.file.Close(); err != nil {
+		_ = os.Remove(a.file.Name())
+		return fmt.Errorf("closing %s: %w", filepath.Base(a.final), err)
+	}
+	if err := os.Rename(a.file.Name(), a.final); err != nil {
+		_ = os.Remove(a.file.Name())
+		return fmt.Errorf("putting %s in place: %w", filepath.Base(a.final), err)
+	}
+	a.g.recordArtifact(a.final)
+	return nil
+}
+
+// discard throws away a write that did not finish.
+func (a *artifactFile) discard() {
+	_ = a.file.Close()
+	if err := os.Remove(a.file.Name()); err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(a.g.errLogFile,
+			"Error removing the unfinished artifact %s: %v\n", filepath.Base(a.file.Name()), err)
+	}
+}
+
+// createArtifact starts one artifact of the bundle. The caller commits it or
+// discards it; nothing is recorded until it commits.
+func (g *Gatherer) createArtifact(path string) (*artifactFile, error) {
+	file, err := createArtifactFile(path + artifactTempSuffix)
 	if err != nil {
 		return nil, err
 	}
+	return &artifactFile{file: file, final: path, g: g}, nil
+}
+
+// recordArtifact notes that the bundle now holds one more file, and which
+// collector put it there. The bug report is copied out of a pod rather than
+// opened here, so it records itself through this.
+func (g *Gatherer) recordArtifact(path string) {
 	g.collected = true
+	g.indexArtifact(path)
+}
+
+// recordMarker notes a file that records what the cluster does not have. It
+// belongs in the manifest like any other artifact, but it is not something
+// collected: a bundle holding nothing but "not installed" markers says the
+// gather reached the cluster and found nothing, and calling that a partial
+// success would tell a script the bundle is worth reading.
+func (g *Gatherer) recordMarker(path string) {
+	g.indexArtifact(path)
+}
+
+// indexArtifact adds one file to the current collector's list.
+func (g *Gatherer) indexArtifact(path string) {
+	name := filepath.Base(path)
+	if g.current != nil {
+		g.current.Artifacts = append(g.current.Artifacts, name)
+	}
 	// With debug on, the bundle is listed as it is built: a support engineer
 	// chasing a missing file needs to know whether it was never written or
 	// written and empty.
 	if g.opts.Debug {
-		g.step("Wrote %s", filepath.Base(path))
+		g.step("Wrote %s", name)
 	}
-	return file, nil
 }
 
-// writeArtifact writes a whole artifact in one go, for the marker files that
-// record what the cluster does not have.
-func (g *Gatherer) writeArtifact(path string, data []byte) error {
+// writeMarker writes a file recording what the cluster does not have.
+func (g *Gatherer) writeMarker(path string, data []byte) error {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return err
 	}
-	g.collected = true
+	g.recordMarker(path)
 	return nil
 }

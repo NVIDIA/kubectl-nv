@@ -34,8 +34,15 @@ import (
 // noDriverPodsLine is what a gather says about a cluster whose GPU Operator
 // runs without a driver daemonset, which is what the Mokka lane is: the
 // simulated GPUs need no driver, so there is no pod to ask for a bug report.
+//
+// It names every label the collector looked under, so a reader can tell "this
+// cluster installs its driver some other way" from "the collector only knows
+// one of the four ways". Pinned exactly: a line that quietly stopped naming a
+// label would be the first sign of the collector having stopped looking under
+// it, and nothing else in the bundle would show that.
 const noDriverPodsLine = "no driver pods found " +
-	"(labels app=nvidia-driver-daemonset, app=nvidia-vgpu-manager-daemonset); " +
+	"(labels app=nvidia-driver-daemonset, app.kubernetes.io/component=nvidia-driver, " +
+	"app=nvidia-vgpu-manager-daemonset, openshift.driver-toolkit); " +
 	"skipping nvidia-bug-report"
 
 // bundle is one must-gather run and the directory it wrote.
@@ -127,22 +134,83 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 		}
 	})
 
-	t.Run("every collector wrote its artifact", func(t *testing.T) {
-		// Each name here is one collector's output. A collector that silently
-		// stopped running takes its file with it, and nothing else in this
-		// suite would notice: the mode and parse checks below only look at the
-		// files that are there. Listed rather than globbed, so that a file the
-		// gatherer stops writing has to be deleted from this list by hand.
-		want := map[string]bool{
-			"nodes.yaml":             true,
-			"gpu_nodes.yaml":         true,
-			"gpu_operand_pods.yaml":  true,
-			"gpu_operator_pod.yaml":  true,
-			"cluster_policy.yaml":    true,
-			"daemonsets.yaml":        true,
-			"resourceslices.yaml":    true,
-			"must-gather.log":        true,
-			"must-gather.stderr.log": true,
+	t.Run("the manifest and the bundle agree", func(t *testing.T) {
+		// Driven by manifest.json rather than by a list written out here. A
+		// hard-coded list of file names has to be edited every time a collector
+		// is added, which is how it stops catching anything; the manifest is
+		// the gatherer's own claim about what it wrote, and this checks that
+		// claim against the directory on disk.
+		m := readBundleManifest(t, b.dir)
+
+		if len(m.Collectors) == 0 {
+			t.Fatal("manifest.json records no collectors at all")
+		}
+		for _, c := range m.Collectors {
+			if c.Status == "ok" && len(c.Artifacts) == 0 {
+				t.Errorf("collector %q succeeded but claims no artifact", c.Name)
+			}
+			for _, artifact := range c.Artifacts {
+				if b.files[artifact] == nil {
+					t.Errorf("collector %q claims %s, which the bundle does not hold", c.Name, artifact)
+				}
+			}
+		}
+
+		// The bundle is exactly what the manifest indexes, plus the manifest.
+		// A file nobody indexed is a file a reader cannot check; an indexed
+		// file that is not there is a collector that reported what it meant to
+		// write rather than what it wrote.
+		indexed := map[string]bool{"manifest.json": true}
+		for _, f := range m.Files {
+			indexed[f.Path] = true
+			if b.files[f.Path] == nil {
+				t.Errorf("manifest.json indexes %s, which the bundle does not hold", f.Path)
+			}
+		}
+		for name := range b.files {
+			if !indexed[name] {
+				t.Errorf("bundle holds %s, which manifest.json does not index", name)
+			}
+		}
+
+		// Recomputed here from the files as they landed. This is the check a
+		// support engineer makes on a bundle that has been through an archive
+		// and an upload, and a gatherer that hashed its intent rather than its
+		// output would pass every other assertion in this file.
+		for _, f := range m.Files {
+			raw, err := os.ReadFile(filepath.Join(b.dir, f.Path))
+			if err != nil {
+				continue // already reported above
+			}
+			if f.Size != int64(len(raw)) {
+				t.Errorf("%s: manifest size = %d, the file is %d bytes", f.Path, f.Size, len(raw))
+			}
+			if got := sha256Hex(raw); got != f.SHA256 {
+				t.Errorf("%s: manifest sha256 = %q, the file hashes to %q", f.Path, f.SHA256, got)
+			}
+		}
+	})
+
+	t.Run("the core artifacts are always there", func(t *testing.T) {
+		// The floor under the manifest check above. A gatherer that dropped
+		// every collector but one would still be self-consistent: its manifest
+		// would index the one file it wrote and the directory would match. The
+		// names below are the ones a bundle is useless without, so they are
+		// listed by hand and a collector that stops writing one has to be
+		// deleted from this list deliberately.
+		for _, name := range []string{
+			"nodes.yaml",
+			"gpu_operand_pods.yaml",
+			"cluster_policy.yaml",
+			"daemonsets.yaml",
+			"resourceslices.yaml",
+			"must-gather.log",
+			"must-gather.stderr.log",
+			"manifest.json",
+		} {
+			if b.files[name] == nil {
+				t.Errorf("bundle is missing %s\nbundle holds: %v", name, b.names())
+			}
 		}
 
 		// The driver custom resource is either there or recorded as absent,
@@ -150,29 +218,9 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 		// the collector cannot make its mind up about the cluster.
 		driverYAML := b.files["nvidia_driver.yaml"] != nil
 		driverMissing := b.files["nvidia_driver.missing"] != nil
-		switch {
-		case driverYAML && driverMissing:
-			t.Error("bundle holds both nvidia_driver.yaml and nvidia_driver.missing")
-		case driverYAML:
-			want["nvidia_driver.yaml"] = true
-		case driverMissing:
-			want["nvidia_driver.missing"] = true
-		default:
-			t.Error("bundle holds neither nvidia_driver.yaml nor nvidia_driver.missing")
-		}
-
-		for name := range want {
-			if b.files[name] == nil {
-				t.Errorf("bundle is missing %s", name)
-			}
-		}
-		// The log files are counted one per container by their own subtest;
-		// anything else the bundle holds is a file no collector claims.
-		for name := range b.files {
-			if want[name] || strings.HasSuffix(name, ".log") {
-				continue
-			}
-			t.Errorf("bundle holds %s, which no collector is supposed to write", name)
+		if driverYAML == driverMissing {
+			t.Errorf("bundle holds nvidia_driver.yaml=%v and nvidia_driver.missing=%v, want exactly one",
+				driverYAML, driverMissing)
 		}
 	})
 
@@ -303,22 +351,39 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 		// than written out here: the operands of a GPU Operator release are
 		// its business, and a hard-coded list would have to be edited on every
 		// bump, which is how it stops catching anything.
+		//
+		// Every container gets its current log and the previous one beside it.
+		// A container that has never restarted has no previous log to serve,
+		// and the file is still written carrying that: a reader has to be able
+		// to tell a container that never crashed from one nobody looked at.
 		want := map[string]bool{
 			"must-gather.log":        true,
 			"must-gather.stderr.log": true,
 		}
-		for _, pod := range podList(t, b, "gpu_operand_pods.yaml") {
-			for _, container := range containerNames(pod) {
-				want[pod.Name+"_"+container+".log"] = true
-			}
-		}
+
 		operators := podList(t, b, "gpu_operator_pod.yaml")
 		if len(operators) == 0 {
 			t.Fatal("gpu_operator_pod.yaml lists no pod")
 		}
-		for _, container := range containerNames(operators[0]) {
+		operator := operators[0]
+		for _, container := range containerNames(operator) {
 			want["gpu_operator_logs_"+container+".log"] = true
 			want["gpu_operator_logs_"+container+".previous.log"] = true
+		}
+
+		for _, pod := range podList(t, b, "gpu_operand_pods.yaml") {
+			// The operator pod is in the namespace listing too, and its logs
+			// are already collected under gpu_operator_logs_. Collecting them
+			// a second time under a second name would double the largest file
+			// in the bundle, and the gpu-operator script skips it here for the
+			// same reason.
+			if pod.Name == operator.Name && pod.Namespace == operator.Namespace {
+				continue
+			}
+			for _, container := range containerNames(pod) {
+				want[pod.Name+"_"+container+".log"] = true
+				want[pod.Name+"_"+container+".previous.log"] = true
+			}
 		}
 
 		got := map[string]bool{}
@@ -333,6 +398,9 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 				t.Errorf("bundle is missing %s", name)
 			}
 		}
+		// Still exhaustive in the other direction. A log named after the wrong
+		// pod, or after a container the pod does not run, lands here rather
+		// than being absorbed by a suffix rule.
 		for name := range got {
 			if !want[name] {
 				t.Errorf("bundle holds an unexpected log file %s", name)

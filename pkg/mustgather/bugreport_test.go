@@ -18,6 +18,7 @@ package mustgather
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -33,6 +34,23 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
+
+// bugReportState is the state a bug-report collector runs over, with the
+// namespace already resolved so that a hand-built Gatherer with no dynamic
+// client is not asked to look it up.
+func bugReportState(namespace string) *gatherState {
+	return &gatherState{operatorNamespace: namespace, prepared: true}
+}
+
+// driverTargetsOf wraps pods as the collector's own driver targets, for the
+// tests that drive the per-pod loop directly.
+func driverTargetsOf(label string, pods []v1.Pod) []driverTarget {
+	targets := make([]driverTarget, 0, len(pods))
+	for _, pod := range pods {
+		targets = append(targets, driverTarget{pod: pod, label: label, container: execContainer(&pod)})
+	}
+	return targets
+}
 
 // driverPod builds a running driver daemonset pod scheduled on the named node.
 func driverPod(t *testing.T, namespace, name, nodeName string) *v1.Pod {
@@ -67,7 +85,7 @@ func artifactNames(t *testing.T, dir string) []string {
 // report can be traced back to the pod it came from. Pods named in failFor fail
 // instead, as a pod whose driver container is wedged would.
 func recordingFetcher(failFor map[string]bool) PodFileFetcher {
-	return func(pod *v1.Pod, destPath string) error {
+	return func(_ context.Context, pod *v1.Pod, destPath string) error {
 		if failFor[pod.Name] {
 			return errors.New("command terminated with exit code 1")
 		}
@@ -99,8 +117,8 @@ func TestGatherBugReportCollectsEveryDriverPod(t *testing.T) {
 		fetchPodFile: recordingFetcher(nil),
 	}
 
-	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
-		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	if err := g.gatherBugReportFromDaemonSet(bugReportState(namespace)); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	want := []string{
@@ -167,7 +185,7 @@ func TestGatherBugReportReportsEveryFailure(t *testing.T) {
 		}),
 	}
 
-	err := g.gatherBugReportFromDaemonSet(namespace)
+	err := g.gatherBugReportFromDaemonSet(bugReportState(namespace))
 	if err == nil {
 		t.Fatal("gatherBugReportFromDaemonSet returned nil, want an error naming both failing pods")
 	}
@@ -208,7 +226,7 @@ func TestGatherBugReportCollectsVgpuAfterDriverFailure(t *testing.T) {
 		fetchPodFile: recordingFetcher(map[string]bool{failingDriver: true}),
 	}
 
-	err := g.gatherBugReportFromDaemonSet(namespace)
+	err := g.gatherBugReportFromDaemonSet(bugReportState(namespace))
 	if err == nil {
 		t.Fatal("gatherBugReportFromDaemonSet returned nil, want an error naming the failing driver pod")
 	}
@@ -253,8 +271,8 @@ func TestGatherBugReportKeepsDriverAndVgpuOnOneNode(t *testing.T) {
 		fetchPodFile: recordingFetcher(nil),
 	}
 
-	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
-		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	if err := g.gatherBugReportFromDaemonSet(bugReportState(namespace)); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	want := []string{
@@ -305,9 +323,12 @@ func TestCollectBugReportsContinuesAfterFailure(t *testing.T) {
 		fetchPodFile: recordingFetcher(map[string]bool{failing: true}),
 	}
 
-	err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool))
+	state := bugReportState(namespace)
+	state.driverPods = driverTargetsOf("app=nvidia-driver-daemonset", pods)
+
+	err := g.gatherBugReportFromDaemonSet(state)
 	if err == nil {
-		t.Fatal("collectBugReports returned nil, want an error naming the failing pod")
+		t.Fatal("the bug report collector returned nil, want an error naming the failing pod")
 	}
 	if !strings.Contains(err.Error(), failing) {
 		t.Errorf("error %q does not name the failing pod %q", err.Error(), failing)
@@ -348,14 +369,17 @@ func TestCollectBugReportsSkipsUncollectablePods(t *testing.T) {
 		opts:       &Options{ArtifactDir: artifactDir},
 		logFile:    logFile,
 		errLogFile: errLogFile,
-		fetchPodFile: func(pod *v1.Pod, destPath string) error {
+		fetchPodFile: func(_ context.Context, pod *v1.Pod, destPath string) error {
 			fetched = append(fetched, pod.Name)
 			return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 		},
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
-		t.Fatalf("collectBugReports: %v", err)
+	state := bugReportState(namespace)
+	state.driverPods = driverTargetsOf("app=nvidia-driver-daemonset", pods)
+
+	if err := g.gatherBugReportFromDaemonSet(state); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	if len(fetched) != 1 || fetched[0] != "nvidia-driver-daemonset-aaaaa" {
@@ -397,8 +421,11 @@ func TestCollectBugReportsKeepsBothReportsOnOneNode(t *testing.T) {
 		fetchPodFile: recordingFetcher(nil),
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
-		t.Fatalf("collectBugReports: %v", err)
+	state := bugReportState(namespace)
+	state.driverPods = driverTargetsOf("app=nvidia-driver-daemonset", pods)
+
+	if err := g.gatherBugReportFromDaemonSet(state); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	want := []string{
@@ -445,13 +472,16 @@ func TestGatherBugReportNamesFilesPerNode(t *testing.T) {
 		errLogFile: errLogFile,
 		// The fetcher stands in for exec + copyFromPod: it records which pod the
 		// report came from by writing that pod's name into the destination file.
-		fetchPodFile: func(pod *v1.Pod, destPath string) error {
+		fetchPodFile: func(_ context.Context, pod *v1.Pod, destPath string) error {
 			return os.WriteFile(destPath, []byte(pod.Name), 0o600)
 		},
 	}
 
-	if err := g.collectBugReports("app=nvidia-driver-daemonset", pods, make(map[string]bool)); err != nil {
-		t.Fatalf("collectBugReports: %v", err)
+	state := bugReportState(namespace)
+	state.driverPods = driverTargetsOf("app=nvidia-driver-daemonset", pods)
+
+	if err := g.gatherBugReportFromDaemonSet(state); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	entries, err := os.ReadDir(artifactDir)
@@ -528,7 +558,8 @@ func readFileAsString(t *testing.T, path string) string {
 // because an operator reading a bundle with no nvidia-bug-report file has to be
 // able to tell "the driver is not deployed here" from "the collector gave up".
 const noDriverPodsLine = "no driver pods found " +
-	"(labels app=nvidia-driver-daemonset, app=nvidia-vgpu-manager-daemonset); " +
+	"(labels app=nvidia-driver-daemonset, app.kubernetes.io/component=nvidia-driver, " +
+	"app=nvidia-vgpu-manager-daemonset, openshift.driver-toolkit); " +
 	"skipping nvidia-bug-report"
 
 // bugReportGatherer builds a Gatherer over the given cluster objects whose
@@ -562,8 +593,13 @@ func TestNoDriverPodsIsReported(t *testing.T) {
 
 	g, artifactDir, stderr := bugReportGatherer(t)
 
-	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
-		t.Fatalf("gatherBugReportFromDaemonSet over a driverless cluster: %v", err)
+	var skipped errSkipped
+	err := g.gatherBugReportFromDaemonSet(bugReportState(namespace))
+	if !errors.As(err, &skipped) {
+		t.Fatalf("the bug report collector returned %v, want it recorded as skipped", err)
+	}
+	if skipped.reason != "no driver pods" {
+		t.Errorf("skip reason = %q, want %q", skipped.reason, "no driver pods")
 	}
 
 	if got := strings.Count(stderr.String(), noDriverPodsLine); got != 1 {
@@ -584,8 +620,8 @@ func TestDriverPodsAreNotReportedAsAbsent(t *testing.T) {
 	g, artifactDir, stderr := bugReportGatherer(t,
 		driverPod(t, namespace, "nvidia-driver-daemonset-aaaaa", "worker-a"))
 
-	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
-		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	if err := g.gatherBugReportFromDaemonSet(bugReportState(namespace)); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	if strings.Contains(stderr.String(), "no driver pods found") {
@@ -608,8 +644,8 @@ func TestVGPUManagerOnlyIsNotDriverless(t *testing.T) {
 	g, artifactDir, stderr := bugReportGatherer(t,
 		vgpuPod(t, namespace, "nvidia-vgpu-manager-daemonset-aaaaa", "worker-a"))
 
-	if err := g.gatherBugReportFromDaemonSet(namespace); err != nil {
-		t.Fatalf("gatherBugReportFromDaemonSet: %v", err)
+	if err := g.gatherBugReportFromDaemonSet(bugReportState(namespace)); err != nil {
+		t.Fatalf("the bug report collector: %v", err)
 	}
 
 	if strings.Contains(stderr.String(), "no driver pods found") {

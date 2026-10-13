@@ -67,11 +67,16 @@ func getOpenShiftMachines(config *rest.Config) ([]byte, error) {
 	return machines, nil
 }
 
-// executeRemoteCommand runs command inside pod and returns its stdout and
-// stderr. It goes through restCfg, the configuration the rest of the gather
-// uses, rather than loading the default kubeconfig again: the exec has to land
-// on the cluster the user named with --kubeconfig and --context.
-func executeRemoteCommand(restCfg *rest.Config, pod *v1.Pod, command string) (string, string, error) {
+// executeRemoteCommand runs command inside one container of pod and returns
+// its stdout and stderr. It goes through restCfg, the configuration the rest of
+// the gather uses, rather than loading the default kubeconfig again: the exec
+// has to land on the cluster the user named with --kubeconfig and --context.
+//
+// The container is named rather than left to the API server. A driver pod
+// carrying a sidecar has nvidia-bug-report.sh in only one of its containers,
+// and the one the API server picks without being told is the first in spec
+// order, which is not always that one.
+func executeRemoteCommand(ctx context.Context, restCfg *rest.Config, pod *v1.Pod, container, command string) (string, string, error) {
 	coreClient, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		return "", "", err
@@ -86,17 +91,18 @@ func executeRemoteCommand(restCfg *rest.Config, pod *v1.Pod, command string) (st
 		Name(pod.Name).
 		SubResource("exec").
 		VersionedParams(&v1.PodExecOptions{
-			Command: []string{"/bin/sh", "-c", command},
-			Stdin:   false,
-			Stdout:  true,
-			Stderr:  true,
-			TTY:     true,
+			Container: container,
+			Command:   []string{"/bin/sh", "-c", command},
+			Stdin:     false,
+			Stdout:    true,
+			Stderr:    true,
+			TTY:       true,
 		}, scheme.ParameterCodec)
 	exec, err := remotecommand.NewSPDYExecutor(restCfg, "POST", request.URL())
 	if err != nil {
 		return "", "", err
 	}
-	err = exec.StreamWithContext(context.TODO(), remotecommand.StreamOptions{
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
 		Stdout: buf,
 		Stderr: errBuf,
 	})

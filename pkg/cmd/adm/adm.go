@@ -19,7 +19,6 @@
 package adm
 
 import (
-	"fmt"
 	"os"
 	"time"
 
@@ -27,6 +26,7 @@ import (
 
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // artifactDirEnvVar names the directory the artifacts go to when
@@ -62,7 +62,16 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 		RunE: func(c *cobra.Command, _ []string) error {
 			opts.Debug = o.Debug
 			if opts.ArtifactDir == "" {
-				opts.ArtifactDir = defaultArtifactDir(time.Now())
+				opts.ArtifactDir = mustgather.DefaultArtifactDir(time.Now())
+			}
+			// The version is read off the root rather than threaded through
+			// this constructor: the root is where the linker stamps it, and a
+			// second copy of it is a second thing to forget to update.
+			opts.ToolVersion = c.Root().Version
+			opts.Context = kubeconfigContext(o)
+
+			if err := validateWindows(opts); err != nil {
+				return err
 			}
 
 			log := o.Log()
@@ -81,12 +90,56 @@ func newMustGatherCommand(o *cmd.Options, run mustgather.RunFunc) *cobra.Command
 	mg.Flags().StringVar(&opts.ArtifactDir, "artifacts-dir", os.Getenv(artifactDirEnvVar),
 		"path to the directory where the artifacts will be stored. "+
 			"Defaults to /tmp/nvidia-gpu-operator_<timestamp>")
+	mg.Flags().StringVar(&opts.Node, "node", "",
+		"collect only this node: its node object, the operand pods on it, their logs, "+
+			"its bug report and its device usage. The cluster-scoped resources are "+
+			"collected either way")
+	mg.Flags().DurationVar(&opts.Since, "since", 0,
+		"only collect container logs newer than this, for instance 2h or 30m. "+
+			"The default collects the whole log")
+	mg.Flags().BoolVar(&opts.NoExec, "no-exec", false,
+		"never exec into a driver pod: no nvidia-bug-report and no GPU device usage")
+	mg.Flags().DurationVar(&opts.ExecTimeout, "exec-timeout", mustgather.DefaultExecTimeout,
+		"how long one command inside a driver pod, or one copy out of it, may take "+
+			"before that pod is recorded as having timed out and the gather moves on")
 
 	return mg
 }
 
-// defaultArtifactDir names the directory the gpu-operator must-gather script
-// also uses, so that a report collected by either tool looks the same.
-func defaultArtifactDir(now time.Time) string {
-	return fmt.Sprintf("/tmp/nvidia-gpu-operator_%s", now.Format("20060102_1504"))
+// minimumWindow is the floor under the two duration flags. A window below it
+// collects nothing and an exec deadline below it cannot finish a bug report, so
+// either is a mistake worth naming rather than a gather that quietly produces
+// an empty bundle.
+const minimumWindow = time.Second
+
+// validateWindows rejects a duration the gather cannot do anything useful with.
+func validateWindows(opts *mustgather.Options) error {
+	if opts.Since != 0 && opts.Since < minimumWindow {
+		return output.NewUsageError(
+			"--since is %s: a log window shorter than %s collects nothing", opts.Since, minimumWindow)
+	}
+	if opts.ExecTimeout < minimumWindow {
+		return output.NewUsageError(
+			"--exec-timeout is %s: a deadline shorter than %s cannot finish a bug report",
+			opts.ExecTimeout, minimumWindow)
+	}
+	return nil
+}
+
+// kubeconfigContext names the context the bundle is collected through, for the
+// manifest. The raw configuration is asked rather than the flag alone, so that
+// a run without --context records the current context rather than an empty
+// field, and a bundle always says which cluster it came from.
+func kubeconfigContext(o *cmd.Options) string {
+	if o.ConfigFlags == nil {
+		return ""
+	}
+	if o.ConfigFlags.Context != nil && *o.ConfigFlags.Context != "" {
+		return *o.ConfigFlags.Context
+	}
+	raw, err := o.ConfigFlags.ToRawKubeConfigLoader().RawConfig()
+	if err != nil {
+		return ""
+	}
+	return raw.CurrentContext
 }

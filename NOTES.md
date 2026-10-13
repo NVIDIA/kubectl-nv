@@ -45,6 +45,40 @@ pods (`pkg/mustgather/mustgather.go:911`). A guard runs every leaf command again
 12124 insertions outside `vendor/`, and 21489 vendored lines removed with urfave/cli and yaml.v2. The acceptance run
 on 8d6f3ee passed `make build lint test check-vendor e2e-mokka`, the e2e suite in 8.5 s.
 
+## M2: must-gather parity, node scoping, bundle manifest (2026-10-11)
+
+Track C1 rebuilt `adm must-gather` as a registry of collectors (`pkg/mustgather/collector.go:125`) run in the order of
+the gpu-operator script `hack/must-gather.sh` at f6d32bad44ee. `TestPlannedArtifactsCoverTheScript`
+(`pkg/mustgather/parity_test.go:103`) computes the planned artifact set without a cluster and fails when a file the
+script writes has no counterpart; the one deliberate omission is `version`, now the manifest's `toolVersion`. One
+collector failing no longer stops the others: its manifest entry reads `error:<text>` and the run exits 3. Four flags
+are new (`pkg/cmd/adm/adm.go:93`, `:97`, `:100`, `:102`): `--node` narrows the node-scoped collectors to one node and
+exits 2 on a name the cluster does not have, `--since` bounds container logs but never a previous log, `--no-exec`
+skips the bug report and the device usage at exit 0, and `--exec-timeout` (default 2m) bounds each exec and copy; both
+durations are refused below one second. An exec the API server refuses now exits 3, not 0. The denial fails the HTTP
+upgrade before any Status is decoded, so `forbiddenExec` (`pkg/mustgather/exec.go:49`) also reads client-go's untyped
+error, and `TestForbiddenExecThroughTheRealExecPath` (`pkg/mustgather/exec_test.go:54`) needs a real httptest socket:
+`transport/spdy.RoundTripperFor` passes `UpgradeTransport: nil`, so `rest.Config.Dial`, and with it a user's custom
+dialer, never reaches the exec path (upstream behaviour). The agents' Bash sandbox refuses that bind, so the test runs
+only unsandboxed. Every bundle ends with `manifest.json`: `kind: BundleManifest`, `bundleSchemaVersion`
+(`pkg/mustgather/manifest.go:42`), the flags, one status per collector, and a size and sha256 per file (`:99`).
+Artifacts land under a `.part` name and are renamed into place (`pkg/mustgather/mustgather.go:868`), and an artifacts
+directory that already holds something is refused with exit 2 (`pkg/mustgather/bundle.go:62`). Driver pods are found
+under four selectors (`pkg/mustgather/driverpods.go:39`), the script's three plus `app=nvidia-driver-daemonset`. The
+three gaps M1 left open for Track C are closed, each with a test: both driver collection failures are named
+(`pkg/mustgather/driverpods_test.go:159`), log collection continues past a failing container (`:191`), and exec
+targets the pod's `kubectl.kubernetes.io/default-container` (`:116`). The read-only guard now also pins the commands
+the gather may exec, and that `--no-exec` execs nothing (`pkg/cmd/readonly_test.go:418`); over MCP the command is
+served with `--no-exec` forced and a server-pinned empty artifacts directory (`pkg/cmd/root/root.go:148`), and two
+tests pin the spelling the server forces and the pinned directory (`pkg/cmd/adm/adm_test.go:350`, `:387`). C1 ran 26
+mutants, all killed; four survived a first pass and were closed with new tests. Coverage went from 69.3% to 73.4% in
+`pkg/mustgather` and from 71.9% to 94.9% in `pkg/cmd/adm`. `TestMustGatherExecAgainstTheLane`
+(`test/e2e/mustgather_exec_test.go:79`) drives the exec path against a driver stand-in DaemonSet; on the t4 lane `make
+e2e-mokka`, that test included, passed in 122.9 s. The milestone is 23 commits on 4cd4a109: 34 files, 7276 insertions
+and 777 deletions outside `vendor/`. The acceptance run on 06e6adf7 (2026-10-13) passed `make build`, `make test`, `go
+test -race ./cmd/... ./pkg/...`, golangci-lint (0 issues), `make mdlint`, `make check-vendor` and `make e2e-mokka` (4
+top-level tests, the e2e suite in 133.4 s).
+
 ## Facts observed
 
 - Toolchain on the build Mac: go 1.27.2, golangci-lint 2.14.0 (0 issues), goreleaser 2.18.3, kind v0.33.0,

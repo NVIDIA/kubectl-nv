@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -181,7 +182,7 @@ func (o *CopyOptions) untarAll(ns, pod string, prefix string, src remotePath, de
 			fmt.Fprintf(o.ErrOut, "warning: skipping symlink: %q -> %q\n", destFileName, header.Linkname) // nolint: errcheck
 			continue
 		}
-		outFile, err := os.Create(destFileName.String())
+		outFile, err := createCopiedFile(destFileName.String())
 		if err != nil {
 			return err
 		}
@@ -388,4 +389,29 @@ func extractFileSpec(arg string) (fileSpec, error) {
 	default:
 		return fileSpec{}, errFileSpecDoesntMatchFormat
 	}
+}
+
+// createCopiedFile makes one file of a copy out of a pod.
+//
+// The bug report arrives this way rather than through the gatherer's own
+// writer, so it is the one artifact that does not get the bundle's mode for
+// free. os.Create, which this used, leaves it 0644 under the usual umask: the
+// most sensitive file in a bundle whose default home is /tmp, where every
+// account on the machine can look, while every other file in it is 0600.
+func createCopiedFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+}
+
+// copyOptionsFor returns the copy options for pulling a file out of pod.
+//
+// The container is named rather than left to the API server. A copy is a
+// second exec, running tar, and the one the server picks without being told is
+// the first in spec order: on a driver pod carrying a sidecar that is not the
+// container nvidia-bug-report.sh just wrote its file in, and the copy fails
+// with "file not found" on a report that is there. It is the same container
+// the exec used, by construction.
+func copyOptionsFor(streams genericiooptions.IOStreams, pod *v1.Pod) *CopyOptions {
+	o := NewCopyOptions(streams)
+	o.Container = execContainer(pod)
+	return o
 }

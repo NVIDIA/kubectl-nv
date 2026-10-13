@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -81,6 +80,45 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+// newTestGathererWith builds a gatherer over a clientset the caller set up.
+func newTestGathererWith(t *testing.T, clientset *fake.Clientset) (*Gatherer, string) {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: clientset,
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds()),
+		config: offlineConfig(),
+	}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	return g, dir
+}
+
+// newTestGathererAgainst builds a gatherer whose REST configuration points at
+// a real server, for the paths that dial rather than going through a client.
+func newTestGathererAgainst(t *testing.T, host string) (*Gatherer, string) {
+	t.Helper()
+
+	dir := filepath.Join(t.TempDir(), "artifacts")
+	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
+		clientset: fake.NewSimpleClientset(),
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds()),
+		config: &rest.Config{Host: host},
+	}, discardProgress{})
+	if err != nil {
+		t.Fatalf("NewGatherer: %v", err)
+	}
+	t.Cleanup(g.Close)
+
+	return g, dir
+}
+
 // newTestGatherer builds a gatherer over the given cluster objects, writing to
 // a temporary artifact directory.
 func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string) {
@@ -91,8 +129,12 @@ func newTestGatherer(t *testing.T, objects ...runtime.Object) (*Gatherer, string
 	opts := &Options{ArtifactDir: dir}
 	g, err := NewGatherer(opts, stubFactory{
 		clientset: fake.NewSimpleClientset(objects...),
-		dynamic:   dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
-		config:    offlineConfig(),
+		// The dynamic fake panics on a List of a resource whose list kind it
+		// was not told about, so every custom resource the gather reads is
+		// registered here even when this cluster holds none of them.
+		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
+			runtime.NewScheme(), customResourceListKinds()),
+		config: offlineConfig(),
 	}, discardProgress{})
 	if err != nil {
 		t.Fatalf("NewGatherer: %v", err)
@@ -197,9 +239,7 @@ func TestEveryWriterIsKubernetesNative(t *testing.T) {
 			wantKind:   "PodList",
 			wantInKind: "Pod",
 			collect: func(t *testing.T, g *Gatherer) {
-				if _, err := g.gatherPodInfo("gpu-operator"); err != nil {
-					t.Fatalf("gatherPodInfo: %v", err)
-				}
+				mustCollect(t, g.gatherOperandPods(&gatherState{operatorNamespace: "gpu-operator"}))
 			},
 			contains: []string{"memory: 2Gi", "apiVersion: v1"},
 		},
@@ -208,8 +248,10 @@ func TestEveryWriterIsKubernetesNative(t *testing.T) {
 			file:       "daemonsets.yaml",
 			wantKind:   "DaemonSetList",
 			wantInKind: "DaemonSet",
-			collect:    func(t *testing.T, g *Gatherer) { mustCollect(t, g.gatherDaemonSets("gpu-operator")) },
-			contains:   []string{"apiVersion: apps/v1", "maxUnavailable: 1"},
+			collect: func(t *testing.T, g *Gatherer) {
+				mustCollect(t, g.gatherDaemonSets(&gatherState{operatorNamespace: "gpu-operator"}))
+			},
+			contains: []string{"apiVersion: apps/v1", "maxUnavailable: 1"},
 		},
 	}
 
@@ -354,10 +396,13 @@ func TestProgressNeverReachesStdout(t *testing.T) {
 func TestMarkerFilesAreNotWorldReadable(t *testing.T) {
 	g, dir := newTestGatherer(t)
 
-	// No ClusterPolicy and no NvidiaDriver in the dynamic client, so both
+	// No ClusterPolicy and no NVIDIADriver in the dynamic client, so both
 	// marker files are written.
-	if err := g.gatherGPUOperatorCRDs(); err != nil {
-		t.Fatalf("gatherGPUOperatorCRDs: %v", err)
+	if err := g.gatherClusterPolicy(); err != nil {
+		t.Fatalf("gatherClusterPolicy: %v", err)
+	}
+	if err := g.gatherNVIDIADrivers(); err != nil {
+		t.Fatalf("gatherNVIDIADrivers: %v", err)
 	}
 
 	for _, name := range []string{"cluster_policy.missing", "nvidia_driver.missing"} {
@@ -431,12 +476,7 @@ func TestClusterPolicyIsWrittenAsItWasRead(t *testing.T) {
 	g, err := NewGatherer(&Options{ArtifactDir: dir}, stubFactory{
 		clientset: fake.NewSimpleClientset(),
 		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			runtime.NewScheme(),
-			map[schema.GroupVersionResource]string{
-				{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:     "ClusterPolicyList",
-				{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}: "NvidiaDriverList",
-			},
-			policy),
+			runtime.NewScheme(), customResourceListKinds(), policy),
 		config: offlineConfig(),
 	}, discardProgress{})
 	if err != nil {
@@ -444,8 +484,8 @@ func TestClusterPolicyIsWrittenAsItWasRead(t *testing.T) {
 	}
 	defer g.Close()
 
-	if err := g.gatherGPUOperatorCRDs(); err != nil {
-		t.Fatalf("gatherGPUOperatorCRDs: %v", err)
+	if err := g.gatherClusterPolicy(); err != nil {
+		t.Fatalf("gatherClusterPolicy: %v", err)
 	}
 
 	data, err := os.ReadFile(filepath.Join(dir, "cluster_policy.yaml"))
