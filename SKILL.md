@@ -148,10 +148,22 @@ kubectl nv info worker-1 -o json
 Codes are not case sensitive, so `kubectl nv explain nv-node-002` works too.
 An unknown code exits 2 and prints the codes the catalog does hold.
 
-The loop is: run `kubectl nv health`, take the highest severity finding,
-`kubectl nv explain` its code, run the command the entry's next step names,
-and report what that showed. Do not guess at a cause the evidence does not
-support; the entry lists the usual ones and the command that tells them apart.
+The loop is: run `kubectl nv health`, pick a finding, `kubectl nv explain` its
+code, run the command the entry's next step names, and report what that
+showed. Do not guess at a cause the evidence does not support; the entry lists
+the usual ones and the command that tells them apart.
+
+Pick the finding that names the node or the component you were asked about.
+Among several that do, take the highest severity.
+
+A finding with no `node` is about the cluster rather than about one node, and
+is usually the same change seen from above rather than a separate fault.
+`NV-OP-001` is the one to know: the ClusterPolicy rolls up the state of every
+operand, so anything that stops one of them also leaves the policy not ready.
+It is an error and the operand's own finding may only be a warning, so it
+sorts first and outranks the thing it is reporting. Read it second, and name
+it as the answer only when no node-scoped finding accounts for what you were
+asked about.
 
 The whole catalog, sixteen codes:
 

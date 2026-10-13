@@ -257,9 +257,19 @@ if [ -f "${OVERRIDE_DIR}/.hang" ]; then
 fi
 
 report="$(./kubectl-nv health --fail-on info -o json 2> /dev/null)"
-code="$(printf '%s' "${report}" | jq -r '.findings[0].code // empty')"
-node="$(printf '%s' "${report}" | jq -r '.findings[0].node // "-"')"
-component="$(printf '%s' "${report}" | jq -r '.findings[0].component // empty')"
+
+# SKILL.md's rule, and nothing hand tuned: take the finding that names a
+# node, highest severity among those, and fall back to a cluster scoped one
+# only when no node scoped finding accounts for anything. sort_by is stable,
+# so equal severities keep the order the report put them in.
+pick="$(printf '%s' "${report}" | jq -c '
+    def rank: if . == "error" then 0 elif . == "warning" then 1 else 2 end;
+    [.findings[]] as $all
+    | ([$all[] | select((.node // "") != "")] | sort_by(.severity | rank)) as $scoped
+    | if ($scoped | length) > 0 then $scoped[0] else ($all[0] // empty) end')"
+code="$(printf '%s' "${pick}" | jq -r '.code // empty')"
+node="$(printf '%s' "${pick}" | jq -r '.node // "-"')"
+component="$(printf '%s' "${pick}" | jq -r '.component // empty')"
 [ -n "${node}" ] || node="-"
 
 if [ -f "${OVERRIDE_DIR}/.rc" ]; then
@@ -386,7 +396,18 @@ for f in "${EVAL_STATE_DIR}"/NV-*; do
         NV-DCGM-001) component="nvidia-dcgm-exporter" ;;
         NV-DRV-001) component="nvidia-driver-daemonset" ;;
     esac
-    entry="{\"code\":\"${code}\",\"severity\":\"error\",${node_field}\"component\":\"${component}\",\"message\":\"fake\",\"evidence\":{}}"
+    severity="error"
+    # Measured on the faults lane on 2026-10-12: NV-DCGM-001 is a warning, and
+    # its injection patches the ClusterPolicy, so NV-OP-001 appears with it at
+    # error. output.SortFindings orders by node then code, and a cluster
+    # scoped finding has no node, so NV-OP-001 comes first in the array.
+    if [ "${code}" = NV-DCGM-001 ]; then
+        severity="warning"
+        rollup="{\"code\":\"NV-OP-001\",\"severity\":\"error\",\"component\":\"gpu-operator\",\"message\":\"the ClusterPolicy is not ready\",\"evidence\":{}}"
+        if [ -n "${findings}" ]; then findings="${findings},"; fi
+        findings="${findings}${rollup}"
+    fi
+    entry="{\"code\":\"${code}\",\"severity\":\"${severity}\",${node_field}\"component\":\"${component}\",\"message\":\"fake\",\"evidence\":{}}"
     if [ -n "${findings}" ]; then findings="${findings},"; fi
     findings="${findings}${entry}"
 done
@@ -633,6 +654,38 @@ assert_jq '.cases[0] | keys | join(",")' \
     "a case carries exactly the documented keys"
 assert_jq '.cases[0].named | keys | join(",")' 'code,component,node' \
     "the named map carries exactly the three parts"
+
+# ---------------------------------------------------------------------------
+echo "# the operand's own finding wins over the ClusterPolicy roll-up"
+# ---------------------------------------------------------------------------
+#
+# PE-F3-20, measured on the faults lane on 2026-10-12. nv-dcgm-001.sh patches
+# the ClusterPolicy, so four seconds later the policy is notReady and the
+# report carries NV-OP-001 at error beside NV-DCGM-001 at warning.
+# output.SortFindings orders by node then code and a cluster scoped finding
+# has no node, so the roll-up sorts first AND outranks on severity: an agent
+# taking the first finding, or the highest severity one, answers NV-OP-001 and
+# gets the case wrong. SKILL.md now tells it to prefer the finding that names
+# a node, and the stub follows that text.
+
+# First the premise, so the assertions below are not vacuous: the fake really
+# does report both, with the roll-up ahead of the operand.
+printf '%s\n' "${WORKER}" > "${STATE_DIR}/NV-DCGM-001"
+ROLLUP_REPORT="$(env EVAL_CALL_LOG=/dev/null "${BIN}" health --fail-on info -o json 2> /dev/null)"
+rm -f "${STATE_DIR}/NV-DCGM-001" "${STATE_DIR}/seen-NV-DCGM-001"
+assert_eq "$(printf '%s' "${ROLLUP_REPORT}" | jq -r '[.findings[].code] | join(",")')" \
+    "NV-OP-001,NV-DCGM-001" \
+    "the report carries the roll-up first and the operand second"
+assert_eq "$(printf '%s' "${ROLLUP_REPORT}" | jq -r '[.findings[].severity] | join(",")')" \
+    "error,warning" \
+    "the roll-up also outranks the operand on severity"
+
+# Then the behaviour.
+assert_jq '.cases[3].pass' 'true' \
+    "the case passes even though a higher severity cluster scoped finding sorts ahead of it"
+assert_jq '.cases[3].component' 'nvidia-dcgm-exporter' \
+    "the harness expects the operand's component, not the roll-up's"
+assert_jq '.cases[3].named.code' 'true' "the agent named the operand's code, not NV-OP-001"
 
 # ---------------------------------------------------------------------------
 echo "# sequencing: one fault at a time, injected then recovered in order"
@@ -1134,7 +1187,10 @@ assert_rc 1 "the run used for the renderer row had one failure"
 RENDER_RESULTS="${WORK}/render-results"
 rm -rf "${RENDER_RESULTS}"
 mkdir -p "${RENDER_RESULTS}"
-cp "${RESULT_FILE}" "${RENDER_RESULTS}/2026-10-12.json"
+# The date is pinned rather than taken from the run, so the expected row below
+# is the same on every day of the year. The renderer reads startedAt, not the
+# file name, so both are set.
+jq '.startedAt = "2026-10-12T09:00:00Z"' < "${RESULT_FILE}" > "${RENDER_RESULTS}/2026-10-12.json"
 write_readme_fixture
 PATH="${SHIM_DIR}:${TOOL_DIR}" "${RENDER}" --results "${RENDER_RESULTS}" --readme "${README_FIXTURE}" \
     > "${WORK}/out" 2> "${WORK}/err"
