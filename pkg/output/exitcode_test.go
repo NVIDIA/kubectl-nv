@@ -339,7 +339,7 @@ func TestReportStatusMarshalsFindingsAsAnArray(t *testing.T) {
 		t.Fatalf("json.Marshal: %v", err)
 	}
 
-	want := `{"findings":[{"node":"node-a","code":"GPU001","severity":"error","message":"no driver"}],` +
+	want := `{"findings":[{"code":"GPU001","severity":"error","node":"node-a","message":"no driver","evidence":{}}],` +
 		`"partial":true,"unreachable":[{"resource":"pods/log","node":"node-a","reason":"forbidden"}]}`
 	if string(full) != want {
 		t.Errorf("json  = %s\nwant = %s", full, want)

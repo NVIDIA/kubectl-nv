@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +41,7 @@ import (
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/NVIDIA/kubectl-nv/pkg/cmd/mcp"
 	"github.com/NVIDIA/kubectl-nv/pkg/cmd/root"
 	"github.com/NVIDIA/kubectl-nv/pkg/mustgather"
 	"github.com/NVIDIA/kubectl-nv/pkg/output"
@@ -72,12 +74,22 @@ var leafFixtures = map[string]leafFixture{
 	"version": {
 		args: func(*testing.T) []string { return nil },
 	},
+	"mcp": {
+		// --list-tools walks the tree and exits. Serving would block on stdin,
+		// and what the guard has to see is the walk, not the transport.
+		args: func(*testing.T) []string { return []string{"--list-tools"} },
+	},
+	"schema": {
+		// --write-dir runs the whole generator rather than one kind, which is
+		// what "make schema" does and the most this leaf ever touches.
+		args: func(t *testing.T) []string { return []string{"--write-dir", t.TempDir()} },
+	},
 }
 
 // readOptional lists the leaves that have no business talking to a cluster.
 // Every other leaf has to issue at least one read, or the run proved nothing
 // about what it would have written.
-var readOptional = map[string]bool{"version": true}
+var readOptional = map[string]bool{"version": true, "schema": true, "mcp": true}
 
 // TestEveryCommandIsReadOnly executes every leaf of the command tree against
 // clients that fail the test on any write. The fakes cover the typed and
@@ -128,6 +140,14 @@ func TestEveryCommandIsReadOnly(t *testing.T) {
 			for _, w := range rec.writes() {
 				t.Errorf("kubectl-nv issued %s: this tool must be read-only", w)
 			}
+			// A leaf that reached pods/exec has to be one the MCP server knows
+			// can exec, or it would be served to a model with the exec
+			// available and nothing would say so.
+			if rec.execs() > 0 && !isExecAnnotated(t, path) {
+				t.Errorf("%q issued a pods/exec but carries no %s annotation: "+
+					"the MCP server would serve it with the exec available",
+					name, mcp.ExecAnnotation)
+			}
 			if !readOptional[name] && rec.reads() == 0 {
 				t.Errorf("%q read nothing from the cluster: the guard proved nothing about it", name)
 			}
@@ -145,6 +165,7 @@ type recorder struct {
 
 	mu     sync.Mutex
 	nReads int
+	nExecs int
 	bad    []string
 }
 
@@ -168,6 +189,9 @@ func (r *recorder) transport() http.RoundTripper {
 			http.Error(w, "writes are not allowed", http.StatusForbidden)
 		} else {
 			r.countRead()
+			if strings.Contains(req.URL.Path, "/exec") {
+				r.countExec()
+			}
 			http.NotFound(w, req)
 		}
 		resp := w.Result()
@@ -184,6 +208,19 @@ func (r *recorder) record(what string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.bad = append(r.bad, what)
+}
+
+// countExec records a request that would run a command inside a pod.
+func (r *recorder) countExec() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nExecs++
+}
+
+func (r *recorder) execs() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nExecs
 }
 
 func (r *recorder) countRead() {
@@ -219,6 +256,49 @@ func (r *recorder) install(f *k8stesting.Fake) {
 			r.t.Fatalf("kubectl-nv issued %s: this tool must be read-only", what)
 			return true, nil, nil
 		})
+	}
+}
+
+// isExecAnnotated reports whether the leaf at path carries the annotation that
+// makes the MCP server force --no-exec on it.
+func isExecAnnotated(t *testing.T, path []string) bool {
+	t.Helper()
+
+	c := root.NewCommand("test", root.Deps{Streams: genericiooptions.NewTestIOStreamsDiscard()})
+	for _, name := range path {
+		var next *cobra.Command
+		for _, child := range c.Commands() {
+			if child.Name() == name {
+				next = child
+
+				break
+			}
+		}
+		if next == nil {
+			t.Fatalf("no %q under %q", name, c.Name())
+		}
+		c = next
+	}
+
+	return c.Annotations[mcp.ExecAnnotation] == "true"
+}
+
+// TestEveryExecCapableLeafIsAnnotated states the other half: the leaves the
+// tree marks as exec capable are the ones the MCP server gates. The guard above
+// catches a leaf that execs without the annotation; this catches an annotation
+// put on something that cannot exec, which would quietly refuse a tool that was
+// safe all along.
+func TestEveryExecCapableLeafIsAnnotated(t *testing.T) {
+	annotated := []string{}
+	for _, path := range leafPaths(newTestCommand(t, newRecorder(t, ""))) {
+		if isExecAnnotated(t, path) {
+			annotated = append(annotated, strings.Join(path, " "))
+		}
+	}
+
+	want := []string{"adm must-gather"}
+	if !reflect.DeepEqual(annotated, want) {
+		t.Errorf("the exec capable leaves are %v, want %v", annotated, want)
 	}
 }
 

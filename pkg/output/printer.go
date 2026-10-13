@@ -102,6 +102,11 @@ func NewPrinter(value string) (Printer, error) {
 type Column struct {
 	// Header is the column title.
 	Header string
+	// Field is the dotted JSON path this column renders, for instance
+	// "status.ready". It is what --fields matches a column against, so a column
+	// that leaves it empty cannot be asked for by name and is dropped as soon as
+	// --fields is given.
+	Field string
 }
 
 // TableRows is implemented by a kind that can render itself as a table. It is
@@ -116,9 +121,9 @@ type TableRows interface {
 
 // nameAndAgeColumns is the table of a kind that carries nothing but a name.
 func nameAndAgeColumns(wide bool) []Column {
-	columns := []Column{{Header: "NAME"}}
+	columns := []Column{{Header: "NAME", Field: "metadata.name"}}
 	if wide {
-		columns = append(columns, Column{Header: "AGE"})
+		columns = append(columns, Column{Header: "AGE", Field: "metadata.creationTimestamp"})
 	}
 
 	return columns
@@ -148,6 +153,10 @@ func age(t metav1.Time) string {
 type TablePrinter struct {
 	// Wide turns on the columns the kind marks as wide.
 	Wide bool
+	// Fields, when it is not empty, restricts the table to the columns whose
+	// Field it names, plus the ones no projection drops. It is how --fields
+	// reaches a format that has no nested structure to project.
+	Fields []string
 }
 
 // PrintObj implements Printer.
@@ -160,8 +169,14 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 	}
 
 	columns := table.TableColumns(p.Wide)
+	keep := make([]int, 0, len(columns))
+	kept := keptColumns(p.Fields)
 	headers := make([]string, 0, len(columns))
-	for _, c := range columns {
+	for i, c := range columns {
+		if len(p.Fields) > 0 && !kept[c.Field] {
+			continue
+		}
+		keep = append(keep, i)
 		headers = append(headers, c.Header)
 	}
 
@@ -174,9 +189,9 @@ func (p *TablePrinter) PrintObj(obj runtime.Object, w io.Writer) error {
 		if len(row) != len(columns) {
 			return fmt.Errorf("row %d has %d cells, want %d", i, len(row), len(columns))
 		}
-		cells := make([]string, 0, len(row))
-		for _, cell := range row {
-			cells = append(cells, sanitizeCell(cell))
+		cells := make([]string, 0, len(keep))
+		for _, column := range keep {
+			cells = append(cells, sanitizeCell(row[column]))
 		}
 		if _, err := fmt.Fprintln(tw, strings.Join(cells, "\t")); err != nil {
 			return fmt.Errorf("writing row %d: %w", i, err)

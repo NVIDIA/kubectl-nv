@@ -8,7 +8,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-.PHONY: build fmt verify test coverage e2e e2e-mokka lint ci-lint vendor mod-tidy mod-vendor mod-verify check-vendor licenses release-snapshot mdlint
+.PHONY: build fmt verify test coverage e2e e2e-mokka lint ci-lint vendor mod-tidy mod-vendor mod-verify check-vendor licenses release-snapshot mdlint schema
 
 CONTAINER_RUN_CMD ?= docker run
 GO_CMD ?= go
@@ -117,6 +117,14 @@ e2e-mokka: build
 	    printf 'e2e-mokka: diagnostics in %s\n' "$(E2E_DIAG_DIR)" >&2; \
 	fi; \
 	exit $$rc
+
+# Regenerates the published output schemas from the registered kinds. The
+# generator is the plugin itself, so the schemas cannot describe a type the
+# commands do not print. A test fails when the checked-in files differ from
+# what this writes.
+SCHEMA_DIR ?= $(CURDIR)/docs/schema
+schema:
+	$(GO_CMD) run ./cmd/kubectl-nv schema --write-dir $(SCHEMA_DIR)
 
 verify:
 	@out=`$(GO_FMT) -l -d $(GO_SRC)`; \
