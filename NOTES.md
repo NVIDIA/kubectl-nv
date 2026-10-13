@@ -99,7 +99,7 @@ of 5 and 10. `info <node>` exits 3, not 2, for a node missing from a partly deni
 a wrong command line exits 2 whoever runs the command (`pkg/cmd/factory.go:114`), and every key and value of the
 described view goes through `output.SanitizeCell` (`pkg/output/sanitize.go:38`), tested against a bundle carrying ESC,
 OSC, C1 and CR bytes. With `--from-bundle`, `list` and `info` replay a must-gather bundle; its pod list covers the
-operator namespace only, so the replay exits 3 with `requestedKnown: false` (`test/e2e/list_test.go:282`). `debug
+operator namespace only, so the replay exits 3 with `requestedKnown: false` (`test/e2e/list_test.go:310`). `debug
 <node>` (D2) reads the node first, so an unknown or GPU-less node exits 2 with no bundle written
 (`pkg/cmd/debug/debug.go:128`), then runs must-gather narrowed to that node with the flags
 `pkg/mustgather/flags.go:48` registers, and prints a `DebugReport` or a summary held to 30 lines by construction
@@ -112,9 +112,13 @@ assert the error. D1's verbose `make e2e-mokka` on the t4 lane ran ten tests, al
 --from-bundle` against C1's rewritten gather. D2's live run showed `debug <worker>` gathering one bug report, for that
 worker only, with `flags.node` in the manifest, the node equal to `info`'s, and `--no-exec` at exit 0; its full-suite
 run also found that C1's exec test cleaned up while the driver stand-in's pods were still terminating, so a later
-`TestMustGatherAgainstTheLane` found a driver pod (fixed by E3 in M4). The milestone is 47 commits on 06e6adf7: 53
-files, 12366 insertions and 25 deletions outside `vendor/`. The acceptance run on 2d91248e (2026-10-13) passed the
-same gates and `make e2e-mokka` (13 top-level tests, 47.3 s).
+`TestMustGatherAgainstTheLane` found a driver pod; the stand-in's delete now waits for its pods with
+`--cascade=foreground` (`test/e2e/mustgather_exec_test.go:317`). The milestone is 49 commits on e92df424, not counting
+its NOTES.md records: 54 files, 12404 insertions and 26 deletions outside `vendor/`. The acceptance run on 2d91248e
+(2026-10-13) passed the same gates and `make e2e-mokka` (13 top-level tests, 47.3 s). The gb300 leg of the e2e-mokka
+workflow then failed the list and info tests, which expected the t4 profile's device name on every lane; they now take
+it from `MOKKA_PROFILE` (`test/e2e/list_test.go:41`), and with that and the stand-in fix (184bd8f8) golangci-lint (0
+issues) and the suite passed on t4 (13 tests, 25.3 s) and on gb300 (13 tests, 38.6 s).
 
 ## Facts observed
 
