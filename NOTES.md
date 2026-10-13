@@ -168,6 +168,57 @@ gates M2 lists, `make test-scripts` (seven harnesses; M6 adds the eighth and rai
 e2e-mokka` (16 tests, 53.0 s), `make e2e-faults` (27 tests, 307.7 s) and `make e2e-mig` (`TestMIGLane`, 3.1 s); on top
 of M3's gb300 fix, `make e2e-mokka` passed on t4 (16 tests, 41.4 s) and on gb300 (16 tests, 32.4 s).
 
+## M5: contract wiring and agent surfaces (2026-10-13)
+
+The contracts PR (4cd4a109) brought F1's infrastructure: `kubectl nv mcp` on the official Go MCP SDK v1.8.0
+(`go.mod:9`), whose tools take each leaf's own flags plus `namespace`, refuse connection flags without echoing them
+and carry the exit code in `_meta` (`pkg/cmd/mcp/server.go:48`), and a schema registry behind `kubectl nv schema`.
+Track F2 wires every command into that contract. Each kind registers its schema (`pkg/output/schema.go:90`) and every
+command maps onto one (`list` GPUNodeList, `info` GPUNode, `health` HealthReport, `topology` TopologyReport, `debug`
+DebugReport, `adm must-gather` BundleManifest; `explain` has none and says so with exit 2); the six schemas are
+committed under `docs/schema/`, a drift test fails when `make schema` would change them
+(`cmd/kubectl-nv/schema_drift_test.go:41`), and the e2e suite checks what the binary printed against them
+(`test/e2e/schema_test.go:46`). The first real sample found that a zero `metav1.Time` marshals as null where the
+schema said string, so timestamps are now string or null. Data now goes to stdout: E3 had measured `explain NV-OP-001`
+at 0 bytes on stdout and 3091 on stderr, because `main` points cobra's stream at stderr; `explain` writes to the
+process's stdout (`pkg/cmd/explain/explain.go:63`) and a test runs every leaf through the real `main`
+(`cmd/kubectl-nv/streams_test.go:269`). `--fields` reaches inside a kind and keeps a table column only when every path
+it renders was asked for; `--limit` bounds a report's repeated part and says what it left out in `remainingItemCount`,
+and on a single object it is exit 2 before anything is read (`pkg/output/fields.go:128`). `adm must-gather` now also
+collects every GPU-requesting pod in every namespace, as a projection that keeps identity, labels, owners, node,
+container names, resources, restart policy, overhead and phase and never env, args, command, annotations or volumes
+(`pkg/mustgather/complete.go:93`), plus node events and ComputeDomains, so a bundle can read as complete
+(`pkg/source/bundle.go:425`). The live lane then found what no unit test could: `list --from-bundle` exited 0 where
+the round trip wanted 3, because the replay can now count requested GPUs; the test now holds the bundle to the
+complete contract (`test/e2e/list_test.go:312`), and on the conductor's re-run (2026-10-13) `make e2e-mokka` passed 16
+tests, 0 failed, 0 skipped. `--redact` (`pkg/mustgather/flags.go:56`) replaces node, machine and host names, addresses
+and the context with 20-hex-digit pseudonyms under a random per-run key, so two bundles cannot be lined up, rewrites
+file names, the manifest and gzip contents, takes out credential values in the twelve shapes `docs/must-gather.md`
+lists, drops and records any other binary file, and when it cannot finish fails the gather with exit 4 without leaving
+unredacted files (`pkg/mustgather/redact.go:1043`); it is not forced over MCP. `.golangci.yml` lists every lane tag
+(`.golangci.yml:17`): an unused variable planted in each of seven lane files is reported seven times. Track F3 adds
+`SKILL.md`, HolmesGPT and kubectl-ai toolsets under `agents/`, held by tests to their upstream formats and to the
+cobra tree and run by `make test` (`Makefile:32`), and a README covering every command. The eval harness refuses CI
+and any context but the lane's on a loopback server (`hack/eval/run.sh:130`, `:171`), and runs the agent under `env
+-i` with an empty HOME, a minified kubeconfig and a `./kubectl-nv` shim that refuses connection flags,
+`--artifacts-dir` and the exec-capable commands (`hack/eval/kubectl-nv-shim.sh:65`), with the argv `-p --restricted
+--tools Bash,Read --allowedTools Bash(./kubectl-nv:*) --permission-mode dontAsk --strict-mcp-config --mcp-config
+{"mcpServers":{}}` (`hack/eval/run.sh:106`). The conductor's live run on the integration branch (2026-10-13), with a
+stub agent applying SKILL.md's selection rule and no model called, passed 5 of 5 cases (NV-NODE-002, NV-NODE-003,
+NV-CTK-001, NV-DCGM-001, NV-DRV-001; `hack/eval/run.sh:76`). The first live stub run scored 4 of 5: the NV-DCGM-001
+fault goes through the ClusterPolicy, so a cluster-scoped NV-OP-001 at error sits beside the node-scoped NV-DCGM-001
+at warning and, since findings sort by node with the empty node first, sorts first. SKILL.md now prefers the finding
+naming the node or component asked about and reads the roll-up second (`SKILL.md:156`); that moved the miss to the
+NV-OP-001 case, whose report has the same shape, so NV-OP-001 was swapped for NV-CTK-001, chosen after measuring six
+candidates on the lane (NV-NODE-005 excluded for its two info findings on one node). F2 killed 23 mutants in its
+review round and F3 29 in its own. The milestone is 63 commits on 3fdeb8c3, its usage section included and its
+NOTES.md record not: 125 files, 15914 insertions and 396 deletions outside `vendor/`. Its code is the integration
+branch's after F3 merged, apart from M3's device-name fix to two e2e tests. There the gates M2 lists,
+`hack/eval/run_test.sh` (213 passed) and `make test-scripts` passed; with main at 1794b49e merged in, `go vet` in all
+six lane tag sets, `make e2e-mokka` (16 tests), `make e2e-faults` (27 tests, 382.7 s) and `make e2e-mig` passed, and
+`govulncheck ./...` found no vulnerabilities. With the fix, `make e2e-mokka` passed on t4 (16 tests, 30.7 s) and on
+gb300 (16 tests, 25.8 s) on 2026-10-14.
+
 ## M6: topology and the compute-domain lane (2026-10-11)
 
 Track G adds `kubectl nv topology`, which groups the GPU nodes at every level the cluster is labelled with and, given
