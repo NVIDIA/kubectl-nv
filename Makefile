@@ -296,7 +296,7 @@ e2e-mig: build
 # lane script is exactly the one a hand-maintained list forgets, and the
 # forgetting is silent. The count guard is what stops the other failure mode,
 # an expression that matches nothing and reports success over an empty set.
-SCRIPT_TEST_MIN ?= 7
+SCRIPT_TEST_MIN ?= 8
 
 .PHONY: test-scripts
 test-scripts:
