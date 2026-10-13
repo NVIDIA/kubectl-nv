@@ -20,20 +20,48 @@ package e2e
 
 import (
 	"encoding/json"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 )
 
-// laneGPUCount is how many simulated GPUs the t4 profile advertises per
-// worker. It matches mokka::profile_gpu_count in hack/mokka/lib.sh; the suite
+// laneGPUCount is how many simulated GPUs the t4 and gb300 profiles, the two
+// legs of the e2e-mokka workflow, advertise per worker. It matches
+// mokka::profile_gpu_count in hack/mokka/lib.sh; the suite
 // asserts the number rather than reading it back off the node, because
 // reporting whatever the cluster says would pass against a node with none.
 const laneGPUCount = 4
 
-// laneProduct is the device name GFD writes on the lane's workers.
-const laneProduct = "NVIDIA-T4"
+// laneProducts is the device name GFD writes on a lane's workers, per Mokka
+// profile, as measured on each: NVIDIA-T4 on the t4 profile, and
+// NVIDIA-GB300-NVL on the gb300 leg of the e2e-mokka workflow (2026-10-13).
+// Like the GPU count, the name is asserted rather than read back off the node.
+var laneProducts = map[string]string{
+	"t4":    "NVIDIA-T4",
+	"gb300": "NVIDIA-GB300-NVL",
+}
+
+// laneProduct is the device name the lane's profile puts on its workers. The
+// profile comes from MOKKA_PROFILE, which the e2e-mokka workflow sets per leg
+// and make passes on from its command line; unset, it is t4, the Makefile's
+// default. A profile with no recorded name fails the test rather than guessing.
+func laneProduct(t *testing.T) string {
+	t.Helper()
+
+	profile := os.Getenv("MOKKA_PROFILE")
+	if profile == "" {
+		profile = "t4"
+	}
+
+	product, ok := laneProducts[profile]
+	if !ok {
+		t.Fatalf("no device name is recorded for Mokka profile %q; measure it on a lane and add it to laneProducts", profile)
+	}
+
+	return product
+}
 
 // gpuNodeJSON is the part of a GPUNode this suite asserts on.
 type gpuNodeJSON struct {
@@ -132,8 +160,8 @@ func TestListAgainstTheLane(t *testing.T) {
 				t.Errorf("%s allocatable = %d, want %d", name, node.Allocatable, laneGPUCount)
 			}
 
-			if node.Product != laneProduct {
-				t.Errorf("%s product = %q, want %q", name, node.Product, laneProduct)
+			if want := laneProduct(t); node.Product != want {
+				t.Errorf("%s product = %q, want %q", name, node.Product, want)
 			}
 
 			if node.Mode != "device-plugin" {

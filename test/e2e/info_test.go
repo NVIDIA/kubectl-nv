@@ -104,8 +104,8 @@ func TestInfoAgainstTheLane(t *testing.T) {
 			t.Errorf("name = %q, want %q", node.Metadata.Name, worker)
 		}
 
-		if node.Product != laneProduct {
-			t.Errorf("product = %q, want %q", node.Product, laneProduct)
+		if want := laneProduct(t); node.Product != want {
+			t.Errorf("product = %q, want %q", node.Product, want)
 		}
 
 		if node.Capacity != laneGPUCount {
@@ -189,7 +189,7 @@ func TestInfoAgainstTheLane(t *testing.T) {
 		// other's.
 		for _, tt := range []struct{ key, want string }{
 			{key: "Name", want: worker},
-			{key: "Product", want: laneProduct},
+			{key: "Product", want: laneProduct(t)},
 			{key: "Mode", want: "device-plugin"},
 			{key: "Hinted", want: "false"},
 		} {
