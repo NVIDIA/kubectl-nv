@@ -142,15 +142,47 @@ type Report struct {
 	Status output.ReportStatus `json:"status" yaml:"status"`
 }
 
-// reportJSON breaks the method set so that MarshalJSON does not recurse.
-type reportJSON Report
+// reportStatus is output.ReportStatus as this kind publishes it.
+//
+// It leaves out remainingItemCount. That field is where --limit records what
+// it left behind, and --limit is refused on this kind: a report about one node
+// has nothing repeated in it to cut. Publishing the field would offer a
+// consumer something that can never be set.
+type reportStatus struct {
+	Findings    []output.Finding     `json:"findings"`
+	Partial     bool                 `json:"partial,omitempty"`
+	Unreachable []output.Unreachable `json:"unreachable,omitempty"`
+}
+
+// reportJSON breaks the method set so that MarshalJSON does not recurse, and
+// publishes the trimmed status above.
+type reportJSON struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitzero"`
+
+	Node   inventory.GPUNode `json:"node"`
+	Bundle Bundle            `json:"bundle"`
+	Status reportStatus      `json:"status"`
+}
 
 // MarshalJSON stamps the envelope. The guarantee belongs on the type rather
 // than on the constructor: a zero value from a test still has to come off the
 // wire looking like every other report.
 func (r Report) MarshalJSON() ([]byte, error) {
-	out := reportJSON(r)
-	out.TypeMeta = output.TypeMetaFor(output.KindDebugReport)
+	out := reportJSON{
+		TypeMeta:   output.TypeMetaFor(output.KindDebugReport),
+		ObjectMeta: r.ObjectMeta,
+		Node:       r.Node,
+		Bundle:     r.Bundle,
+		Status: reportStatus{
+			Findings:    r.Status.Findings,
+			Partial:     r.Status.Partial,
+			Unreachable: r.Status.Unreachable,
+		},
+	}
+	if out.Status.Findings == nil {
+		out.Status.Findings = []output.Finding{}
+	}
 
 	raw, err := json.Marshal(out)
 	if err != nil {

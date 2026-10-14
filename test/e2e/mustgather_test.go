@@ -29,6 +29,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	resourcev1 "k8s.io/api/resource/v1"
 	"sigs.k8s.io/yaml"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // noDriverPodsLine is what a gather says about a cluster whose GPU Operator
@@ -132,6 +134,15 @@ func TestMustGatherAgainstTheLane(t *testing.T) {
 		if b.run.stdout != "" {
 			t.Errorf("stdout = %q, want empty", b.run.stdout)
 		}
+	})
+
+	t.Run("the manifest satisfies its published schema", func(t *testing.T) {
+		// manifest.json is what travels to support, and the published schema
+		// is what whoever reads it there validates against. The struct the
+		// subtests below decode into names the fields they care about and
+		// ignores the rest, so a field added to the manifest without a schema
+		// to describe it would pass every one of them.
+		assertMatchesSchema(t, output.KindBundleManifest, string(b.read(t, "manifest.json")))
 	})
 
 	t.Run("the manifest and the bundle agree", func(t *testing.T) {

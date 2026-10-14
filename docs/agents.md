@@ -47,6 +47,7 @@ first.
 | `HealthReport` | The result of a health check run |
 | `TopologyReport` | The device topology of a node or of the cluster |
 | `BundleManifest` | The index of a must-gather bundle |
+| `DebugReport` | One node's inventory next to the bundle collected for it |
 
 ### Schemas
 
@@ -63,10 +64,21 @@ schema`. A test fails when a checked-in file stops matching what the generator
 produces, so the published contract cannot drift from the code.
 
 In those schemas `apiVersion` and `kind` are required and pinned to one value
-each, a timestamp is an RFC3339 string, and `metadata` is trimmed to the five
-fields anything here sets: `name`, `namespace`, `labels`, `annotations` and
-`creationTimestamp`. The same five are the `metadata` paths `--fields`
-accepts, so the projection and the schema describe one object.
+each, and `metadata` is trimmed to the five fields anything here sets: `name`,
+`namespace`, `labels`, `annotations` and `creationTimestamp`. The same five are
+the `metadata` paths `--fields` accepts, so the projection and the schema
+describe one object.
+
+A timestamp is an RFC3339 string or `null`. The null is not a choice: a
+timestamp comes from `metav1.Time`, which writes `null` for its zero value, so
+a node condition the cluster reported without a heartbeat and the
+`creationTimestamp` of an object built in memory are both nulls on the wire. A
+schema saying `string` there would be a contract this tool does not satisfy.
+
+The schemas describe what a command prints whole. Output projected with
+`--fields` is not expected to satisfy them: a projection keeps `apiVersion`,
+`kind` and `metadata.name` and drops whatever else was not asked for, including
+fields the schema marks `required`. Validate the unprojected output.
 
 ## Exit codes
 
@@ -82,7 +94,15 @@ Findings win over partial results. A run that found something at or above the
 threshold exits 1 even when part of the cluster stayed out of reach, because
 that is what the caller has to hear first. A run that found nothing but could
 not see everything exits 3, so that "clean" is never reported for a scan that
-did not happen; what was missed is listed in `status.unreachable`.
+did not happen; what was missed is listed alongside the findings, under
+`unreachable`.
+
+Where that list sits depends on the kind, because each one puts its status
+where its own shape puts it. A `HealthReport` embeds its status inline, so the
+paths are `findings`, `partial` and `unreachable` at the top level. A
+`TopologyReport` and a `DebugReport` carry theirs in a field, so the paths are
+`status.findings`, `status.partial` and `status.unreachable`. Run `kubectl nv
+schema <kind>` rather than guessing.
 
 Exit 4 means nothing was checked. No conclusion can be drawn from it.
 
@@ -110,8 +130,32 @@ Two flags are on every list-like command, and they mean the same thing on all
 of them.
 
 `--limit N` keeps the first N items after the command's own sort. Truncation
-is reported twice: a note on stderr, and `metadata.remainingItemCount` in the
-output, because a program reading stdout never sees stderr.
+is reported twice: a note on stderr, and a remaining count in the output,
+because a program reading stdout never sees stderr.
+
+Where that count sits depends on the kind, because each one puts its status
+where its own shape puts it:
+
+| Kind | Where the remaining count is |
+|---|---|
+| `GPUNodeList` | `metadata.remainingItemCount` |
+| `HealthReport` | `remainingItemCount`, at the top level |
+| `TopologyReport` | `status.remainingItemCount` |
+| `GPUNode`, `DebugReport` | nowhere: `--limit` is exit 2 on them |
+
+A report that was not truncated carries no such key at all, and the stderr note
+is not printed either. A zero would be true and would invite a reader to branch
+on the value rather than on its presence.
+
+What N counts is the repeated part of the kind: the items of a `GPUNodeList`,
+the findings of a `HealthReport`, and the groups of a `TopologyReport` counted
+across its levels, which are ordered narrowest first so that a limit keeps the
+tightest groups. A `HealthReport`'s summary is left whole whatever the limit
+is: it is the arithmetic over what was checked, and one that counted what was
+printed would say the cluster is in better shape than it is.
+
+A kind that is one object, `GPUNode` and `DebugReport`, has nothing for
+`--limit` to cut, so it is exit 2 rather than an answer that ignored the flag.
 
 ```console
 $ kubectl nv list --limit 2 -o json
@@ -119,17 +163,34 @@ note: showing 2 of 3 items (--limit 2)
 ```
 
 `--fields a,b,c` keeps only the named dotted JSON paths on each item, for
-instance `status.ready` or `metadata.labels`. `apiVersion`, `kind` and
+instance `capacity` or `metadata.labels` on a `GPUNode`, or
+`levels.groups.free` on a `TopologyReport`. `apiVersion`, `kind` and
 `metadata.name` survive whatever is asked for: without them a consumer cannot
 tell what it is holding or which thing the values belong to.
+
+A path reaches inside a repeated part as well as into a nested object, so
+`levels.groups.free` is one number of every group of every level, and the
+arrays on the way down are kept in their own order. A section is a path too:
+`levels` takes the levels whole, which is what a caller that wants a section
+rather than a field asks for.
 
 A path a kind does not have is exit 2, with the valid paths listed. A typo
 would otherwise return an item missing the field the caller branches on, which
 is worse than no answer.
 
 Both flags work for every format. For `table` and `wide`, `--fields`
-restricts the columns to the ones that render a requested path, always keeping
-the name. For `name` there is nothing left to project.
+restricts the columns to the ones every path of which was asked for, always
+keeping the name. A cell often renders several paths, such as a GPU count
+showing requested out of allocatable out of capacity, and a column is kept only
+when all of them were named: a table has nowhere to put half a cell, and a
+column kept by one of its paths would print the others to a caller that named
+neither. Asking for a section keeps the columns inside it. For `name` there is
+nothing left to project.
+
+A path the kind has and no column of the table renders is not an error: the
+caller asked for something real, and `-o json` would give it. A note on stderr
+says so, naming the paths, because a table that came back without the column
+they asked for and said nothing reads as a table with no such field.
 
 Run `kubectl nv schema <kind>` to see which paths a kind offers.
 
@@ -159,11 +220,12 @@ It is turned off with `--no-exec`, which collects everything else and records
 in the bundle what was skipped. A cluster where `pods/exec` is not allowed
 degrades the same way and exits 3.
 
-The flag itself is not in the tree yet. Until it lands, the MCP server refuses
-to serve `must-gather` at all rather than serving it with the exec still
-available, and says so in the tool error.
+`kubectl nv debug` runs the same gather and takes the same `--no-exec`, so the
+server serves it with the flag forced on. `adm must-gather` has no `--no-exec`
+of its own yet, and until it does the server refuses to serve it at all rather
+than serving it with the exec still available, and says so in the tool error.
 
-Over MCP it is never on. See below.
+Over MCP the exec is never on. See below.
 
 ## MCP
 
@@ -273,22 +335,48 @@ the exec gate tests use.
 
 ## Commands
 
-The leaves below are what the tree carries today. Later tracks extend this
-section as they land.
+Every leaf of the tree, the kind it prints, and which of the three output
+flags apply to it. "List-like" is what `--limit` counts: a command that has
+one takes `--limit`, and one that does not answers it with exit 2.
 
-| Command | Prints on stdout | Writes |
-|---|---|---|
-| `adm must-gather` | Nothing; progress goes to stderr | A directory of collected files |
-| `schema` | The JSON Schema of a kind | Nothing, unless `--write-dir` |
-| `mcp` | Nothing; serves the protocol | Nothing |
-| `version` | The version string | Nothing |
+| Command | Kind | List-like | `-o` | `--fields` | `--limit` |
+|---|---|---|---|---|---|
+| `list` | `GPUNodeList` | Yes, the nodes | Yes | Yes | Yes |
+| `info NODE` | `GPUNode` | No, one node | Yes | Yes | Exit 2 |
+| `health` | `HealthReport` | Yes, the findings | Yes | Yes | Yes |
+| `topology` | `TopologyReport` | Yes, the groups | Yes | Yes | Yes |
+| `debug NODE` | `DebugReport` | No, one node | Yes | Yes | Exit 2 |
+| `adm must-gather` | `BundleManifest` | A directory, not an object | No | No | No |
+| `explain CODE` | None; Markdown | No | No | No | No |
+| `schema [KIND]` | None; a JSON Schema | No | No | No | No |
+| `mcp` | None; serves the protocol | No | No | No | No |
+| `version` | None; one line | No | No | No | No |
 
-`schema`, `mcp` and `version` read nothing from a cluster and need no
-kubeconfig.
+The kind column is also what `kubectl nv schema <command>` answers with, so a
+caller can ask for a schema by the command it was about to run rather than by a
+kind it has to look up. `explain` has no kind and says so, with exit 2: it
+prints a Markdown catalog entry, not an object of this contract.
 
-`must-gather` does not print an object: it writes a directory of collected
-files and reports progress on stderr. The `BundleManifest` kind above is
-reserved for the bundle index a later track adds; nothing emits it yet.
+`explain`, `schema`, `mcp` and `version` read nothing from a cluster and need
+no kubeconfig.
+
+`--redact` is about the bundle on disk and not about what a command prints.
+`kubectl nv debug --redact` writes a redacted bundle and prints a `DebugReport`
+naming the real node, because that report is for the person who ran it. Over
+MCP the flag is offered like any other flag and is not forced on, so a tool
+call that wants a redacted bundle asks for one.
+
+`adm must-gather` and `debug` are the two commands that write on the machine
+`kubectl-nv` runs on. `must-gather` prints no object at all: it writes a
+directory and reports progress on stderr, and the `BundleManifest` kind is the
+`manifest.json` inside that directory. `debug` writes the same bundle and
+prints a `DebugReport` about it.
+
+Both take `--redact`, which rewrites the node names, hostnames, addresses and
+credential values out of the bundle before it is indexed. The mapping is keyed
+per run and never written, so a node keeps one pseudonym throughout a bundle
+and takes a different one in the next. `docs/must-gather.md` lists what is and
+is not covered.
 
 ### Exit codes over MCP
 

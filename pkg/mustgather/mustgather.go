@@ -61,6 +61,12 @@ type Options struct {
 	// device usage, and the manifest records both as skipped by flag.
 	NoExec bool
 
+	// Redact rewrites the identities and the secret material out of every file
+	// of the bundle once the collectors have finished and before it is
+	// indexed, so that the checksums are the redacted files'. The manifest
+	// records that it was done; pkg/mustgather/redact.go says what it covers.
+	Redact bool
+
 	// ExecTimeout bounds one exec or one copy out of a driver pod. Zero means
 	// DefaultExecTimeout. A pod that accepted the connection and never answers
 	// costs one file rather than the whole bundle.
@@ -139,6 +145,16 @@ type Gatherer struct {
 	// current is the collector whose artifacts are being counted.
 	results []CollectorStatus
 	current *CollectorStatus
+
+	// allNodes is every node of the cluster, captured before --node narrows
+	// anything. The redaction needs it: under --node the bundle holds one
+	// node's objects and the logs in it name every peer that node talked to.
+	allNodes []v1.Node
+
+	// redactor is set once the bundle has been rewritten, and is what the
+	// manifest is rewritten through. The manifest is written after the files
+	// and is not one of them.
+	redactor *Redactor
 }
 
 // fetchBugReport copies the bug report generated inside pod to destPath, using
@@ -353,6 +369,9 @@ func (g *Gatherer) gatherNodeInfo() error {
 			}
 			return err
 		}
+		// Captured whole, before the narrowing: the redaction needs every node
+		// the cluster has, not every node this bundle is about.
+		g.allNodes = append([]v1.Node(nil), nodes.Items...)
 		nodes.Items = g.nodesWanted(nodes.Items)
 
 		// Marshal nodes into YAML format.
@@ -639,7 +658,7 @@ func writeStringToFile(file io.StringWriter, s string) error {
 // Run collects everything NVIDIA support asks for from the cluster the factory
 // points at, into opts.ArtifactDir. progress carries the running commentary;
 // the artifacts themselves go to files under the artifact directory.
-func Run(opts *Options, f Clients, progress Progress) error {
+func Run(opts *Options, f Clients, progress Progress) (code error) {
 	g, err := NewGatherer(opts, f, progress)
 	if err != nil {
 		// A usage error is the user's to fix and carries its own exit code;
@@ -659,8 +678,18 @@ func Run(opts *Options, f Clients, progress Progress) error {
 	// whose reader most needs to know which collectors ran, and an index
 	// written only on the success path is one a later early return can lose.
 	defer func() {
-		if err := g.writeManifest(); err != nil {
-			g.note("could not write %s: %v", ManifestFileName, err)
+		werr := g.writeManifest()
+		if werr == nil {
+			return
+		}
+		// A redaction that could not finish has already taken the bundle with
+		// it, and there is nothing to report but the failure: returning the
+		// collectors' own result here would say the gather succeeded and leave
+		// the caller looking for a directory that is not there.
+		g.note("could not write %s: %v", ManifestFileName, werr)
+		var fatal *Error
+		if errors.As(werr, &fatal) {
+			code = werr
 		}
 	}()
 

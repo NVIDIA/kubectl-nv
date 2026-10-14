@@ -46,6 +46,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // settlePoll is how often the lane is asked whether it has stopped moving.
@@ -106,6 +108,14 @@ func TestScaleLane(t *testing.T) {
 
 	// Every run, not the last one. A command that answered correctly once and
 	// emptily twice has a median this suite would otherwise be delighted with.
+	// The first run goes through the published schema. The census below reads
+	// the handful of fields it counts and ignores the rest, so a field that
+	// changed shape at this scale, or one added without a schema to describe
+	// it, passes every assertion in this file.
+	if len(listRuns) > 0 {
+		assertMatchesSchema(t, output.KindGPUNodeList, listRuns[0])
+	}
+
 	for i, raw := range listRuns {
 		census, err := scaleAssessList([]byte(raw), cfg.Nodes, cfg.RealNodes)
 		if err != nil {
@@ -128,6 +138,10 @@ func TestScaleLane(t *testing.T) {
 	// health builds its inventory with IncludeHinted, so it checks the nodes
 	// list leaves out as well: the fake nodes, the real workers, and the
 	// lane's control plane, which nvml-mock labels and no operand runs on.
+	if len(healthRuns) > 0 {
+		assertMatchesSchema(t, output.KindHealthReport, healthRuns[0])
+	}
+
 	wantNodes := cfg.Nodes + cfg.RealNodes + cfg.HintedNodes
 	for i, raw := range healthRuns {
 		counted, err := scaleCountAtPath([]byte(raw), healthNodesPath)

@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/kubectl-nv/pkg/mustgather/manifest",
+  "properties": {
+    "kind": {
+      "type": "string",
+      "const": "BundleManifest"
+    },
+    "apiVersion": {
+      "type": "string",
+      "const": "kubectl-nv.nvidia.com/v1alpha1"
+    },
+    "bundleSchemaVersion": {
+      "type": "string"
+    },
+    "toolVersion": {
+      "type": "string"
+    },
+    "context": {
+      "type": "string"
+    },
+    "timestamp": {
+      "type": "string"
+    },
+    "flags": {
+      "properties": {
+        "node": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "noExec": {
+          "type": "boolean"
+        },
+        "redacted": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "node",
+        "since",
+        "noExec",
+        "redacted"
+      ]
+    },
+    "collectors": {
+      "items": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "artifacts": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "artifacts"
+        ]
+      },
+      "type": "array"
+    },
+    "files": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "size",
+          "sha256"
+        ]
+      },
+      "type": "array"
+    },
+    "dropped": {
+      "items": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path",
+          "reason"
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "additionalProperties": false,
+  "type": "object",
+  "required": [
+    "apiVersion",
+    "kind",
+    "bundleSchemaVersion",
+    "toolVersion",
+    "context",
+    "timestamp",
+    "flags",
+    "collectors",
+    "files"
+  ]
+}

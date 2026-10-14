@@ -123,27 +123,31 @@ func NewTopologyReport() *TopologyReport {
 // when a job was asked about, so that the ordinary table is not a column of
 // one repeated word.
 func (r *TopologyReport) TableColumns(wide bool) []output.Column {
-	// Every column that comes out of a level names "levels", and the fit
-	// column names "fit". Those are the paths output.FieldPaths offers for
-	// this kind: a level and a group each marshal themselves, which is how
-	// they guarantee no nulls, and a type that marshals itself is a leaf to
-	// the path walker. So --fields here selects whole sections of the report
-	// rather than single numbers, and a column naming a finer path would be
-	// one no user could ask for.
+	// Each column names the field it renders, down to the number. The path
+	// walker descends into a Level and a Group by their wire shape rather than
+	// stopping at their MarshalJSON, so "levels.groups.free" is a path a
+	// caller can ask for and this is the column it keeps.
 	columns := []output.Column{
-		{Header: "LEVEL", Field: "levels"},
-		{Header: "GROUP", Field: "levels"},
-		{Header: "NODES", Field: "levels"},
-		{Header: "ALLOCATABLE", Field: "levels"},
-		{Header: "REQUESTED", Field: "levels"},
-		{Header: "FREE", Field: "levels"},
-		{Header: "LARGEST-FREE", Field: "levels"},
+		output.OneField("LEVEL", "levels.name"),
+		output.OneField("GROUP", "levels.groups.value"),
+		output.OneField("NODES", "levels.groups.nodeCount"),
+		output.OneField("ALLOCATABLE", "levels.groups.allocatable"),
+		// The three that are printed as "unknown" until the requests were
+		// read name that fact as well as the number, because a cell showing
+		// "unknown" is showing requestedKnown and not only its own field.
+		{Header: "REQUESTED", Fields: []string{"levels.groups.requested", "levels.groups.requestedKnown"}},
+		{Header: "FREE", Fields: []string{"levels.groups.free", "levels.groups.requestedKnown"}},
+		{Header: "LARGEST-FREE", Fields: []string{
+			"levels.groups.largestFreeNode", "levels.groups.requestedKnown",
+		}},
 	}
 	if wide {
-		columns = append(columns, output.Column{Header: "NODE-NAMES", Field: "levels"})
+		columns = append(columns, output.OneField("NODE-NAMES", "levels.groups.nodes"))
 	}
 	if r.Fit != nil {
-		columns = append(columns, output.Column{Header: "FITS", Field: "fit"})
+		columns = append(columns, output.Column{Header: "FITS", Fields: []string{
+			"fit.levels.level", "fit.levels.groups",
+		}})
 	}
 
 	return columns
@@ -354,7 +358,67 @@ func copyStatus(s output.ReportStatus) output.ReportStatus {
 		copy(out.Unreachable, s.Unreachable)
 	}
 
+	// The count is a pointer, so a shallow copy would let the printer's copy
+	// write a truncation into the report the command still holds.
+	if s.RemainingItemCount != nil {
+		remaining := *s.RemainingItemCount
+		out.RemainingItemCount = &remaining
+	}
+
 	return out
+}
+
+// LimitItems implements output.Limitable: --limit on a topology report bounds
+// its groups, counted across the levels in the order the report carries them.
+//
+// Across the levels rather than within each, because the levels are ordered
+// narrowest first and that is the order the answer to "where does this job
+// fit" is read in: a limit takes the tightest groups, which are the ones worth
+// having. A level left with no groups is dropped, because a level that lists
+// none says the cluster does not divide that way, which would be a different
+// answer from "you asked for fewer".
+//
+// PartialNodes, Kueue and Fit are untouched. They are about the whole report
+// rather than one group, and a caller that asked for fewer groups did not ask
+// to be told less about where its job fits.
+func (r *TopologyReport) LimitItems(n int) int {
+	total := 0
+	for i := range r.Levels {
+		total += len(r.Levels[i].Groups)
+	}
+	// A limit of zero or less is no limit, which is what the flag's default
+	// means. Truncating to nothing here would make a report with no groups out
+	// of a caller that passed the flag and then thought better of it.
+	if n <= 0 || total <= n {
+		return total
+	}
+
+	left := n
+	kept := make([]Level, 0, len(r.Levels))
+	for _, level := range r.Levels {
+		if left <= 0 {
+			break
+		}
+		if len(level.Groups) > left {
+			level.Groups = level.Groups[:left]
+		}
+		// A level with no groups is dropped rather than carried: a level that
+		// lists none says the cluster does not divide that way, which is a
+		// different answer from "you asked for fewer" and one a reader acts
+		// on. It happens at a limit landing on a level boundary, and to a
+		// level that had none to begin with.
+		if len(level.Groups) == 0 {
+			continue
+		}
+		left -= len(level.Groups)
+		kept = append(kept, level)
+	}
+	r.Levels = kept
+
+	remaining := int64(total - n)
+	r.Status.RemainingItemCount = &remaining
+
+	return total
 }
 
 // DeepCopy returns a copy of the receiver.

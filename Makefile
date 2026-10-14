@@ -29,7 +29,7 @@ fmt:
 
 COVERAGE_FILE := coverage.out
 test:
-	go test -coverprofile=$(COVERAGE_FILE) ./cmd/... ./pkg/...
+	go test -coverprofile=$(COVERAGE_FILE) ./cmd/... ./pkg/... ./agents/...
 coverage: test
 	go tool cover -func=$(COVERAGE_FILE)
 

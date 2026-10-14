@@ -43,7 +43,7 @@ func NewCommand(o *cmd.Options, newRoot NewRootFunc) *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(c *cobra.Command, _ []string) error {
 			if listTools {
-				return printTools(c, newRoot)
+				return printTools(o, newRoot)
 			}
 
 			return Serve(c.Context(), newRoot, c.Root().Version, connectionFrom(o))
@@ -77,7 +77,11 @@ func connectionFrom(o *cmd.Options) CallDeps {
 
 // printTools writes one tool name and description per line. It is how a reader,
 // or a test, sees what the server offers without speaking the protocol.
-func printTools(c *cobra.Command, newRoot NewRootFunc) error {
+//
+// It writes to the options' output stream, which is the process's stdout.
+// cobra's own stream is not it: main points that at stderr so that usage lands
+// there, and a list printed through it is a list no pipeline receives.
+func printTools(o *cmd.Options, newRoot NewRootFunc) error {
 	for _, tool := range Tools(newRoot(CallDeps{Streams: discardStreams()})) {
 		notes := ""
 		if tool.ForceNoExec {
@@ -86,7 +90,7 @@ func printTools(c *cobra.Command, newRoot NewRootFunc) error {
 		if tool.WritesHost {
 			notes += " (writes files on this machine)"
 		}
-		if _, err := fmt.Fprintf(c.OutOrStdout(), "%s\t%s%s\n", tool.Name, tool.Description, notes); err != nil {
+		if _, err := fmt.Fprintf(o.Streams.Out, "%s\t%s%s\n", tool.Name, tool.Description, notes); err != nil {
 			return fmt.Errorf("writing the tool list: %w", err)
 		}
 	}

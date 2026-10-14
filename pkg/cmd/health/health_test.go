@@ -758,15 +758,17 @@ func TestHealthTableColumnsNameTheirFields(t *testing.T) {
 
 	for _, wide := range []bool{false, true} {
 		for _, column := range report.TableColumns(wide) {
-			if column.Field == "" {
+			if len(column.Fields) == 0 {
 				t.Errorf("column %q names no field", column.Header)
 
 				continue
 			}
 
-			if !known[column.Field] {
-				t.Errorf("column %q names %q, which is not a field of the report: %v",
-					column.Header, column.Field, paths)
+			for _, field := range column.Fields {
+				if !known[field] {
+					t.Errorf("column %q names %q, which is not a field of the report: %v",
+						column.Header, field, paths)
+				}
 			}
 		}
 	}

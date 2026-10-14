@@ -42,6 +42,9 @@ default location is under `/tmp`, where every account on the machine can look.
   copy out of it, may take. Defaults to 2m. A pod that accepts the connection
   and never answers then costs one artifact rather than the whole bundle; it is
   recorded as `error:timeout after <duration>` and the gather moves on.
+- `--redact`: rewrite the identities and the secret material out of the bundle
+  before it is indexed. What it covers is below. `kubectl nv debug` takes it
+  too: both commands run the same gather and register the same flags.
 
 `--since` and `--exec-timeout` are rejected below one second, exit 2: a window
 that short collects nothing and a deadline that short cannot finish a bug
@@ -82,8 +85,10 @@ Written last, in every bundle, whichever way the gather ended. It carries:
 - `toolVersion`, the kubectl-nv that produced the bundle.
 - `context`, the kubeconfig context it was collected through.
 - `timestamp`, RFC3339 in UTC.
-- `flags`: `node`, `since` and `noExec`, so that a bundle missing a node's
-  evidence can be read as narrowed rather than as incomplete.
+- `flags`: `node`, `since`, `noExec` and `redacted`, so that a bundle missing a
+  node's evidence can be read as narrowed rather than as incomplete, and a
+  bundle whose nodes are called `node-3f91c2a7b4` is not read as a cluster
+  whose nodes are genuinely called that.
 - `collectors`: one entry per collector, with `name`, `status` and the
   `artifacts` it wrote. The status is `ok`, `skipped:<reason>` or
   `error:<text>`.
@@ -94,6 +99,149 @@ The digests are what a bundle is checked against after it has been through an
 archive and an upload. A file that arrived truncated and a collector that was
 never allowed to run look the same from the outside without them: a file that
 is not there.
+
+## Reading a bundle back
+
+`kubectl nv list --from-bundle` and `kubectl nv health --from-bundle` answer
+from a bundle instead of from a cluster. For either to exit 0, the bundle has
+to hold what they read:
+
+- `gpu_pods.yaml`, every pod of the cluster that requests `nvidia.com/gpu` or
+  `nvidia.com/gpu.shared`, in every namespace. The inventory needs it to say
+  how many of a node's GPUs are in use; the operand pods are the operator
+  namespace alone, and a tenant's training job is not in it. Only the pods that
+  request GPUs, because the alternative is the whole cluster's pod list in a
+  file somebody mails to support. What counts as a request is
+  `inventory.PodSpecGPURequest`, the same rule the live read uses.
+- `node_events.yaml`, the events whose involved object is a node. `NV-UPG-001`
+  dates a driver upgrade step from them: a node sitting in `cordon-required` is
+  not a finding and a node that has been sitting there for an hour is, and only
+  the event says which.
+- `compute_domains.yaml`, the NVIDIA DRA driver's ComputeDomains, which
+  `NV-CD-001` reads. A cluster without that driver serves none, and the gather
+  writes `compute_domains.missing` saying so; a reader takes that as the answer
+  it is rather than as a read that was refused.
+
+A `<name>.missing` marker is how the bundle says why it holds no such file. Its
+one line is `not installed` when the cluster served no such collection,
+`forbidden` when the read was refused, and the error otherwise. Only the first
+is an answer; the rest are partial reads.
+
+Both honour `--node`. A bundle written before they existed, or one whose read
+was refused, is still read as partial and exits 3, naming the file that is not
+there: a count of zero requested GPUs read as complete would report an idle
+cluster.
+
+## Redaction
+
+`--redact` rewrites every file of the bundle after the last collector has
+finished and before the manifest is written, so the digests in the manifest are
+the redacted files'.
+
+### What is rewritten
+
+**Identities.** Every node name, every `kubernetes.io/hostname` label value and
+every `Hostname`, `InternalDNS` or `ExternalDNS` address, wherever it appears:
+the node objects, the pod specs that name a node, the events, the
+ResourceSlices, OpenShift's `machines.yaml`, the descriptions and the logs. The
+names are learned from all of those and from the cluster's whole node list, so
+a gather narrowed with `--node` still takes the other nodes out of the logs
+that name them.
+
+File names are rewritten too. `nvidia-bug-report_<node>.log.gz` and
+`gpu_device_usage_<node>.log` carry the node in the directory listing, where no
+rewrite of the contents reaches it.
+
+A node name is replaced where it is a name and not part of a longer one, so a
+cluster with a node called `gpu` keeps `nvidia.com/gpu` intact.
+
+**Addresses.** Every IPv4 and IPv6 address, including one ending in `::` and
+the address half of a CIDR such as `fd00:10:244:1::/64`, whose prefix length is
+kept. Every candidate is parsed before it is replaced, so a version written
+`1.2.3.4` is left alone unless it is also a valid address.
+
+**Credential values**, in each of these shapes:
+
+| Shape | Example |
+|---|---|
+| `name: value` in YAML | `password: s3cr3t` |
+| `NAME=value` | `DB_PASSWORD=s3cr3t`, `password=s3cr3t` in a log line |
+| `"name": "value"` in JSON | `{"registryToken":"s3cr3t"}` |
+| a JSON env object | `{"name":"HF_TOKEN","value":"s3cr3t"}` |
+| the same escaped inside `last-applied-configuration` | `'{"env":[{"name":"NGC_API_KEY","value":"s3cr3t"}]}'` |
+| a command line flag | `--hf-token=s3cr3t`, `--password s3cr3t` |
+| a URL's userinfo | `https://robot:s3cr3t@registry.example.com` |
+| an `Authorization` header, anywhere in a line | `Authorization: Basic ...`, `Bearer ...` |
+| a kubeconfig `*-data:` field | `client-key-data: ...` |
+| a YAML block scalar | `password: \|` and everything indented under it |
+| a PEM block | `-----BEGIN ... PRIVATE KEY-----` to `-----END` |
+| the value map of a `Secret` | everything under `data:` or `stringData:` |
+
+A name counts as a credential when it contains `pass`, `secret`, `token`,
+`key`, `credential`, `cred`, `auth`, `licence`, `license`, `signature` or
+`session`, case insensitively.
+
+Only string values are rewritten. A boolean and a number are left as they are,
+so `automountServiceAccountToken: false` keeps its value, and the field
+literally called `key` is left alone, so a taint and a toleration keyed by
+`nvidia.com/gpu` survive.
+
+An identity becomes a pseudonym rather than a blank: `node-` or `host-` or
+`ip-` followed by twenty hexadecimal digits, for instance
+`node-3f91c2a7b4e81d05c9a2`. Secret material becomes `REDACTED`, because
+nothing is gained by being able to tell two passwords apart.
+
+### Compressed and binary files
+
+A file beginning with the gzip magic bytes is decompressed, rewritten and
+compressed again, so `nvidia-bug-report_<node>.log.gz` is redacted inside and
+still unpacks. Rewriting the compressed bytes would change nothing a reader can
+see and corrupt the file.
+
+Any other file that is not text is removed rather than shipped unrewritten,
+because a byte rewrite would corrupt it. `manifest.json` lists each one under
+`dropped`, with the reason, so a file that is not there is not mistaken for a
+bad upload.
+
+### When it cannot finish
+
+A redaction that fails takes the bundle with it and exits 4. Nothing is left in
+the artifacts directory and no `manifest.json` is written. Half a redaction is
+a directory the user believes is redacted and is not, and they send it on.
+
+### Consistent within a bundle, not across bundles
+
+The pseudonym is an HMAC of the value under a key drawn at random for that one
+run and never written anywhere. So the same node name is the same pseudonym in
+every file of one bundle, which is what lets a reader follow a node from the
+node list to the pods on it; and the same node name in two bundles is two
+different pseudonyms, so nobody holding both can line them up or confirm a
+guess at a name. Nothing in or alongside the bundle can undo it, including for
+whoever produced it.
+
+### What is not rewritten
+
+- **Container images**, registry hostname included. The driver image is the
+  single most useful line in a bundle, and a bundle that will not say which
+  driver it ran is a bundle nobody can answer from.
+- **Namespaces, pod names, DaemonSet names, labels and annotations other than
+  the hostname.** A pod name carries the node it is on only by accident, and
+  these are what a reader navigates by.
+- **Versions, conditions, events, exit codes and log text** other than the
+  addresses and credentials in them.
+- **Hostnames nothing in the cluster reported as a node identity.** One that
+  appears in a log alone is left.
+
+The rules are shapes rather than schemas, because the files of a bundle are not
+one format. `--redact` reduces what a bundle discloses; it is not a guarantee
+that nothing identifying survives, and a bundle leaving a regulated environment
+should still be read before it is sent.
+
+`--redact` applies to the bundle on disk. It does not apply to what a command
+prints: `kubectl nv debug` writes a redacted bundle and prints a report naming
+the real node, because that report is for the person who ran it. Over MCP the
+flag is offered like any other and is not forced on, so a tool call that wants
+a redacted bundle asks for one.
 
 ## Parity with the gpu-operator script
 

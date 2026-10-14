@@ -277,20 +277,37 @@ func requires(schema map[string]any, name string) bool {
 	return false
 }
 
-// metav1.Time marshals as an RFC3339 string. Reflected as a plain struct it
-// comes out as an empty object, which tells a consumer to send "{}" where a
-// timestamp belongs.
-func TestSchemaRendersATimestampAsAnRFC3339String(t *testing.T) {
+// metav1.Time marshals as an RFC3339 string, or as null when it is the zero
+// value: its MarshalJSON writes null, and omitempty does not drop a struct.
+// Reflected as a plain struct it comes out as an empty object instead, which
+// tells a consumer to send "{}" where a timestamp belongs.
+func TestSchemaRendersATimestampAsAnRFC3339StringOrNull(t *testing.T) {
 	t.Parallel()
 
 	schema := schemaOf(t, KindHealthReport, &healthReport{})
 	timestamp := at(t, schema, "properties", "status", "properties", "lastChecked")
 
-	if timestamp["type"] != "string" {
-		t.Errorf("lastChecked type is %v, want string", timestamp["type"])
+	assertRFC3339OrNull(t, "lastChecked", timestamp)
+}
+
+// assertRFC3339OrNull holds a property to the one shape every timestamp of
+// this contract has: an RFC3339 string, or null.
+func assertRFC3339OrNull(t *testing.T, name string, property map[string]any) {
+	t.Helper()
+
+	alternatives, ok := property["oneOf"].([]any)
+	if !ok || len(alternatives) != 2 {
+		t.Fatalf("%s is %v, want a choice of an RFC3339 string and null", name, property)
 	}
-	if timestamp["format"] != "date-time" {
-		t.Errorf("lastChecked format is %v, want date-time", timestamp["format"])
+
+	str, _ := alternatives[0].(map[string]any)
+	if str["type"] != "string" || str["format"] != "date-time" {
+		t.Errorf("%s first alternative is %v, want an RFC3339 string", name, str)
+	}
+
+	null, _ := alternatives[1].(map[string]any)
+	if null["type"] != "null" {
+		t.Errorf("%s second alternative is %v, want null", name, null)
 	}
 }
 
@@ -311,10 +328,7 @@ func TestSchemaTrimsObjectMetaToWhatTheContractUses(t *testing.T) {
 		t.Errorf("metadata additionalProperties is %v, want false", meta["additionalProperties"])
 	}
 
-	created := at(t, meta, "properties", "creationTimestamp")
-	if created["type"] != "string" || created["format"] != "date-time" {
-		t.Errorf("metadata.creationTimestamp is %v, want an RFC3339 string", created)
-	}
+	assertRFC3339OrNull(t, "metadata.creationTimestamp", at(t, meta, "properties", "creationTimestamp"))
 	labels := at(t, meta, "properties", "labels")
 	if labels["type"] != "object" {
 		t.Errorf("metadata.labels type is %v, want object", labels["type"])

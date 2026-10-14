@@ -41,6 +41,8 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // The lane this file is written against. These values are the ones
@@ -571,6 +573,8 @@ func topologyJSON(t *testing.T, args ...string) topologyReport {
 		t.Fatalf("%v exited %d\nstdout:\n%s\nstderr:\n%s",
 			args, res.code, res.stdout, res.stderr)
 	}
+
+	assertMatchesSchema(t, output.KindTopologyReport, res.stdout)
 
 	var report topologyReport
 	if err := json.Unmarshal([]byte(res.stdout), &report); err != nil {

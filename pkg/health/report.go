@@ -153,9 +153,10 @@ type healthReportJSON struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	Findings    []output.Finding     `json:"findings"`
-	Partial     bool                 `json:"partial,omitempty"`
-	Unreachable []output.Unreachable `json:"unreachable,omitempty"`
+	Findings           []output.Finding     `json:"findings"`
+	Partial            bool                 `json:"partial,omitempty"`
+	Unreachable        []output.Unreachable `json:"unreachable,omitempty"`
+	RemainingItemCount *int64               `json:"remainingItemCount,omitempty"`
 
 	Summary Summary `json:"summary"`
 }
@@ -165,12 +166,13 @@ type healthReportJSON struct {
 // come off the wire looking like every other report.
 func (r HealthReport) MarshalJSON() ([]byte, error) {
 	out := healthReportJSON{
-		TypeMeta:    output.TypeMetaFor(output.KindHealthReport),
-		ObjectMeta:  r.ObjectMeta,
-		Findings:    r.Findings,
-		Partial:     r.Partial,
-		Unreachable: r.Unreachable,
-		Summary:     r.Summary,
+		TypeMeta:           output.TypeMetaFor(output.KindHealthReport),
+		ObjectMeta:         r.ObjectMeta,
+		Findings:           r.Findings,
+		Partial:            r.Partial,
+		Unreachable:        r.Unreachable,
+		RemainingItemCount: r.RemainingItemCount,
+		Summary:            r.Summary,
 	}
 
 	if out.Findings == nil {
@@ -185,6 +187,31 @@ func (r HealthReport) MarshalJSON() ([]byte, error) {
 	return raw, nil
 }
 
+// LimitItems implements output.Limitable: --limit on a health report bounds
+// its findings.
+//
+// The summary is left exactly as it is. It is the arithmetic over what was
+// checked, not over what was printed, and a limited report that summarised
+// only what it printed would say the cluster is in better shape than it is.
+//
+// The findings are already sorted by the engine, so the ones kept are the
+// first ones of the report a caller would get without the flag.
+func (r *HealthReport) LimitItems(n int) int {
+	total := len(r.Findings)
+	// A limit of zero or less is no limit, which is what the flag's default
+	// means: a report truncated to nothing by it would say the cluster is
+	// clean.
+	if n <= 0 || total <= n {
+		return total
+	}
+
+	r.Findings = r.Findings[:n]
+	remaining := int64(total - n)
+	r.RemainingItemCount = &remaining
+
+	return total
+}
+
 // ExitCode maps the report onto the process exit code against the --fail-on
 // threshold. It is the report's own answer rather than the caller's, so that
 // no command can report findings and exit zero by forgetting to ask.
@@ -197,29 +224,23 @@ func (r *HealthReport) ExitCode(failOn output.Severity) int {
 // needs every row to have one.
 const noNode = "-"
 
-// findingsField is the projection path every column of this table renders
-// from. --fields matches a column against it, and output.FieldPaths stops at
-// the findings slice rather than descending into a Finding, so "findings" is
-// the only path that names any of these columns. All of them carry it: asking
-// for --fields findings keeps the table whole, and asking for anything else
-// drops it whole, which is the only honest answer when the projection cannot
-// address one column of it.
-const findingsField = "findings"
-
-// TableColumns implements output.TableRows.
+// TableColumns implements output.TableRows. Each column names the one field of
+// a finding it renders, so --fields findings.code keeps the CODE column and
+// nothing else, and --fields findings keeps all of them: a section contains
+// every path inside it.
 func (r *HealthReport) TableColumns(wide bool) []output.Column {
 	columns := []output.Column{
-		{Header: "NODE", Field: findingsField},
-		{Header: "CODE", Field: findingsField},
-		{Header: "SEVERITY", Field: findingsField},
-		{Header: "COMPONENT", Field: findingsField},
-		{Header: "MESSAGE", Field: findingsField},
+		output.OneField("NODE", "findings.node"),
+		output.OneField("CODE", "findings.code"),
+		output.OneField("SEVERITY", "findings.severity"),
+		output.OneField("COMPONENT", "findings.component"),
+		output.OneField("MESSAGE", "findings.message"),
 	}
 
 	// The next command is the whole point of a finding and the widest thing in
 	// it, so it waits for -o wide rather than pushing the message off screen.
 	if wide {
-		columns = append(columns, output.Column{Header: "NEXT", Field: findingsField})
+		columns = append(columns, output.OneField("NEXT", "findings.next"))
 	}
 
 	return columns
@@ -253,6 +274,13 @@ func (r *HealthReport) DeepCopyInto(out *HealthReport) {
 	out.TypeMeta = r.TypeMeta
 	r.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 	out.Summary = r.Summary
+
+	// The count is a pointer, so a shallow copy would let the printer's copy
+	// write a truncation into the report the command still holds.
+	if r.RemainingItemCount != nil {
+		remaining := *r.RemainingItemCount
+		out.RemainingItemCount = &remaining
+	}
 
 	if r.Findings != nil {
 		out.Findings = make([]output.Finding, len(r.Findings))

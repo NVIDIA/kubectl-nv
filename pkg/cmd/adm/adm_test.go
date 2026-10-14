@@ -28,7 +28,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/cli-runtime/pkg/genericiooptions"
 	"k8s.io/client-go/dynamic"
@@ -437,13 +436,7 @@ func offlineClients() mustgather.Clients {
 		// was not told about, so every custom resource the gather reads is
 		// registered even though this cluster holds none of them.
 		dynamic: dynamicfake.NewSimpleDynamicClientWithCustomListKinds(
-			runtime.NewScheme(), map[schema.GroupVersionResource]string{
-				{Group: "nvidia.com", Version: "v1", Resource: "clusterpolicies"}:           "ClusterPolicyList",
-				{Group: "nvidia.com", Version: "v1alpha1", Resource: "nvidiadrivers"}:       "NVIDIADriverList",
-				{Group: "nvidia.com", Version: "v1alpha1", Resource: "gpuclusters"}:         "GPUClusterList",
-				{Group: "hco.kubevirt.io", Version: "v1beta1", Resource: "hyperconvergeds"}: "HyperConvergedList",
-				{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}:                "KubeVirtList",
-			}),
+			runtime.NewScheme(), mustgather.CustomResourceListKinds()),
 		config: &rest.Config{
 			Host: "https://kubectl-nv.invalid",
 			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {

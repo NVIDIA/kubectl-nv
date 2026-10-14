@@ -32,31 +32,30 @@ const requestedUnknown = "?"
 // baseColumns are the columns of the default table, in order, each with the
 // dotted JSON path it renders.
 //
-// The path is what --fields keeps a column by, so every column names one: a
-// column with an empty Field is dropped the moment --fields is given, with no
-// error anywhere to say it happened.
+// The paths are what --fields keeps a column by, so every column names every
+// path its cell renders: a column with none is dropped the moment --fields is
+// given, with no error anywhere to say it happened, and a column naming fewer
+// paths than it prints would show a caller a number it did not ask for.
 //
-// Two of them render more than one path and name the one a reader would ask
-// for. GPUS shows requested, allocatable and capacity, and is kept by
-// "capacity"; STATUS shows the Ready condition and the cordon, and is kept by
-// "ready". A Column holds a single path, so "--fields requested" alone does
-// not keep the GPUS column; the machine readable formats are where a single
-// field is projected on its own.
+// Two of them render more than one. GPUS shows requested out of allocatable
+// out of capacity, and STATUS shows the Ready condition and the cordon. Each
+// is kept only when every path it names was asked for, because a table has
+// nowhere to put half a cell.
 var baseColumns = []output.Column{
-	{Header: "NODE", Field: "metadata.name"},
-	{Header: "PRODUCT", Field: "product"},
-	{Header: "GPUS", Field: "capacity"},
-	{Header: "DRIVER", Field: "driverVersion"},
-	{Header: "CUDA", Field: "cudaVersion"},
-	{Header: "MODE", Field: "mode"},
-	{Header: "MIG", Field: "mig"},
-	{Header: "UPGRADE", Field: "upgradeState"},
-	{Header: "STATUS", Field: "ready"},
+	output.OneField("NODE", "metadata.name"),
+	output.OneField("PRODUCT", "product"),
+	{Header: "GPUS", Fields: []string{"requested", "allocatable", "capacity"}},
+	output.OneField("DRIVER", "driverVersion"),
+	output.OneField("CUDA", "cudaVersion"),
+	output.OneField("MODE", "mode"),
+	output.OneField("MIG", "mig.strategy"),
+	output.OneField("UPGRADE", "upgradeState"),
+	{Header: "STATUS", Fields: []string{"ready", "unschedulable"}},
 }
 
 // cliqueColumn and the topology columns are the wide ones. Every topology
 // column renders one key of the same map, so they share its path.
-var cliqueColumn = output.Column{Header: "CLIQUE", Field: "clique"}
+var cliqueColumn = output.OneField("CLIQUE", "clique")
 
 // TableColumns implements output.TableRows.
 func (n *GPUNode) TableColumns(wide bool) []output.Column {
@@ -117,7 +116,7 @@ func columnsFor(wide bool, topologyKeys []string) []output.Column {
 
 	out = append(out, cliqueColumn)
 	for _, key := range topologyKeys {
-		out = append(out, output.Column{Header: strings.ToUpper(key), Field: "topology"})
+		out = append(out, output.OneField(strings.ToUpper(key), "topology"))
 	}
 
 	return out

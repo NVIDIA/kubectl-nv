@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // laneOperands are the components the Mokka lane runs on every worker. They
@@ -76,6 +78,8 @@ func infoJSON(t *testing.T, args ...string) infoNodeJSON {
 	if res.code != 0 {
 		t.Fatalf("kubectl nv info exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
+
+	assertMatchesSchema(t, output.KindGPUNode, res.stdout)
 
 	var node infoNodeJSON
 	if err := json.Unmarshal([]byte(res.stdout), &node); err != nil {

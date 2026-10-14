@@ -25,6 +25,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // laneGPUCount is how many simulated GPUs the t4 and gb300 profiles, the two
@@ -100,6 +102,8 @@ func listJSON(t *testing.T, args ...string) gpuNodeListJSON {
 	if res.code != 0 {
 		t.Fatalf("kubectl nv list exited %d, want 0\nstderr:\n%s", res.code, res.stderr)
 	}
+
+	assertMatchesSchema(t, output.KindGPUNodeList, res.stdout)
 
 	var list gpuNodeListJSON
 	if err := json.Unmarshal([]byte(res.stdout), &list); err != nil {
@@ -270,18 +274,15 @@ func TestListAgainstTheLane(t *testing.T) {
 // TestListFromABundleMatchesTheLane is the round trip: a must-gather of the
 // lane, replayed offline, has to describe the same cluster as the live run.
 //
-// Exactly five JSON fields are removed before the comparison. Every other
+// Exactly three JSON fields are removed before the comparison. Every other
 // field of every node, including ones added to the model after this test was
 // written, has to be equal, which is why the comparison is over generic maps
 // rather than over a struct listing what to check.
 //
-// Removed at the node level:
-//
-//   - requested, and requestedKnown with it. must-gather records only the
-//     operator's namespace, so a bundle cannot sum the GPU demand of the
-//     cluster. The bundle says so through requestedKnown=false rather than by
-//     reporting the part it saw as the whole, and that is asserted below
-//     rather than normalised away.
+// requested and requestedKnown are compared like the rest. A bundle records
+// every pod that asks for GPUs, in every namespace, so it can sum the demand
+// of the cluster and does not have to withhold the number. That is what
+// gathering those pods is for, and it is asserted directly below as well.
 //
 // Removed from each operand:
 //
@@ -304,11 +305,12 @@ func TestListFromABundleMatchesTheLane(t *testing.T) {
 
 	fromBundle := rawList(t, "--from-bundle", b.dir)
 
-	// A bundle holds one namespace, so the pod read is partial by
-	// construction, and exit 3 is how the command says the answer is
-	// incomplete rather than clean.
-	if fromBundle.code != 3 {
-		t.Fatalf("kubectl nv list --from-bundle exited %d, want 3\nstderr:\n%s", fromBundle.code, fromBundle.stderr)
+	// A complete bundle reads as complete. The gather records the operands
+	// and every GPU-requesting pod of every namespace, which is the whole pod
+	// set this tool asks about, so there is nothing left to call incomplete,
+	// and exit 3 would be the command reporting a gap it does not have.
+	if fromBundle.code != 0 {
+		t.Fatalf("kubectl nv list --from-bundle exited %d, want 0\nstderr:\n%s", fromBundle.code, fromBundle.stderr)
 	}
 
 	liveNodes := decodeNodes(t, live.stdout)
@@ -337,10 +339,10 @@ func TestListFromABundleMatchesTheLane(t *testing.T) {
 		}
 	}
 
-	t.Run("the bundle admits it did not count the pods", func(t *testing.T) {
+	t.Run("the bundle counted the pods", func(t *testing.T) {
 		for name, node := range bundleNodes {
-			if known, _ := node["requestedKnown"].(bool); known {
-				t.Errorf("%s claims a requested count from a bundle that holds one namespace", name)
+			if known, _ := node["requestedKnown"].(bool); !known {
+				t.Errorf("%s withholds its requested count, so the bundle did not record the GPU pods", name)
 			}
 		}
 	})
@@ -384,16 +386,13 @@ func decodeNodes(t *testing.T, stdout string) map[string]map[string]any {
 	return out
 }
 
-// normaliseNode drops what a bundle cannot know, so that what is left has to
-// be equal.
+// normaliseNode drops the three per-operand fields that are a moment in time
+// rather than a property of the cluster, so that what is left has to be equal.
 func normaliseNode(node map[string]any) map[string]any {
 	out := make(map[string]any, len(node))
 	for k, v := range node {
 		out[k] = v
 	}
-
-	delete(out, "requested")
-	delete(out, "requestedKnown")
 
 	operands, _ := out["operands"].([]any)
 	trimmed := make([]any, 0, len(operands))

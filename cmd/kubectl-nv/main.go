@@ -64,10 +64,11 @@ func run(args []string, streams genericiooptions.IOStreams, c *cobra.Command) (c
 	c.SetIn(streams.In)
 	c.SetErr(streams.ErrOut)
 
-	// Usage is a diagnostic and belongs on the error stream; help is what the
-	// user asked for and belongs on stdout. Cobra writes both through the same
-	// stream, so which one that is depends on what was asked.
-	if helpRequested(args) {
+	// Usage is a diagnostic and belongs on the error stream; help and the
+	// version are what the user asked for and belong on stdout. Cobra writes
+	// all three through the same stream, so which one that is depends on what
+	// was asked.
+	if answerGoesToStdout(args) {
 		c.SetOut(streams.Out)
 	} else {
 		c.SetOut(streams.ErrOut)
@@ -92,11 +93,17 @@ func run(args []string, streams genericiooptions.IOStreams, c *cobra.Command) (c
 	return output.ExitCodeFor(err)
 }
 
-// helpRequested reports whether the user asked for help, rather than being
-// shown it because something went wrong.
-func helpRequested(args []string) bool {
+// answerGoesToStdout reports whether what cobra is about to print through its
+// own stream is the answer rather than a diagnostic.
+//
+// Help and the version are both: the user asked for them, so they belong on
+// stdout and have to survive a redirect. Usage shown because something went
+// wrong is not. The version command writes through the IOStreams and does not
+// need this; --version is cobra's own and does not.
+func answerGoesToStdout(args []string) bool {
 	for _, arg := range args {
-		if arg == "--help" || arg == "-h" || arg == "help" {
+		switch arg {
+		case "--help", "-h", "help", "--version":
 			return true
 		}
 	}

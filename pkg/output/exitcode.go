@@ -115,6 +115,16 @@ type ReportStatus struct {
 	// Unreachable lists what Partial is about, so that a reader never has to
 	// guess which part of the cluster is missing from the findings.
 	Unreachable []Unreachable `json:"unreachable,omitempty" yaml:"unreachable,omitempty"`
+
+	// RemainingItemCount is how many of the repeated part --limit left out. It
+	// is the same field a list kind carries in its ListMeta, under the same
+	// name, because it answers the same question: a program reading stdout
+	// never sees the truncation note on stderr.
+	//
+	// It is a pointer with omitempty, so a report nothing was left out of
+	// carries no such key at all. A zero would be true and would invite a
+	// reader to branch on the value rather than on the presence.
+	RemainingItemCount *int64 `json:"remainingItemCount,omitempty" yaml:"remainingItemCount,omitempty"`
 }
 
 // MarshalJSON renders a nil Findings as an empty array, for the same reason

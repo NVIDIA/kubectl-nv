@@ -26,6 +26,8 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/output"
 )
 
 // This file is the healthy-lane gate. It carries the "e2e" tag alone, so it
@@ -145,6 +147,14 @@ func healthJSON(t *testing.T, args ...string) (healthReport, int) {
 	t.Helper()
 
 	res := run(t, append([]string{"health", "-o", "json"}, args...)...)
+
+	// Against the published schema before anything reads it. The healthReport
+	// struct below names the handful of fields this file asserts on and
+	// ignores the rest, so a field that changed shape on a live cluster, or
+	// one added without a schema to describe it, passes every assertion in
+	// this suite. Every health run of the lane goes through here, the healthy
+	// gate included.
+	assertMatchesSchema(t, output.KindHealthReport, res.stdout)
 
 	report, err := decodeHealthReport(res.stdout)
 	if err != nil {
@@ -378,23 +388,28 @@ func TestExplainAnswersForEveryCatalogueCode(t *testing.T) {
 			if res.code != 0 {
 				t.Fatalf("explain %s exited %d\nstderr:\n%s", code, res.code, res.stderr)
 			}
-			// Both streams, which is weaker than it should be and is
-			// deliberate for now. cmd/kubectl-nv/main.go points cobra's own
-			// output stream at stderr for everything except --help, and
-			// explain writes through that stream, so `kubectl nv explain
-			// NV-NODE-002 > entry.md` writes an empty file today. The same
-			// goes for `version`. Which stream is right is a decision for the
-			// owners of main.go and explain.go rather than for this file, and
-			// pinning stdout here would turn their open question into a red
-			// e2e lane. What this test is for either way is that the built
-			// binary HAS the entry: a catalogue that did not reach the binary
-			// fails this whichever stream it would have printed on.
-			printed := res.stdout + res.stderr
-			if !strings.Contains(printed, code) {
-				t.Errorf("explain %s printed an entry that does not name the code:\n%s", code, printed)
+			// stdout, not either stream. This used to accept both, because
+			// main pointed cobra's output stream at stderr for everything but
+			// --help and explain wrote through it, so
+			// `kubectl nv explain NV-NODE-002 > entry.md` wrote an empty file.
+			// That is settled: explain writes to the IOStreams output, and a
+			// catalogue entry is the answer the user asked for, so it has to
+			// survive a redirect.
+			//
+			// What this test is also for is that the built binary HAS the
+			// entry: a catalogue that did not reach the binary fails it too.
+			if !strings.Contains(res.stdout, code) {
+				t.Errorf("explain %s printed no entry naming the code on stdout:\nstdout:\n%s\nstderr:\n%s",
+					code, res.stdout, res.stderr)
 			}
-			if !strings.Contains(printed, "## Reproduction") {
-				t.Errorf("explain %s printed an entry with no Reproduction section:\n%s", code, printed)
+			if !strings.Contains(res.stdout, "## Reproduction") {
+				t.Errorf("explain %s printed an entry with no Reproduction section:\nstdout:\n%s",
+					code, res.stdout)
+			}
+			// And nothing on stderr: piping an entry into a pager should get
+			// the document and only the document.
+			if res.stderr != "" {
+				t.Errorf("explain %s wrote to stderr: %q", code, res.stderr)
 			}
 		})
 	}

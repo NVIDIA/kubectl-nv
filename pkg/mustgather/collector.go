@@ -185,6 +185,24 @@ func Collectors() []Collector {
 			Run:       func(g *Gatherer, _ *gatherState) error { return g.gatherGPUNodes() },
 		},
 		{
+			Name:      "compute-domains",
+			Step:      "Gathering the ComputeDomains",
+			Artifacts: []string{computeDomainsFile, computeDomainsMissingFile},
+			Run:       (*Gatherer).gatherComputeDomains,
+		},
+		{
+			Name:      "gpu-pods",
+			Step:      "Gathering the pods that request GPUs",
+			Artifacts: []string{gpuPodsFile},
+			Run:       (*Gatherer).gatherGPUPods,
+		},
+		{
+			Name:      "node-events",
+			Step:      "Gathering the events about nodes",
+			Artifacts: []string{nodeEventsFile},
+			Run:       (*Gatherer).gatherNodeEvents,
+		},
+		{
 			Name:      "operator-pod",
 			Step:      "Gathering the GPU operator pod",
 			Artifacts: []string{"gpu_operator_pod.yaml", "gpu_operator_pod.status"},
@@ -324,6 +342,31 @@ func (g *Gatherer) listPods(namespace, selector string) (v1.PodList, error) {
 	return listAllPaginated[v1.PodList](500, selector, listFunc, appendFunc)
 }
 
+// listPodsOnNode lists the pods of the cluster, asking the API server to do
+// the --node cut when there is one. The caller still filters: a field selector
+// is an optimisation, and what the bundle holds must not depend on whether a
+// server honoured it.
+func (g *Gatherer) listPodsOnNode() (v1.PodList, error) {
+	if g.opts.Node == "" {
+		return g.listPods(metav1.NamespaceAll, "")
+	}
+
+	listFunc := func(opts metav1.ListOptions) (v1.PodList, string, error) {
+		opts.FieldSelector = "spec.nodeName=" + g.opts.Node
+		list, err := g.clientset.CoreV1().Pods(metav1.NamespaceAll).List(context.Background(), opts)
+		if err != nil {
+			return v1.PodList{}, "", err
+		}
+
+		return *list, list.Continue, nil
+	}
+	appendFunc := func(all *v1.PodList, page v1.PodList) {
+		all.Items = append(all.Items, page.Items...)
+	}
+
+	return listAllPaginated[v1.PodList](500, "", listFunc, appendFunc)
+}
+
 // podsOnNode narrows a pod list to --node when one was given. A support
 // engineer asking about one node gets that node's evidence: anything else in
 // the bundle is both larger than they asked for and misleading about where the
@@ -359,6 +402,29 @@ var (
 	}
 	kubeVirtGVR = schema.GroupVersionResource{Group: "kubevirt.io", Version: "v1", Resource: "kubevirts"}
 )
+
+// CustomResourceListKinds names the list kind of every custom resource a
+// gather lists, which is what a dynamic fake has to be told before it will
+// serve a List.
+//
+// It is exported, and derived from the same variables the collectors use,
+// because the alternative is the list written out in every test package that
+// drives a gather: a collector added for a new resource then panics those
+// tests one by one, a long way from the line that added it.
+func CustomResourceListKinds() map[schema.GroupVersionResource]string {
+	return map[schema.GroupVersionResource]string{
+		clusterPolicyGVR:  "ClusterPolicyList",
+		nvidiaDriverGVR:   "NVIDIADriverList",
+		gpuClusterGVR:     "GPUClusterList",
+		hyperConvergedGVR: "HyperConvergedList",
+		kubeVirtGVR:       "KubeVirtList",
+		computeDomainGVR:  "ComputeDomainList",
+		// The DRA group is discovered at run time, so the version here is the
+		// one a current cluster serves. A fake told about another is a fake
+		// this gather would not have listed anyway.
+		{Group: draGroup, Version: "v1", Resource: "deviceclasses"}: "DeviceClassList",
+	}
+}
 
 // customResourceTimeout bounds a single read of a custom resource. The dynamic
 // client has no deadline of its own, and a gather that hangs on one CRD never

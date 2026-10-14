@@ -57,11 +57,11 @@ func (n *gpuNode) DeepCopyObject() runtime.Object {
 
 func (n *gpuNode) TableColumns(wide bool) []Column {
 	columns := []Column{
-		{Header: "NAME", Field: "metadata.name"},
-		{Header: "GPUS", Field: "status.gpus"},
+		OneField("NAME", "metadata.name"),
+		OneField("GPUS", "status.gpus"),
 	}
 	if wide {
-		columns = append(columns, Column{Header: "DRIVER", Field: "spec.driver"})
+		columns = append(columns, OneField("DRIVER", "spec.driver"))
 	}
 
 	return columns

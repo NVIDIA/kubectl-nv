@@ -1,0 +1,107 @@
+# A HolmesGPT custom toolset for kubectl-nv.
+#
+# Format confirmed against HolmesGPT/holmesgpt (formerly robusta-dev/holmesgpt)
+# with read-only gh api calls on 2026-10-12:
+#   holmes/core/tools.py at commit 59e2bd547c8a37082fc99a6dff473bca818fd197
+#     Toolset, YAMLTool, ToolParameter and ToolsetTag. The Toolset model is
+#     declared extra="forbid", so an unknown field fails the load.
+#   docs/data-sources/custom-toolsets.md at commit
+#     2e3742d5dec84ccbc5cb5b39650cd3d563966193
+#     for the top level toolsets mapping and how a file is passed in.
+#
+# Use it with:
+#   holmes ask "why is worker-1 not scheduling GPU pods" \
+#     --custom-toolsets=agents/holmesgpt-toolset.yaml
+#
+# Every tool here reads. None of them writes to the cluster, and the one
+# kubectl-nv command that can exec into a pod, adm must-gather, is left out.
+toolsets:
+  kubectl-nv:
+    description: >-
+      Diagnose NVIDIA GPU nodes with the kubectl-nv plugin: which nodes carry
+      GPUs, what each one advertises, what the GPU health checks found, and
+      what a finding code means. Read-only, and it answers with stable
+      NV-AREA-NNN codes plus the evidence behind each one.
+    # core, not cluster: the Holmes CLI filters the toolsets it loads on the
+    # core and cli tags, so a toolset tagged only cluster loads in the server
+    # and is invisible from `holmes ask`, which is how this one is used.
+    tags:
+      - core
+    prerequisites:
+      - command: "kubectl-nv version"
+    llm_instructions: |
+      Start at kubectl_nv_health. It turns "the GPUs are broken" into a
+      finding code, a node and a component. Then call kubectl_nv_explain for
+      the code of the highest severity finding, and kubectl_nv_info for the
+      node it names, to confirm what the finding says.
+
+      A complete answer names three things: the node, the component and the
+      code, with the finding's evidence map quoted. Exit code 1 means findings
+      were reported and is an answer, not a failure. Exit code 3 means part of
+      the cluster could not be read, listed under unreachable; a report with
+      no findings and partial set to true is not a clean cluster.
+    tools:
+      - name: kubectl_nv_health
+        description: >-
+          Run every NVIDIA GPU health check over the cluster and report what is
+          wrong, as findings carrying a code, a severity, a node, a component,
+          the evidence and the command to run next. This is the first tool to
+          call for any question about GPUs being broken, missing or unusable.
+        user_description: "check the GPU health of the cluster"
+        command: |
+          kubectl-nv health --fail-on info -o json
+
+      - name: kubectl_nv_health_node
+        description: >-
+          Run the NVIDIA GPU health checks over one node only. Use it after
+          kubectl_nv_health has named a node, or when the question is about a
+          single node from the start.
+        user_description: "check the GPU health of node {{ node }}"
+        parameters:
+          node:
+            description: "The name of the Kubernetes node to check."
+            type: string
+            required: true
+        command: |
+          kubectl-nv health --node {{ node }} --fail-on info -o json
+
+      - name: kubectl_nv_list
+        description: >-
+          List the GPU nodes of the cluster with what they advertise, the
+          driver and CUDA versions they run, whether the device plugin or DRA
+          is serving them, and how many GPUs are already requested. Includes
+          the nodes that carry an NVIDIA label but advertise no GPUs, which is
+          usually where the problem is.
+        user_description: "list the GPU nodes of the cluster"
+        command: |
+          kubectl-nv list --include-hinted -o json
+
+      - name: kubectl_nv_info
+        description: >-
+          Show everything kubectl-nv knows about one node: its GPU labels, what
+          it advertises, its conditions and taints, the GPU Operator pods on it
+          with their images and validator results, and its ResourceSlices. Use
+          it to confirm what a finding says about a node.
+        user_description: "show the GPU details of node {{ node }}"
+        parameters:
+          node:
+            description: "The name of the Kubernetes node to describe."
+            type: string
+            required: true
+        command: |
+          kubectl-nv info {{ node }} -o json
+
+      - name: kubectl_nv_explain
+        description: >-
+          Print the catalog entry for a kubectl-nv finding code: what it means,
+          what the evidence is, which GPU Operator versions it applies to, what
+          to run next and how to reproduce it. Call it for every code a health
+          report carries before drawing a conclusion.
+        user_description: "explain the finding code {{ code }}"
+        parameters:
+          code:
+            description: "A finding code in the form NV-AREA-NNN, for instance NV-NODE-002. Not case sensitive."
+            type: string
+            required: true
+        command: |
+          kubectl-nv explain {{ code }}

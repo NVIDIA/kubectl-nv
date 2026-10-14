@@ -148,7 +148,7 @@ func NewCommand(version string, d Deps) *cobra.Command {
 		}
 	}
 
-	root.AddCommand(newVersionCommand(version))
+	root.AddCommand(newVersionCommand(version, o.Streams))
 
 	admCommand := adm.NewCommand(o, runMustGather)
 	markForMCP(admCommand, "must-gather", "artifacts-dir")
@@ -210,13 +210,17 @@ func markForMCP(parent *cobra.Command, name, hostDirFlag string) {
 
 // newVersionCommand prints the same string as --version, for the users who
 // reach for the subcommand.
-func newVersionCommand(version string) *cobra.Command {
+// The version goes to the options' output stream, which is the process's
+// stdout. cobra's own stream is not it: this function points that at stderr so
+// that usage lands there, and the version printed through it reached stdout as
+// nothing at all.
+func newVersionCommand(version string, streams genericiooptions.IOStreams) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the kubectl-nv version",
 		Args:  cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintf(c.OutOrStdout(), "kubectl-nv version %s\n", version)
+		RunE: func(_ *cobra.Command, _ []string) error {
+			_, err := fmt.Fprintf(streams.Out, "kubectl-nv version %s\n", version)
 			return err
 		},
 	}

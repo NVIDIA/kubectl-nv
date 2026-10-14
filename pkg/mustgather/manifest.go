@@ -66,6 +66,10 @@ type Manifest struct {
 	Collectors []CollectorStatus `json:"collectors" yaml:"collectors"`
 	// Files is every file of the bundle except this one.
 	Files []FileEntry `json:"files" yaml:"files"`
+	// Dropped is every file --redact removed rather than ship unrewritten,
+	// with the reason. A file that silently disappeared is one a reader goes
+	// looking for and blames on a bad upload.
+	Dropped []DroppedFile `json:"dropped,omitempty" yaml:"dropped,omitempty"`
 }
 
 // ManifestFlags is what the user asked of the gather.
@@ -77,6 +81,10 @@ type ManifestFlags struct {
 	Since string `json:"since" yaml:"since"`
 	// NoExec reports whether --no-exec kept the gather out of the driver pods.
 	NoExec bool `json:"noExec" yaml:"noExec"`
+	// Redact reports whether the bundle was redacted. A reader who cannot tell
+	// a redacted bundle from a cluster whose nodes are genuinely called
+	// node-3f91c2a7b4 is a reader who will file the pseudonym as a fact.
+	Redact bool `json:"redacted" yaml:"redacted"`
 }
 
 // CollectorStatus is what one collector did.
@@ -108,6 +116,17 @@ func (g *Gatherer) writeManifest() error {
 	// is about to grow is a digest that will not check out.
 	g.syncLogs()
 
+	// The redaction runs here, after the last byte any collector or log writer
+	// will produce and before the bundle is indexed, so that the checksums are
+	// the redacted files'. A failure is reported and the manifest is still
+	// written: a bundle with no index is worse than one whose redaction the
+	// user has been told went wrong.
+	if g.opts.Redact {
+		if err := g.redactBundle(); err != nil {
+			return err
+		}
+	}
+
 	files, err := g.indexBundle()
 	if err != nil {
 		return err
@@ -122,6 +141,7 @@ func (g *Gatherer) writeManifest() error {
 		Flags: ManifestFlags{
 			Node:   g.opts.Node,
 			NoExec: g.opts.NoExec,
+			Redact: g.opts.Redact,
 		},
 		Collectors: g.results,
 		Files:      files,
@@ -132,6 +152,9 @@ func (g *Gatherer) writeManifest() error {
 	if manifest.Collectors == nil {
 		manifest.Collectors = []CollectorStatus{}
 	}
+	// Last, because every string above may name a node: what was asked for,
+	// which cluster it came from, and what each collector said it did.
+	g.redactManifest(&manifest)
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
