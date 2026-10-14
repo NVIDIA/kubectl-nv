@@ -305,7 +305,16 @@ func applyStandIn(t *testing.T) {
 	t.Cleanup(func() {
 		// --ignore-not-found so that a cleanup after a failed apply is not a
 		// second failure on top of the first.
-		kubectl(t, "delete", "-f", standInManifest, "--ignore-not-found", "--wait=true")
+		//
+		// --cascade=foreground because --wait=true waits for the DaemonSet and
+		// not for its pods: with the default background cascade the delete
+		// returns while two driver pods are still terminating, they still match
+		// the label selector a gather looks for, and the test after this one
+		// finds driver pods on a cluster that is supposed to have none.
+		// Measured on a t4 lane on 2026-10-11, right after the delete returned:
+		// 2 driver pods, then 0 a second later.
+		kubectl(t, "delete", "-f", standInManifest, "--ignore-not-found",
+			"--wait=true", "--cascade=foreground")
 	})
 }
 

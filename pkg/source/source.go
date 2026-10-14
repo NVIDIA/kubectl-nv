@@ -51,6 +51,14 @@ const (
 	// whole GPUs.
 	ResourceGPU corev1.ResourceName = "nvidia.com/gpu"
 
+	// ResourceGPUShared is the extended resource the device plugin advertises
+	// for whole GPUs when sharing is configured with renameByDefault: every
+	// replica moves onto this name and nvidia.com/gpu is not advertised at
+	// all. The name is ResourceGPU plus the plugin's own
+	// DefaultSharedResourceNameSuffix (k8s-device-plugin
+	// api/config/v1/consts.go:26, applied by resources.go:89).
+	ResourceGPUShared corev1.ResourceName = "nvidia.com/gpu.shared"
+
 	// ResourceMIGPrefix is the prefix of the extended resources the device
 	// plugin advertises under the mixed MIG strategy, one per profile:
 	// nvidia.com/mig-1g.10gb, nvidia.com/mig-3g.40gb and so on.
@@ -151,22 +159,29 @@ var ErrNotInstalled = errors.New("the GPU Operator is not installed: the cluster
 // A node is a GPU node when the scheduler can actually place GPU work on it:
 //
 //  1. its capacity advertises nvidia.com/gpu greater than zero, or
-//  2. its capacity advertises any nvidia.com/mig-<profile> greater than zero,
+//  2. its capacity advertises nvidia.com/gpu.shared greater than zero, or
+//  3. its capacity advertises any nvidia.com/mig-<profile> greater than zero,
 //     or
-//  3. a ResourceSlice for driver gpu.nvidia.com names it.
+//  4. a ResourceSlice for driver gpu.nvidia.com names it.
 //
-// Rule 2 is the mixed MIG strategy, and it is not a special case of rule 1: a
+// Rule 3 is the mixed MIG strategy, and it is not a special case of rule 1: a
 // node running MIG in the mixed strategy advertises one extended resource per
-// profile and no nvidia.com/gpu at all. Under rules 1 and 3 alone every such
+// profile and no nvidia.com/gpu at all. Under rules 1 and 4 alone every such
 // node classified as hinted, which put exactly the nodes a MIG rule is about
 // outside the inventory those rules read. A MIG slice is GPU capacity, so it
 // is membership; the single strategy keeps advertising nvidia.com/gpu and is
 // already covered by rule 1.
 //
-// Zero is not membership under rule 2 any more than under rule 1. A node whose
-// mig-manager is reconfiguring advertises its profiles at zero for a while,
-// and calling that a GPU node would report a node with no placeable GPUs as a
-// healthy one.
+// Rule 2 is the same shape again, for sharing rather than for MIG. With
+// renameByDefault set, the device plugin advertises every replica under
+// nvidia.com/gpu.shared and nvidia.com/gpu not at all, so a working, busy,
+// time sliced node also classified as hinted. A shared replica is placeable
+// GPU capacity, which is what membership means here.
+//
+// Zero is not membership under rules 2 and 3 any more than under rule 1. A
+// node whose mig-manager is reconfiguring advertises its profiles at zero for
+// a while, and calling that a GPU node would report a node with no placeable
+// GPUs as a healthy one.
 //
 // feature.node.kubernetes.io/pci-10de.present and nvidia.com/gpu.present are
 // hints. Both say that something NVIDIA-shaped was observed on the node; both
@@ -186,8 +201,14 @@ var ErrNotInstalled = errors.New("the GPU Operator is not installed: the cluster
 // GPUs or for MIG profiles. The slice rule needs the slice set and is applied
 // by classifyNodes.
 func isGPUNode(node *corev1.Node) bool {
-	if q, ok := node.Status.Capacity[ResourceGPU]; ok && q.Sign() > 0 {
-		return true
+	// The two whole-GPU names are matched exactly, not by prefix: a prefix of
+	// "nvidia.com/gpu" also matches nvidia.com/gpu.shared.extra and anything
+	// else a future configuration invents, and claiming a resource is a GPU
+	// because its name starts the same way is a guess.
+	for _, name := range []corev1.ResourceName{ResourceGPU, ResourceGPUShared} {
+		if q, ok := node.Status.Capacity[name]; ok && q.Sign() > 0 {
+			return true
+		}
 	}
 
 	for name, q := range node.Status.Capacity {

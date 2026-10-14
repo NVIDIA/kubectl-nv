@@ -86,6 +86,23 @@ var leafFixtures = map[string]leafFixture{
 		// what "make schema" does and the most this leaf ever touches.
 		args: func(t *testing.T) []string { return []string{"--write-dir", t.TempDir()} },
 	},
+	"list": {
+		args: func(*testing.T) []string { return nil },
+	},
+	"info": {
+		// The fixture cluster's one node carries a hint label and no GPU
+		// capacity, so info reaches the whole read path and reports it as a
+		// hinted node rather than refusing.
+		args: func(*testing.T) []string { return []string{"gpu-node-1"} },
+	},
+	"debug": {
+		// The same hinted node, and a directory of its own: debug runs the
+		// whole gather after the inventory read, so this leaf walks both the
+		// read path and every collector.
+		args: func(t *testing.T) []string {
+			return []string{"gpu-node-1", "--artifacts-dir", t.TempDir()}
+		},
+	},
 }
 
 // readOptional lists the leaves that have no business talking to a cluster.
@@ -298,7 +315,9 @@ func TestEveryExecCapableLeafIsAnnotated(t *testing.T) {
 		}
 	}
 
-	want := []string{"adm must-gather"}
+	// debug runs the same gather as adm must-gather, narrowed to one node, so
+	// it reaches the same pods/exec and has to be gated the same way.
+	want := []string{"adm must-gather", "debug"}
 	if !reflect.DeepEqual(annotated, want) {
 		t.Errorf("the exec capable leaves are %v, want %v", annotated, want)
 	}

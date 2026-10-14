@@ -1,0 +1,44 @@
+# must-gather records the operator namespace and nothing else, so every pod
+# here is in gpu-operator and the bundle cannot answer for the rest of the
+# cluster.
+apiVersion: v1
+kind: List
+metadata:
+  resourceVersion: ""
+items:
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: gpu-operator-5d9f8-abcde
+    namespace: gpu-operator
+    labels:
+      app: gpu-operator
+  spec:
+    nodeName: worker-t4
+    containers:
+    - name: gpu-operator
+      image: nvcr.io/nvidia/gpu-operator:v26.3.3
+  status:
+    phase: Running
+    containerStatuses:
+    - name: gpu-operator
+      ready: true
+      restartCount: 0
+- apiVersion: v1
+  kind: Pod
+  metadata:
+    name: nvidia-device-plugin-daemonset-xyz12
+    namespace: gpu-operator
+    labels:
+      app: nvidia-device-plugin-daemonset
+  spec:
+    nodeName: worker-t4
+    containers:
+    - name: nvidia-device-plugin-ctr
+      image: nvcr.io/nvidia/k8s-device-plugin:v0.19.3
+  status:
+    phase: Running
+    containerStatuses:
+    - name: nvidia-device-plugin-ctr
+      ready: true
+      restartCount: 0

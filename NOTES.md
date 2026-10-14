@@ -79,6 +79,47 @@ and 777 deletions outside `vendor/`. The acceptance run on 06e6adf7 (2026-10-13)
 test -race ./cmd/... ./pkg/...`, golangci-lint (0 issues), `make mdlint`, `make check-vendor` and `make e2e-mokka` (4
 top-level tests, the e2e suite in 133.4 s).
 
+## M3: inventory, list, info, debug (2026-10-12)
+
+Track D builds every read-only view from one pass over the cluster, `inventory.Build` (`pkg/inventory/build.go:64`),
+into the GPU node model and finding types D0 pinned in the contracts PR (4cd4a109). GPU-node membership
+(`pkg/source/source.go:203`) is now capacity above zero in `nvidia.com/gpu`, in any `nvidia.com/mig-<profile>` (the
+mixed strategy advertises no `nvidia.com/gpu`) or, new here, in `nvidia.com/gpu.shared` (time-slicing with
+`renameByDefault` advertises only that name), or a `gpu.nvidia.com` ResourceSlice; labels alone still make only a
+hinted node. `list` prints the GPU nodes and counts on stderr the hinted nodes it left out
+(`pkg/cmd/list/list.go:116`), which `--include-hinted` brings in. Requested GPUs sum every bound pod except Succeeded
+and Failed ones (`pkg/inventory/requested.go:44`), following `k8s.io/component-helpers`' PodRequests for init
+containers and native sidecars (`:96`), and a DRA driver pod, under any of its four label forms, is an operand in any
+namespace (`pkg/inventory/operands.go:153`). Each command costs one paginated list per resource and no per-node read:
+on a counting fake with 1,200 nodes and 50 pods, `list` made 3 reads (nodes, pods, resourceslices), `list --no-pods` 2
+and `info <node>` 3, pinned by `TestOneReadPerCollection` (`pkg/cmd/list/reads_test.go:107`). The ResourceSlice list
+is memoised per `source.Live` (`pkg/source/live.go:196`), so classification and mode share one read, and the client
+rate limit is QPS 50, Burst 100 when the kubeconfig sets none (`pkg/cmd/factory.go:151`), against client-go's defaults
+of 5 and 10. `info <node>` exits 3, not 2, for a node missing from a partly denied read (`pkg/cmd/info/info.go:108`),
+a wrong command line exits 2 whoever runs the command (`pkg/cmd/factory.go:114`), and every key and value of the
+described view goes through `output.SanitizeCell` (`pkg/output/sanitize.go:38`), tested against a bundle carrying ESC,
+OSC, C1 and CR bytes. With `--from-bundle`, `list` and `info` replay a must-gather bundle; its pod list covers the
+operator namespace only, so the replay exits 3 with `requestedKnown: false` (`test/e2e/list_test.go:310`). `debug
+<node>` (D2) reads the node first, so an unknown or GPU-less node exits 2 with no bundle written
+(`pkg/cmd/debug/debug.go:128`), then runs must-gather narrowed to that node with the flags
+`pkg/mustgather/flags.go:48` registers, and prints a `DebugReport` or a summary held to 30 lines by construction
+(`pkg/cmd/debug/summary.go:49`), its collector counts read back from the bundle's `manifest.json`; over MCP it is
+served with exec forced off and its directory pinned (`pkg/cmd/debug/debug.go:89`). `docs/labels.md` records every
+node label and resource kubectl-nv reads, including Topograph v1.0.0's keys and that releases up to 0.5.0 wrote
+`network.topology.nvidia.com/*`, which kubectl-nv does not read. Mutation runs killed 35 mutants for D1 and 36 for D2;
+two of D2's first survived because the exit code alone could not tell which error came back, and those tests now
+assert the error. D1's verbose `make e2e-mokka` on the t4 lane ran ten tests, all passing, among them `list
+--from-bundle` against C1's rewritten gather. D2's live run showed `debug <worker>` gathering one bug report, for that
+worker only, with `flags.node` in the manifest, the node equal to `info`'s, and `--no-exec` at exit 0; its full-suite
+run also found that C1's exec test cleaned up while the driver stand-in's pods were still terminating, so a later
+`TestMustGatherAgainstTheLane` found a driver pod; the stand-in's delete now waits for its pods with
+`--cascade=foreground` (`test/e2e/mustgather_exec_test.go:317`). The milestone is 49 commits on e92df424, not counting
+its NOTES.md records: 54 files, 12404 insertions and 26 deletions outside `vendor/`. The acceptance run on 2d91248e
+(2026-10-13) passed the same gates and `make e2e-mokka` (13 top-level tests, 47.3 s). The gb300 leg of the e2e-mokka
+workflow then failed the list and info tests, which expected the t4 profile's device name on every lane; they now take
+it from `MOKKA_PROFILE` (`test/e2e/list_test.go:41`), and with that and the stand-in fix (184bd8f8) golangci-lint (0
+issues) and the suite passed on t4 (13 tests, 25.3 s) and on gb300 (13 tests, 38.6 s).
+
 ## Facts observed
 
 - Toolchain on the build Mac: go 1.27.2, golangci-lint 2.14.0 (0 issues), goreleaser 2.18.3, kind v0.33.0,

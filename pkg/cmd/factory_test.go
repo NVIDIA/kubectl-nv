@@ -160,3 +160,87 @@ func isolateKubeconfig(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("KUBECONFIG", filepath.Join(home, "no-kubeconfig-here"))
 }
+
+// newFactoryForTest builds a Factory against a server nothing listens on, so
+// that the configuration can be inspected without a cluster.
+//
+// It does not run in parallel with the tests that use it: isolateKubeconfig
+// calls t.Setenv, which testing refuses alongside t.Parallel.
+func newFactoryForTest(t *testing.T) Factory {
+	t.Helper()
+
+	isolateKubeconfig(t)
+
+	server := "https://127.0.0.1:1"
+	token := "not-a-real-token"
+	flags := genericclioptions.NewConfigFlags(false)
+	flags.APIServer = &server
+	flags.BearerToken = &token
+
+	return NewFactory(flags)
+}
+
+// restConfigFromFactory returns the REST configuration the commands get.
+func restConfigFromFactory(t *testing.T) *rest.Config {
+	t.Helper()
+
+	config, err := newFactoryForTest(t).RESTConfig()
+	if err != nil {
+		t.Fatalf("RESTConfig: %v", err)
+	}
+
+	return config
+}
+
+// TestRESTConfigRaisesTheClientRateLimit pins that kubectl-nv does not run at
+// client-go's default 5 queries per second.
+//
+// The default is for a controller that watches: it makes a handful of calls
+// and then streams. This is a diagnostic tool that lists whole collections,
+// paginated at 500, and must-gather then reads logs per container per pod. At
+// 5 QPS a cluster large enough to need the tool spends most of a run asleep in
+// the client's own throttle, and the symptom a user reports is "kubectl-nv is
+// slow", which is indistinguishable from a slow cluster.
+func TestRESTConfigRaisesTheClientRateLimit(t *testing.T) {
+	config := restConfigFromFactory(t)
+
+	if config.QPS <= rest.DefaultQPS {
+		t.Errorf("QPS = %v, want more than client-go's default of %v", config.QPS, rest.DefaultQPS)
+	}
+
+	if config.Burst <= rest.DefaultBurst {
+		t.Errorf("Burst = %d, want more than client-go's default of %d", config.Burst, rest.DefaultBurst)
+	}
+
+	// The exact values are the contract, not just "more than the default": a
+	// change to them is a change to how hard this tool leans on an API server
+	// that is, by the time anyone runs it, probably already unhappy.
+	if config.QPS != 50 {
+		t.Errorf("QPS = %v, want 50", config.QPS)
+	}
+
+	if config.Burst != 100 {
+		t.Errorf("Burst = %d, want 100", config.Burst)
+	}
+}
+
+// TestRESTConfigIsBuiltOnce pins that the raised limits are shared rather than
+// re-derived: two clients built from one factory have to throttle against the
+// same bucket, or the tool's real rate is a multiple of what it configured.
+func TestRESTConfigIsBuiltOnce(t *testing.T) {
+	f := newFactoryForTest(t)
+
+	first, err := f.RESTConfig()
+	if err != nil {
+		t.Fatalf("RESTConfig: %v", err)
+	}
+
+	second, err := f.RESTConfig()
+	if err != nil {
+		t.Fatalf("RESTConfig: %v", err)
+	}
+
+	if first != second {
+		t.Error("RESTConfig returned two configurations, want one shared rate limiter")
+	}
+}

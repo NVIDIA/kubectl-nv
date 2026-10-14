@@ -1,0 +1,9 @@
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  driver:
+    enabled: true
+status:
+  state: ready

@@ -18,10 +18,11 @@
 // every read-only command shares, built from node labels, node status and the
 // GPU operator's pods.
 //
-// The model is the contract between the command that fills it (gpu list and
-// gpu info) and the commands that read it (gpu health, gpu topology). It is
-// deliberately flat and free of spec and status halves: nothing here is ever
-// applied to a cluster, so the split would carry no meaning.
+// The model is the contract between the commands that fill it (kubectl nv
+// list and kubectl nv info) and the commands that read it (kubectl nv health,
+// kubectl nv topology). It is deliberately flat and free of spec and status
+// halves: nothing here is ever applied to a cluster, so the split would carry
+// no meaning.
 //
 // Build every value through NewGPUNode and NewGPUNodeList. That is not a
 // convenience: the cli-runtime printers behind -o json, -o yaml and -o name
@@ -290,10 +291,10 @@ type GPUNode struct {
 	// Taints are the node's taints, which is how a GPU node that nothing can
 	// land on explains itself.
 	Taints []corev1.Taint `json:"taints" yaml:"taints"`
-	// Conditions are the node conditions. gpu info and gpu health both fill
-	// them, the latter because NV-NODE-005 reads them; gpu list leaves them
-	// empty, because a list of nodes with every condition on each one is not a
-	// list anyone reads.
+	// Conditions are the node conditions. kubectl nv info and kubectl nv
+	// health both fill them, the latter because NV-NODE-005 reads them;
+	// kubectl nv list leaves them empty, because a list of nodes with every
+	// condition on each one is not a list anyone reads.
 	Conditions []corev1.NodeCondition `json:"conditions" yaml:"conditions"`
 
 	// Operands are the GPU Operator's pods running on the node, plus the
@@ -304,7 +305,7 @@ type GPUNode struct {
 	// Operator pod is healthy.
 	Operands []OperandPod `json:"operands" yaml:"operands"`
 	// ResourceSlices are the names of the gpu.nvidia.com ResourceSlices
-	// published for the node. gpu info fills them.
+	// published for the node. kubectl nv info fills them.
 	ResourceSlices []string `json:"resourceSlices" yaml:"resourceSlices"`
 
 	// Hinted is set when the node is not a GPU node but carries a hint label,

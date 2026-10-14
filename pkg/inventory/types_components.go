@@ -74,10 +74,23 @@ const (
 	// what publishes a node's gpu.nvidia.com ResourceSlices. A node whose
 	// kubelet plugin is not running advertises nothing under DRA however
 	// healthy every GPU Operator pod on it looks.
-	ComponentDRADriver = "nvidia-dra-driver-gpu-kubelet-plugin"
+	//
+	// The value is the verbatim "app" label the GPU Operator gives the pod
+	// (manifests/state-dra-driver/0500_daemonset.yaml at gpu-operator
+	// 9eddbaa42). The standalone charts label the same pod by component
+	// instead and carry no "app" key at all; pkg/inventory maps those onto
+	// this one value so that a rule matching on the component does not have to
+	// know which chart installed the driver.
+	ComponentDRADriver = "nvidia-dra-driver-kubelet-plugin"
 	// ComponentIMEXDaemon is the DRA driver's IMEX daemon, which a
 	// ComputeDomain is served by.
-	ComponentIMEXDaemon = "nvidia-dra-driver-gpu-imex-daemon"
+	//
+	// This one is not an "app" label value, because that pod has none: the
+	// upstream template labels it only with resource.nvidia.com/computeDomain
+	// (templates/compute-domain-daemon.tmpl.yaml at nvidia-dra-driver-gpu
+	// fb8b96747). The value here is the upstream template's own name for the
+	// workload, which is what a reader would look for in the namespace.
+	ComponentIMEXDaemon = "compute-domain-daemon"
 )
 
 // DeployLabelPrefix is the prefix of the per-operand gating labels the GPU
@@ -116,6 +129,7 @@ var componentForDeployKey = map[string]string{
 	"operator-validator":    ComponentOperatorValidator,
 	"mig-manager":           ComponentMIGManager,
 	"node-status-exporter":  ComponentNodeStatusExporter,
+	"dra-driver":            ComponentDRADriver,
 }
 
 // Components returns the operand components this package names, as a fresh

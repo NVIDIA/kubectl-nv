@@ -41,8 +41,12 @@ func TestComponentConstants(t *testing.T) {
 		"ComponentMIGManager":         {ComponentMIGManager, "nvidia-mig-manager"},
 		"ComponentNodeStatusExporter": {ComponentNodeStatusExporter, "nvidia-node-status-exporter"},
 		"ComponentOperator":           {ComponentOperator, "gpu-operator"},
-		"ComponentDRADriver":          {ComponentDRADriver, "nvidia-dra-driver-gpu-kubelet-plugin"},
-		"ComponentIMEXDaemon":         {ComponentIMEXDaemon, "nvidia-dra-driver-gpu-imex-daemon"},
+		// The operator's verbatim "app" label value; the standalone charts
+		// label the same pod by component and are mapped onto this.
+		"ComponentDRADriver": {ComponentDRADriver, "nvidia-dra-driver-kubelet-plugin"},
+		// Not an "app" value: that pod has none, so this is the upstream
+		// template's own name for the workload.
+		"ComponentIMEXDaemon": {ComponentIMEXDaemon, "compute-domain-daemon"},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %q, want %q", name, pair[0], pair[1])
