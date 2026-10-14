@@ -46,12 +46,17 @@ The kinds are `GPUNodeList` (`list`), `GPUNode` (`info`), `DebugReport`
 
 Two flags bound what is printed. `--fields` keeps only the dotted JSON paths
 it is given, for instance `--fields status.ready`; `apiVersion`, `kind` and
-`metadata.name` are always kept. `--limit N` prints at most N items, after
-sorting; 0 prints every item.
+`metadata.name` are always kept, and a table keeps a column only when every
+path it renders was asked for. `--limit N` keeps the first N items of a list or
+of a report's repeated part, after sorting, and says how many it left out, on
+standard error and as a remaining count in the output
+([agents.md](agents.md#bounded-output) says where each kind keeps it); 0
+prints every item. On `info` and `debug`, which print one object, `--limit` is
+exit 2.
 
-`list`, `info`, `debug`, `health` and `topology` print to standard output, and
-progress and errors go to standard error. On this release `explain`,
-`version` and `mcp --list-tools` print to standard error as well.
+Data goes to standard output, from the reports to the `explain` entry, the
+`schema` JSON, `version` and `mcp --list-tools`; progress and errors go to
+standard error.
 
 ## Exit codes
 
@@ -138,6 +143,7 @@ no GPUs, exits 2 before anything is collected.
 | `--no-exec` | never exec into a driver pod: no bug report and no GPU device usage |
 | `--exec-timeout` | how long one command inside a driver pod, or one copy out of it, may take (default 2m) |
 | `--since` | only collect container logs newer than this, for instance `2h` or `30m` |
+| `--redact` | rewrite node names, hostnames, addresses and credential values out of the bundle before it is indexed; [must-gather.md](must-gather.md#redaction) says what is and is not rewritten |
 | `-o`, `--fields`, `--limit` | see [Output](#output) |
 
 ```console
@@ -235,8 +241,10 @@ Collects the information from the cluster that NVIDIA support is most likely
 to need, in the order the GPU Operator's own `hack/must-gather.sh` collects it,
 into a directory that ends with a `manifest.json` recording what was collected,
 what failed and a sha256 of every file. One collector failing does not stop the
-others; the run then exits 3. [must-gather.md](must-gather.md) describes the
-bundle file by file.
+others; the run then exits 3. The bundle also holds every pod that requests
+GPUs, in every namespace, without its env, args, command, annotations or
+volumes, so `list --from-bundle` can count requested GPUs.
+[must-gather.md](must-gather.md) describes the bundle file by file.
 
 | Flag | Meaning |
 |---|---|
@@ -245,11 +253,13 @@ bundle file by file.
 | `--since` | only collect container logs newer than this, for instance `2h` or `30m` |
 | `--no-exec` | never exec into a driver pod: no bug report and no GPU device usage |
 | `--exec-timeout` | how long one command inside a driver pod, or one copy out of it, may take (default 2m) |
+| `--redact` | rewrite node names, hostnames, addresses and credential values out of the bundle before it is indexed; [must-gather.md](must-gather.md#redaction) says what is and is not rewritten |
 
 ```console
 kubectl nv adm must-gather --artifacts-dir /tmp/support
 kubectl nv adm must-gather --node gpu-worker-1 --since 2h
 kubectl nv adm must-gather --no-exec
+kubectl nv adm must-gather --redact --artifacts-dir /tmp/support-redacted
 ```
 
 ### kubectl nv schema
@@ -258,11 +268,17 @@ kubectl nv adm must-gather --no-exec
 kubectl nv schema [KIND|COMMAND] [flags]
 ```
 
-Prints the JSON Schema of one output kind, named by the kind or by the command
-that prints it, and `--write-dir DIR` writes one `<kind>.json` per registered
-kind. The kinds register their schemas with the contract wiring that follows
-this release; until then the registry is empty and the command says
-`no kinds are registered yet`.
+Prints the JSON Schema of one output kind, named by the kind (`GPUNodeList`,
+`GPUNode`, `DebugReport`, `HealthReport`, `TopologyReport`, `BundleManifest`)
+or by the command that prints it (`list`, `info`, `debug`, `health`,
+`topology`, `adm must-gather`). `explain` prints Markdown and has no schema,
+which the command says with exit 2. `--write-dir DIR` writes one `<kind>.json`
+per kind; the same files are committed under [schema](schema/).
+
+```console
+kubectl nv schema health
+kubectl nv schema GPUNode
+```
 
 ### kubectl nv mcp
 
