@@ -200,6 +200,7 @@ case "${args}" in
         case "${args}" in
             *nvidia-device-plugin-daemonset*) key=DEVICE_PLUGIN ;;
             *gpu-feature-discovery*) key=GFD ;;
+            *nvidia-dcgm-exporter*) key=DCGM_EXPORTER ;;
             *)
                 echo 'Error from server (NotFound): daemonsets.apps not found' >&2
                 exit 1
@@ -699,21 +700,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# ClusterPolicy is recorded, never gated on
+# The ClusterPolicy is a gate
 # ---------------------------------------------------------------------------
+#
+# It was a record until 2026-10-11, when the healthy gate that runs straight
+# after this script started failing on lanes whose operator had not finished
+# agreeing with itself: kubectl nv health reports a policy that is not ready as
+# NV-OP-001 at error.
 
+expect_timeout
 export FAKE_CLUSTERPOLICY_STATE="notReady"
 run_subject "${UP}" mokka t4
-assert_rc 0 "a ClusterPolicy that is not ready does not fail the run"
-assert_says "ClusterPolicy state: notReady" "the notReady ClusterPolicy state is still printed"
+assert_rc 5 "a ClusterPolicy that never reaches ready fails the run"
+assert_says "the ClusterPolicy did not reach ready" "the failure says which wait ran out"
+assert_says "notReady" "the failure names the state it was left in"
 unset FAKE_CLUSTERPOLICY_STATE
+expect_converge
 
-# An absent ClusterPolicy CRD makes the query fail; that is not a lane failure.
+# An absent ClusterPolicy CRD makes the query fail. That is not a lane failure:
+# a cluster without the GPU Operator is not a cluster this gate has anything to
+# say about, and reading an unreadable policy as "not ready" would fail every
+# such lane.
 export FAKE_CLUSTERPOLICY_STATE=""
 run_subject "${UP}" mokka t4
 assert_rc 0 "an unavailable ClusterPolicy does not fail the run"
 assert_says "ClusterPolicy state: <unavailable>" "an unavailable ClusterPolicy is reported as such"
 unset FAKE_CLUSTERPOLICY_STATE
+
+# The exporter is one of the DaemonSets the lane waits for, because its
+# readiness probe has a 45 second initial delay and the healthy gate reads the
+# lane as soon as this script returns.
+run_subject "${UP}" mokka t4
+assert_rc 0 "up.sh succeeds when every DaemonSet answers"
+assert_logged "get daemonset nvidia-dcgm-exporter" "up.sh waits for the exporter DaemonSet too"
 
 # ---------------------------------------------------------------------------
 # A failing tool is exit 1, and only a created cluster is reported as partial
@@ -969,6 +988,55 @@ else
         "before: ${SENTINEL_BEFORE}" "after:  $(sentinel_hash)"
 fi
 unset FAKE_KIND_CLUSTERS
+
+# ---------------------------------------------------------------------------
+# The kind topology
+# ---------------------------------------------------------------------------
+#
+# The scale lane needs a wider pod subnet than kind's default, which is a
+# topology change and so a different config file, not a flag. Everything else
+# keeps the file it has always used.
+
+reset_fixtures
+run_subject "${UP}" t1 t4
+assert_logged "--config ${SCRIPT_DIR}/kind-mokka.yaml" "up.sh defaults to kind-mokka.yaml"
+
+reset_fixtures
+MOKKA_KIND_CONFIG="kind-scale.yaml" run_subject "${UP}" t1 t4
+assert_logged "--config ${SCRIPT_DIR}/kind-scale.yaml" "a bare name resolves next to the script"
+assert_not_logged "--config ${SCRIPT_DIR}/kind-mokka.yaml" "the override replaces the default rather than adding to it"
+
+reset_fixtures
+printf 'kind: Cluster\n' > "${WORK}/elsewhere.yaml"
+MOKKA_KIND_CONFIG="${WORK}/elsewhere.yaml" run_subject "${UP}" t1 t4
+assert_logged "--config ${WORK}/elsewhere.yaml" "a path is taken as given"
+
+# A misspelled override must not fall back to the default: the lane that came
+# up would be the wrong topology, and nothing downstream would say so.
+reset_fixtures
+MOKKA_KIND_CONFIG="${WORK}/there-is-no-such-file.yaml" run_subject "${UP}" t1 t4
+assert_rc 2 "a kind config that does not exist"
+assert_says "kind config not found" "the missing config is named"
+assert_not_logged "create cluster" "a missing kind config creates nothing"
+
+# The file the scale lane actually points at has to be there and has to carry
+# the wider subnet, or the override is pointing at a topology nobody checked.
+if [ -f "${SCRIPT_DIR}/kind-scale.yaml" ]; then
+    ok "kind-scale.yaml exists"
+    if grep -q 'podSubnet: "10.240.0.0/12"' "${SCRIPT_DIR}/kind-scale.yaml"; then
+        ok "kind-scale.yaml widens the pod subnet to 10.240.0.0/12"
+    else
+        nope "kind-scale.yaml does not set podSubnet to 10.240.0.0/12" \
+            "$(grep -n 'podSubnet' "${SCRIPT_DIR}/kind-scale.yaml" || echo '  no podSubnet line at all')"
+    fi
+    if grep -q 'role: worker' "${SCRIPT_DIR}/kind-scale.yaml"; then
+        ok "kind-scale.yaml still asks for workers"
+    else
+        nope "kind-scale.yaml has no worker nodes"
+    fi
+else
+    nope "kind-scale.yaml is missing, so MOKKA_KIND_CONFIG has nothing to point at"
+fi
 
 # ---------------------------------------------------------------------------
 # Static analysis of the scripts under test

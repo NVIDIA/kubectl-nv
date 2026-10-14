@@ -114,11 +114,59 @@ worker only, with `flags.node` in the manifest, the node equal to `info`'s, and 
 run also found that C1's exec test cleaned up while the driver stand-in's pods were still terminating, so a later
 `TestMustGatherAgainstTheLane` found a driver pod; the stand-in's delete now waits for its pods with
 `--cascade=foreground` (`test/e2e/mustgather_exec_test.go:317`). The milestone is 49 commits on e92df424, not counting
-its NOTES.md records: 54 files, 12404 insertions and 26 deletions outside `vendor/`. The acceptance run on 2d91248e
-(2026-10-13) passed the same gates and `make e2e-mokka` (13 top-level tests, 47.3 s). The gb300 leg of the e2e-mokka
-workflow then failed the list and info tests, which expected the t4 profile's device name on every lane; they now take
-it from `MOKKA_PROFILE` (`test/e2e/list_test.go:41`), and with that and the stand-in fix (184bd8f8) golangci-lint (0
-issues) and the suite passed on t4 (13 tests, 25.3 s) and on gb300 (13 tests, 38.6 s).
+its NOTES.md records: 54 files, 12404 insertions and 26 deletions outside `vendor/`. The acceptance run on this
+milestone before those two fixes (2026-10-13) passed the same gates and `make e2e-mokka` (13 top-level tests, 47.3 s).
+The gb300 leg of the e2e-mokka workflow then failed the list and info tests, which expected the t4 profile's device
+name on every lane; they now take it from `MOKKA_PROFILE` (`test/e2e/list_test.go:41`), and with that and the stand-in
+fix (184bd8f8) golangci-lint (0 issues) and the suite passed on t4 (13 tests, 25.3 s) and on gb300 (13 tests, 38.6 s).
+
+## M4: health, sixteen findings, explain, faults, MIG and scale lanes (2026-10-12)
+
+Track E adds `kubectl nv health` and `kubectl nv explain`. `health` reads the inventory with the hinted nodes included
+(`pkg/cmd/health/health.go:174`) and runs sixteen rules (`pkg/health/rules/rules.go:84`) into a `HealthReport`: a
+summary of nodes checked and GPU capacity, allocatable and requested, then findings with a stable code, severity,
+node, component, message, evidence and a next command. `--node` keeps the cluster-scoped findings
+(`pkg/health/engine/engine.go:126`), `--fail-on` (default error, `health.go:98`) decides only whether findings make
+the exit code 1, and `--summary` drops the findings from the table but not from `-o json`. A rule runs on a node only
+when the GPU Operator targets it (`pkg/health/rules/target.go:190`): not every deploy label false or paused, and a
+deploy-gated operand already there or some operand not tainted off; that keeps NV-NODE-002 off the hinted control
+plane. E1 wrote the first eight codes (node, operator, device plugin, dcgm-exporter); E2 added NV-DRV-001, NV-CTK-001,
+NV-UPG-001 (stuck past `--upgrade-stuck-after`, default 30m, `pkg/health/rules/nv_upg_001.go:108`), NV-MIG-001,
+NV-CD-001, NV-DRA-001, NV-TOPO-001 and NV-NODE-005, which recognises an NVSentinel condition by its reason being the
+condition type plus `IsNotHealthy`, and moved the driver selectors into `pkg/inventory` so must-gather and the rules
+read one list (`pkg/mustgather/driverpods.go:37`). NV-CD-001, NV-DRA-001, NV-TOPO-001 and NV-NODE-005 default to info,
+and the DRA rules carry no operator version floor because the operator first ships a DRA operand at v26.7.0. The
+operator version is read from its image tag and is unknown for a reference with two colons in its name
+(`health.go:336`), so every rule applies rather than being gated on a non-version. `explain <code>` prints the catalog
+entry embedded from `docs/findings/` and exits 2 on an unknown code; a gate fails on a rule without an entry or an
+entry without a rule (`pkg/health/rules/catalog_test.go:39`, `:49`). E3's faults lane gives every code a
+`hack/mokka/faults/nv-*.sh inject|recover <node>` script that refuses any context but a `kind-kubectl-nv-*` one on a
+loopback server (`hack/mokka/faults/lib.sh:140`). On the t4 lane every code appeared within 1m32s and cleared within
+1m2s, the slowest being NV-CTK-001 appearing (the kubelet's back-off before it calls the init container a crash loop)
+and NV-DCGM-001 clearing. The lane overturned three reproductions read from source: GFD left a hand-written
+`nvidia.com/gpu.count` in place for three minutes, a ClusterPolicy image patch breaks the first node the rolling
+update reaches rather than the one asked for (the scripts now delete the target node's pod), and the operator restores
+`nvidia.com/gpu.present` within 5 s while it runs; a hand-written `GPUXidError` condition, though, survives kubelet
+status updates, so NV-NODE-005 reproduces live. The healthy gate (`test/e2e/health_test.go:317`) wants nothing at
+warning or above and runs after the fault suite; the conductor's re-run on the integration branch (2026-10-12) passed
+`make e2e-faults` with 27 top-level tests, 0 failed, go test 393.3 s, every fault injected, observed and recovered.
+E4's MIG lane builds from k8s-test-infra 4ce11e5a (`hack/mokka/mig/lib.sh:49`), since chart 0.4.0 cannot partition:
+h100, two boards of seven `1g.10gb` per worker, capacity and allocatable 14 on each, GPU Operator 276 s, 349 s to
+ready, and zero findings at any severity over 3 nodes and 28 GPUs (`test/e2e/mig_test.go:86`). As a negative control
+the device plugin ran `--mig-strategy=mixed` on nodes labelled `single`: NV-MIG-001 fired at warning on both workers
+and the gate went red. Switching back left the stale `nvidia.com/mig-1g.10gb` in capacity at 14 with allocatable 0,
+which overrode the source reading: NV-MIG-001 decides on allocatable (`pkg/health/rules/rules.go:270`). D3's scale
+lane (`test/e2e/scale_test.go:60`) is a nightly CI workflow over 2,000 KWOK nodes
+(`.github/workflows/e2e-scale.yaml:45`), KWOK v0.8.0 pinned by sha256 (`hack/mokka/kwok-nodes.sh:76`), with kind's pod
+subnet widened to 10.240.0.0/12 (`hack/mokka/kind-scale.yaml:25`) because the default 10.244.0.0/16 runs out at about
+253 nodes. Its 20-node local smoke measured `list -o json` at a median 333 ms (runs 929, 150, 333) and `health
+--summary -o json` at 231 ms (231, 273, 188), with 40 findings, exactly NV-DP-001 and NV-DCGM-001 on each fake node
+and none on a real one. Mutation runs killed 48 mutants for E1, 64 in E2's review round, 58 fault-script mutants for
+E3 and 19 in E4's review round. The milestone is 64 commits on 00a7fb9b, not counting its NOTES.md record: 143 files,
+30600 insertions and 204 deletions outside `vendor/`. The acceptance run on this milestone (2026-10-13) passed the
+gates M2 lists, `make test-scripts` (seven harnesses; M6 adds the eighth and raises the floor to eight), `make
+e2e-mokka` (16 tests, 53.0 s), `make e2e-faults` (27 tests, 307.7 s) and `make e2e-mig` (`TestMIGLane`, 3.1 s); on top
+of M3's gb300 fix, `make e2e-mokka` passed on t4 (16 tests, 41.4 s) and on gb300 (16 tests, 32.4 s).
 
 ## Facts observed
 

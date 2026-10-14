@@ -1,0 +1,784 @@
+//go:build e2e && faults
+
+/*
+ * Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package e2e
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
+
+// This file breaks the lane on purpose, one finding code at a time, and checks
+// that `kubectl nv health` says the right thing about each break and goes
+// quiet again when it is undone.
+//
+// It carries the "faults" tag on top of "e2e", so `make e2e-mokka` compiles
+// none of it: that lane is the healthy gate and nothing may inject into it.
+// `make e2e-faults` brings up its own lane, kubectl-nv-faults, and runs this.
+//
+// Each case is a pair of calls into hack/mokka/faults, which is where the
+// writing to a cluster lives. Nothing here patches anything itself: the
+// scripts are what a developer runs by hand and what the agent eval harness
+// will reuse, so a reproduction that only existed inside a Go test would be a
+// reproduction nobody could run.
+//
+// The recover half is registered with t.Cleanup before the finding is polled
+// for, so a case that fails its assertion still puts the lane back. A case
+// that left its fault behind would fail the next case and the healthy gate in
+// health_test.go, and the first report would name the wrong code.
+
+// faultsDir is where the injection scripts live, relative to this package.
+const faultsDir = "../../hack/mokka/faults"
+
+// pollInterval is how often the report is asked again while a fault takes
+// hold or clears. Two seconds: a kubelet status update and an operator
+// reconcile are both slower than that, and a tighter loop only costs runs of
+// the binary.
+const pollInterval = 2 * time.Second
+
+// faultAppear and faultClear bound the polls.
+//
+// They are the measured times with a wide margin rather than a round number
+// pulled out of the air. On a t4 lane on 2026-10-11 the slowest finding
+// appeared 11 seconds after its injection and the slowest cleared 58 seconds
+// after its recovery, that last one being an image pull. Two and three minutes
+// leave a loaded CI runner roughly ten times the room it needs, and keep the
+// whole suite inside a job timeout: eight codes each able to burn six minutes
+// twice over is an hour and a half of wall clock for a suite that takes four
+// minutes when it works.
+const (
+	faultAppear = 2 * time.Minute
+	faultClear  = 3 * time.Minute
+)
+
+// scriptTimeout bounds one inject or recover. The slowest of them scales a
+// Deployment down and waits for its pods, which is seconds on a lane and is
+// given minutes here so that a loaded runner is not called a failure.
+const scriptTimeout = 5 * time.Minute
+
+// faultCase is one finding code: how to produce it, and what the report has to
+// say while it is there.
+type faultCase struct {
+	// code is the finding code, and script is the file in faultsDir that
+	// injects and recovers it. They are kept as two fields rather than one
+	// derived from the other so that a rename of either is visible here.
+	code   string
+	script string
+
+	// severity and component are what the finding has to carry. A rule that
+	// started reporting at info what it used to report at error would still
+	// produce a finding with the right code, and a test that only matched the
+	// code would stay green through it.
+	severity  string
+	component string
+
+	// clusterScoped findings carry no node. NV-OP-001 is about the
+	// ClusterPolicy, which is not about any one node.
+	clusterScoped bool
+
+	// evidenceKeys are the keys the finding's evidence has to carry. The
+	// values are not pinned: a pod name and a restart count change between
+	// runs, and a test that pinned them would be a test about this lane rather
+	// than about the rule.
+	evidenceKeys []string
+
+	// exact pins evidence VALUES, given the node's whole-GPU capacity as the
+	// API server reports it. Nil where the case pins none.
+	//
+	// A function and not a map, because the interesting values are derived
+	// from the lane rather than fixed: NV-NODE-004's injected count is one
+	// more than the capacity, whatever the profile puts on a worker.
+	exact func(capacity int64) map[string]string
+
+	// appear and clear bound the polls. They come from the live run recorded
+	// in NOTES.md, with margin: the measured times are a fraction of these,
+	// and the margin is what keeps a loaded CI runner from failing a run that
+	// is merely slow.
+	appear time.Duration
+	clear  time.Duration
+}
+
+// faultCases is the table, in code order.
+//
+// Only the eight codes of this milestone's first rule set are here. The eight
+// that Track E2 adds come with their own entries when those rules land: an
+// entry for a code no rule emits would poll for four minutes and then fail,
+// saying nothing about anything.
+var faultCases = []faultCase{
+	{
+		code:         "NV-CD-001",
+		script:       "nv-cd-001.sh",
+		severity:     "info",
+		component:    "compute-domain-daemon",
+		evidenceKeys: []string{"computeDomain", "nodeStatus", "pod", "ready"},
+		exact: func(int64) map[string]string {
+			// The domain is namespaced, so the evidence names it with its
+			// namespace; the node entry and the IMEX pod are the two halves
+			// of "not serving this node".
+			return map[string]string{
+				"computeDomain": "gpu-operator/nv-faults-compute-domain",
+				"nodeStatus":    "NotReady",
+				"pod":           "nv-faults-imex-daemon",
+				"ready":         "false",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-CTK-001",
+		script:       "nv-ctk-001.sh",
+		severity:     "error",
+		component:    "nvidia-container-toolkit-daemonset",
+		evidenceKeys: []string{"pod", "initContainer", "exitCode", "reason", "lastTerminationAt"},
+		exact: func(int64) map[string]string {
+			// The pod name is pinned because the rule takes the FIRST
+			// validator pod on the node and the lane runs a real one too: a
+			// day when the fixture stops sorting first is a failure here
+			// rather than a pass against the operator's own validator.
+			//
+			// CrashLoopBackOff and not a termination reason: under a restart
+			// policy of Always the init container sits Waiting, and the exit
+			// code of the run that failed is in the last termination, which
+			// is why lastTerminationAt is required above.
+			return map[string]string{
+				"pod":           "nv-faults-ctk-validator",
+				"initContainer": "toolkit-validation",
+				"exitCode":      "1",
+				"reason":        "CrashLoopBackOff",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-DCGM-001",
+		script:       "nv-dcgm-001.sh",
+		severity:     "warning",
+		component:    "nvidia-dcgm-exporter",
+		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter", "operands", "pod", "phase", "ready", "restarts"},
+		exact: func(int64) map[string]string {
+			return map[string]string{"nvidia.com/gpu.deploy.dcgm-exporter": "true", "ready": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-DP-001",
+		script:       "nv-dp-001.sh",
+		severity:     "error",
+		component:    "nvidia-device-plugin-daemonset",
+		evidenceKeys: []string{"nvidia.com/gpu.deploy.device-plugin", "operands", "pod", "phase", "ready", "restarts"},
+		exact: func(int64) map[string]string {
+			// The deploy label still says the operand belongs on the node,
+			// and the pod is not ready. Both halves matter: with the label
+			// false this would be NV-OP-002 instead.
+			return map[string]string{"nvidia.com/gpu.deploy.device-plugin": "true", "ready": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-001",
+		script:       "nv-node-001.sh",
+		severity:     "warning",
+		component:    "node",
+		evidenceKeys: []string{"feature.node.kubernetes.io/pci-10de.present", "operands"},
+		exact: func(int64) map[string]string {
+			// The hint label that fired. The operator's own label is absent,
+			// which is what the finding is about and therefore not something
+			// the evidence can carry.
+			return map[string]string{"feature.node.kubernetes.io/pci-10de.present": "true"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-002",
+		script:       "nv-node-002.sh",
+		severity:     "error",
+		component:    "node",
+		evidenceKeys: []string{"nvidia.com/gpu.present", "capacity", "allocatable", "hinted", "operands"},
+		exact: func(capacity int64) map[string]string {
+			// The node still has its devices and can place none of them,
+			// which is the whole finding: a capacity that fell to zero with
+			// them would be a node that had simply lost its GPUs.
+			return map[string]string{
+				"allocatable":            "0",
+				"capacity":               strconv.FormatInt(capacity, 10),
+				"nvidia.com/gpu.present": "true",
+				"hinted":                 "false",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-003",
+		script:       "nv-node-003.sh",
+		severity:     "warning",
+		component:    "node",
+		evidenceKeys: []string{"capacity", "allocatable", "missing"},
+		exact: func(capacity int64) map[string]string {
+			// One device failed, so exactly one is missing. "some are
+			// missing" would pass with every device gone, which is
+			// NV-NODE-002's finding rather than this one's.
+			return map[string]string{
+				"capacity":    strconv.FormatInt(capacity, 10),
+				"allocatable": strconv.FormatInt(capacity-1, 10),
+				"missing":     "1",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-004",
+		script:       "nv-node-004.sh",
+		severity:     "warning",
+		component:    "node",
+		evidenceKeys: []string{"nvidia.com/gpu.count", "capacity", "expectedCapacity"},
+		exact: func(capacity int64) map[string]string {
+			// The script writes one more than the count it read, and the
+			// count it read is the capacity on a healthy lane.
+			return map[string]string{
+				"nvidia.com/gpu.count": strconv.FormatInt(capacity+1, 10),
+				"capacity":             strconv.FormatInt(capacity, 10),
+				"expectedCapacity":     strconv.FormatInt(capacity+1, 10),
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:          "NV-OP-001",
+		script:        "nv-op-001.sh",
+		severity:      "error",
+		component:     "gpu-operator",
+		clusterScoped: true,
+		evidenceKeys:  []string{"name", "status.state"},
+		exact: func(int64) map[string]string {
+			// The operator's own verdict, in its own words. "not ready" is
+			// not the string it writes, and a test that accepted any
+			// non-ready state would pass against a policy the operator had
+			// never reconciled at all.
+			return map[string]string{"name": "cluster-policy", "status.state": "notReady"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-DRA-001",
+		script:       "nv-dra-001.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"mode", "capacity", "allocatable", "resourceSlices"},
+		exact: func(capacity int64) map[string]string {
+			// Both numbers unchanged: the node advertises the same devices
+			// twice rather than losing any, which is the whole of the
+			// finding and the reason it is only info.
+			return map[string]string{
+				"mode":           "both",
+				"capacity":       strconv.FormatInt(capacity, 10),
+				"allocatable":    strconv.FormatInt(capacity, 10),
+				"resourceSlices": "nv-faults-dra-slice",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-DRV-001",
+		script:       "nv-drv-001.sh",
+		severity:     "error",
+		component:    "nvidia-driver-daemonset",
+		evidenceKeys: []string{"pod", "phase", "ready", "restarts", "operands"},
+		exact: func(int64) map[string]string {
+			// Error and not info: the node is not mid-upgrade, which is the
+			// one thing that lowers this rule. restarts 0 says it is the
+			// not-ready half of the rule rather than the restarting one.
+			return map[string]string{
+				"pod":      "nv-faults-driver-standin",
+				"ready":    "false",
+				"restarts": "0",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-MIG-001",
+		script:       "nv-mig-001.sh",
+		severity:     "error",
+		component:    "nvidia-mig-manager",
+		evidenceKeys: []string{"nvidia.com/mig.capable", "nvidia.com/mig.config", "nvidia.com/mig.config.state"},
+		exact: func(int64) map[string]string {
+			// Error and not the rule's own warning: a config state of failed
+			// is the mig-manager saying it gave up, where pending is a change
+			// still in flight.
+			return map[string]string{
+				"nvidia.com/mig.config":       "all-1g.10gb",
+				"nvidia.com/mig.config.state": "failed",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-NODE-005",
+		script:       "nv-node-005.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"condition", "status", "reason", "message", "since"},
+		exact: func(int64) map[string]string {
+			// The condition half rather than the cordon half. Both are this
+			// code at info on the same node, and the injection produces both;
+			// the condition is the one with something to get wrong, because
+			// the rule recognises it by the reason being the condition's own
+			// type with IsNotHealthy appended. A matcher that ignored the
+			// reason would accept any condition at all.
+			return map[string]string{
+				"condition": "GPUXidError",
+				"status":    "True",
+				"reason":    "GPUXidErrorIsNotHealthy",
+			}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-OP-002",
+		script:       "nv-op-002.sh",
+		severity:     "info",
+		component:    "nvidia-dcgm-exporter",
+		evidenceKeys: []string{"nvidia.com/gpu.deploy.dcgm-exporter"},
+		exact: func(int64) map[string]string {
+			return map[string]string{"nvidia.com/gpu.deploy.dcgm-exporter": "false"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-TOPO-001",
+		script:       "nv-topo-001.sh",
+		severity:     "info",
+		component:    "node",
+		evidenceKeys: []string{"missing"},
+		exact: func(int64) map[string]string {
+			// The tier goes on the OTHER worker, so the node under test is
+			// the one missing it. "present" is deliberately not required: a
+			// node carrying none of the tiers in use has nothing to list, and
+			// an absent key is how that is encoded.
+			return map[string]string{"missing": "fabric.topograph.run/tier-0"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+	{
+		code:         "NV-UPG-001",
+		script:       "nv-upg-001.sh",
+		severity:     "error",
+		component:    "node",
+		evidenceKeys: []string{"nvidia.com/gpu-driver-upgrade-state", "upgradeStuckAfter"},
+		exact: func(int64) map[string]string {
+			// Error and not the rule's own warning: upgrade-failed is the
+			// upgrade controller saying it gave up, where the stuck states
+			// are reported against a window and need an event to date them.
+			return map[string]string{"nvidia.com/gpu-driver-upgrade-state": "upgrade-failed"}
+		},
+		appear: faultAppear,
+		clear:  faultClear,
+	},
+}
+
+// TestFaultsAreReportedAndRecover is the whole file: inject, see the code,
+// recover, see it go.
+//
+// The cases share one lane and are not parallel. Two faults at once would make
+// a failure ambiguous, and two of these scripts write to the same ClusterPolicy
+// field, which the scripts themselves refuse rather than race over.
+func TestFaultsAreReportedAndRecover(t *testing.T) {
+	// The table is checked against the directory before anything is injected.
+	// A case whose script was renamed would otherwise fail inside the subtest
+	// that needs it, after that subtest had already broken the lane, and an
+	// empty table would report a clean run having tested nothing.
+	if len(faultCases) == 0 {
+		t.Fatal("the fault table is empty; this run would assert nothing")
+	}
+	for _, tc := range faultCases {
+		info, err := os.Stat(filepath.Join(faultsDir, tc.script))
+		if err != nil {
+			t.Fatalf("%s names %s, which is not there: %v", tc.code, tc.script, err)
+		}
+		if info.Mode().Perm()&0o111 == 0 {
+			t.Fatalf("%s is not executable (mode %04o)", tc.script, info.Mode().Perm())
+		}
+	}
+
+	// The lane has to have finished starting before "it is clean" means
+	// anything: dcgm-exporter's readiness probe has a 45 second initial delay,
+	// and a report taken inside it carries NV-DCGM-001 for a lane that is
+	// merely young.
+	settleLane(t)
+
+	node := faultNode(t)
+	t.Logf("injecting into %s", node)
+
+	// A dirty lane makes every case below ambiguous: a finding that was
+	// already there is not evidence that the injection produced it.
+	assertLaneIsClean(t, "before any injection")
+
+	for _, tc := range faultCases {
+		t.Run(tc.code, func(t *testing.T) {
+			runFaultCase(t, tc, node)
+		})
+	}
+}
+
+// runFaultCase injects one fault, waits for the finding, recovers and waits for
+// the lane to go quiet.
+func runFaultCase(t *testing.T, tc faultCase, node string) {
+	t.Helper()
+
+	recovered := false
+	// Registered before the injection rather than after it: a script that
+	// failed halfway has still changed the lane, and the recover it needs is
+	// the same one.
+	t.Cleanup(func() {
+		if recovered {
+			return
+		}
+		runFaultScript(t, tc.script, "recover", node)
+	})
+
+	injectedAt := time.Now()
+	runFaultScript(t, tc.script, "inject", node)
+
+	found := waitForFinding(t, tc, node, tc.exactEvidence(t, node), injectedAt)
+	t.Logf("%s appeared %s after inject: %s", tc.code, time.Since(injectedAt).Round(time.Second), found)
+
+	recoveredAt := time.Now()
+	runFaultScript(t, tc.script, "recover", node)
+	recovered = true
+
+	waitForClean(t, tc, recoveredAt)
+	t.Logf("%s cleared %s after recover", tc.code, time.Since(recoveredAt).Round(time.Second))
+}
+
+// waitForFinding polls the report until the case's finding is in it, with the
+// severity, the component and the evidence keys the case names.
+//
+// All four are part of the wait rather than checked after it. A finding's
+// evidence is filled from pods and labels that arrive at different moments, so
+// a check that ran at the instant the code first appeared would be a check on
+// timing; waiting for the whole shape is the same assertion with the race
+// removed.
+func waitForFinding(t *testing.T, tc faultCase, node string, exact map[string]string, since time.Time) finding {
+	t.Helper()
+
+	deadline := time.Now().Add(tc.appear)
+	var last string
+
+	for {
+		report, _ := healthJSON(t, "--fail-on", "info")
+
+		match, why := matchFinding(report, tc, node, exact)
+		if why == "" {
+			return match
+		}
+		last = why
+
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not appear as expected within %s of inject (%s elapsed): %s\nthe report held:\n%s",
+				tc.code, tc.appear, time.Since(since).Round(time.Second), last, formatFindings(report))
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// matchFinding returns the finding the case is about, or the reason there is
+// not one yet. The reason is a sentence rather than a boolean so that a
+// timeout says which half of the expectation was not met.
+func matchFinding(report healthReport, tc faultCase, node string, exact map[string]string) (finding, string) {
+	var candidates []finding
+	for _, f := range report.Findings {
+		if f.Code != tc.code {
+			continue
+		}
+		if tc.clusterScoped {
+			if f.Node != "" {
+				continue
+			}
+		} else if f.Node != node {
+			continue
+		}
+		candidates = append(candidates, f)
+	}
+
+	if len(candidates) == 0 {
+		if tc.clusterScoped {
+			return finding{}, fmt.Sprintf("no %s finding without a node", tc.code)
+		}
+
+		return finding{}, fmt.Sprintf("no %s finding for %s", tc.code, node)
+	}
+
+	// Every candidate, and the reason the last one failed. A rule may emit
+	// more than one finding of a code for a node, and returning on the first
+	// one's first mismatch would report "wrong severity" for a report that
+	// also held the right finding two entries later.
+	var reasons []string
+	for _, f := range candidates {
+		if why := candidateProblem(f, tc, exact); why != "" {
+			reasons = append(reasons, why)
+
+			continue
+		}
+
+		return f, ""
+	}
+
+	return finding{}, strings.Join(reasons, "; ")
+}
+
+// candidateProblem is why one finding is not the one the case is waiting for,
+// or an empty string when it is.
+func candidateProblem(f finding, tc faultCase, exact map[string]string) string {
+	if f.Severity != tc.severity {
+		return fmt.Sprintf("%s is at severity %q, want %q", tc.code, f.Severity, tc.severity)
+	}
+	if f.Component != tc.component {
+		return fmt.Sprintf("%s names component %q, want %q", tc.code, f.Component, tc.component)
+	}
+	if missing := missingKeys(f.Evidence, tc.evidenceKeys); len(missing) > 0 {
+		return fmt.Sprintf("%s is missing evidence %s (it carries %s)",
+			tc.code, strings.Join(missing, ", "), strings.Join(evidenceKeys(f.Evidence), ", "))
+	}
+	// The values, where the case pins them. A finding that carried the right
+	// keys with empty values would satisfy the check above and tell a reader
+	// nothing, and the numbers are the whole substance of several of these
+	// codes: NV-NODE-003 is about the size of the shortfall.
+	for key, want := range exact {
+		if got := f.Evidence[key]; got != want {
+			return fmt.Sprintf("%s evidence %s = %q, want %q", tc.code, key, got, want)
+		}
+	}
+	// Every finding links to its own catalogue entry, which is the one thing a
+	// reader does next and the one field a rule can forget.
+	if want := "docs/findings/" + tc.code + ".md"; f.Docs != want {
+		return fmt.Sprintf("%s links to %q, want %q", tc.code, f.Docs, want)
+	}
+
+	return ""
+}
+
+// waitForClean polls until the case's code is gone from the whole report and
+// nothing at warning or above is left anywhere.
+//
+// "Anywhere" and not "on that node": a recover that put one node back and left
+// the ClusterPolicy patched would pass a per-node check and leave the lane
+// broken for the next case.
+func waitForClean(t *testing.T, tc faultCase, since time.Time) {
+	t.Helper()
+
+	deadline := time.Now().Add(tc.clear)
+	// Two clean reports in a row rather than one. A recover that returns
+	// before the operand it disturbed is back leaves a gap of a few seconds in
+	// which the lane looks clean and then does not, and one clean poll inside
+	// that gap would end the wait with the fault still arriving. The scripts
+	// wait for their own operand as well; this is the second lock on the same
+	// door, and it costs one poll interval per case.
+	const cleanRunsWanted = 2
+	cleanRuns := 0
+
+	for {
+		report, code := healthJSON(t, "--fail-on", "warning")
+
+		var left []string
+		for _, f := range report.Findings {
+			if f.Code == tc.code {
+				left = append(left, f.String())
+			}
+		}
+		remaining := report.atOrAbove(warningRank)
+		for _, f := range remaining {
+			left = append(left, f.String())
+		}
+
+		if len(left) == 0 && code == 0 {
+			cleanRuns++
+			if cleanRuns >= cleanRunsWanted {
+				return
+			}
+		} else {
+			cleanRuns = 0
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("%s left the lane dirty %s after recover (waited %s): exit %d\n  %s",
+				tc.code, time.Since(since).Round(time.Second), tc.clear, code, strings.Join(left, "\n  "))
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+// assertLaneIsClean fails the whole run when the lane is already reporting
+// something at warning or above.
+func assertLaneIsClean(t *testing.T, when string) {
+	t.Helper()
+
+	report, code := healthJSON(t, "--fail-on", "warning")
+	if code == 0 && len(report.atOrAbove(warningRank)) == 0 {
+		return
+	}
+
+	t.Fatalf("the lane is not clean %s (exit %d); every case below would be ambiguous:\n%s",
+		when, code, formatFindings(report))
+}
+
+// runFaultScript runs one injection script against the lane's own kubeconfig.
+//
+// The kubeconfig is passed in the environment because that is the only way the
+// scripts accept one: there is no fallback to $KUBECONFIG and none to the
+// caller's default kubeconfig, which is what stops a script that is handed
+// nothing from writing to whichever cluster the developer was last looking at.
+func runFaultScript(t *testing.T, script, action, node string) {
+	t.Helper()
+
+	path, err := filepath.Abs(filepath.Join(faultsDir, script))
+	if err != nil {
+		t.Fatalf("resolving %s: %v", script, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), scriptTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path, action, node)
+	cmd.Stdin = nil
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.Env = append(os.Environ(), "MOKKA_KUBECONFIG="+kubeconfigPath)
+
+	err = cmd.Run()
+
+	// The scripts' own observation lines are the record of what the lane did
+	// and when, so they are logged whether the script succeeded or not.
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Logf("%s %s %s:\n%s", script, action, node, out)
+	}
+
+	if ctx.Err() != nil {
+		t.Fatalf("%s %s %s did not finish within %s\nstderr:\n%s", script, action, node, scriptTimeout, stderr.String())
+	}
+	if err != nil {
+		t.Fatalf("%s %s %s: %v\nstderr:\n%s", script, action, node, err, stderr.String())
+	}
+}
+
+// exactEvidence is the case's pinned evidence values, resolved against the
+// node's real capacity.
+func (tc faultCase) exactEvidence(t *testing.T, node string) map[string]string {
+	t.Helper()
+
+	if tc.exact == nil {
+		return nil
+	}
+
+	return tc.exact(nodeGPUCapacity(t, node))
+}
+
+// nodeGPUCapacity is the node's whole-GPU capacity as the API server reports
+// it, which is the number the injections are relative to.
+func nodeGPUCapacity(t *testing.T, node string) int64 {
+	t.Helper()
+
+	for _, n := range clusterNodes(t) {
+		if n.Name != node {
+			continue
+		}
+		capacity := n.Status.Capacity[gpuResource]
+
+		return capacity.Value()
+	}
+
+	t.Fatalf("node %s is not in the cluster", node)
+
+	return 0
+}
+
+// faultNode is the worker every case injects into. The first in name order, so
+// that two runs of the suite break the same node and a lane left behind by a
+// failed run is recognisable.
+func faultNode(t *testing.T) string {
+	t.Helper()
+
+	workers := workerNodeNames(t)
+	if len(workers) == 0 {
+		t.Fatal("the lane has no worker nodes to inject into")
+	}
+
+	return workers[0]
+}
+
+// missingKeys returns the wanted keys the evidence does not carry.
+func missingKeys(evidence map[string]string, want []string) []string {
+	var missing []string
+	for _, key := range want {
+		if _, ok := evidence[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+
+	return missing
+}
+
+// evidenceKeys returns the keys of an evidence map, sorted, for a failure
+// message that says what was there instead.
+func evidenceKeys(evidence map[string]string) []string {
+	keys := make([]string, 0, len(evidence))
+	for key := range evidence {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	return keys
+}
+
+// formatFindings renders a whole report for a failure message.
+func formatFindings(report healthReport) string {
+	if len(report.Findings) == 0 {
+		return "  (no findings) " + report.Summary.String()
+	}
+
+	lines := make([]string, 0, len(report.Findings))
+	for _, f := range report.Findings {
+		lines = append(lines, "  "+f.String())
+	}
+
+	return strings.Join(lines, "\n")
+}

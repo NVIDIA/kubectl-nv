@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Checks what the e2e-mokka and e2e targets do around the lane, without a lane.
+# Checks what the e2e-mokka, e2e-faults and e2e targets do around a lane,
+# without a lane.
 #
 # The target has to get four things right that only show up on a bad day: a
 # lane that failed to come up still gets dumped, a lane that was already there
@@ -106,7 +107,7 @@ STUB
 # run_target runs e2e-mokka in a scaffolded tree and leaves its exit code in
 # RUN_RC, the stub call log in RUN_LOG and the tree in RUN_ROOT.
 run_target() {
-    RUN_ROOT="${WORK}/case-$1"
+    RUN_ROOT="${WORK}/${TARGET}-case-$1"
     shift
     scaffold "${RUN_ROOT}"
     RUN_LOG="${RUN_ROOT}/calls.log"
@@ -115,7 +116,7 @@ run_target() {
     env -u STUB_UP_RC -u STUB_TEST_RC -u STUB_DOWN_RC -u STUB_TEST_SIGNAL \
         STUB_LOG="${RUN_LOG}" "$@" \
         PATH="${RUN_ROOT}/stubbin:${PATH}" \
-        make -C "${RUN_ROOT}" --no-print-directory e2e-mokka \
+        make -C "${RUN_ROOT}" --no-print-directory "${TARGET}" \
         > "${RUN_ROOT}/out.log" 2>&1
     RUN_RC=$?
 }
@@ -125,7 +126,7 @@ run_target() {
 # answers for make instead; the code make prints in "*** [e2e-mokka] Error N"
 # is the recipe's.
 recipe_rc() {
-    sed -n 's/.*\[e2e-mokka\] Error \([0-9][0-9]*\).*/\1/p' "${RUN_ROOT}/out.log" | tail -1
+    sed -n "s/.*\[${TARGET}\] Error \([0-9][0-9]*\).*/\1/p" "${RUN_ROOT}/out.log" | tail -1
 }
 
 # exited asserts the target returned the given code: through make's own status
@@ -159,100 +160,141 @@ calls() {
 }
 
 diagnostics_written() {
-    [ -s "${RUN_ROOT}/bin/e2e-diagnostics-mokka/pods.txt" ] &&
-        [ -s "${RUN_ROOT}/bin/e2e-diagnostics-mokka/events.txt" ] &&
-        [ -s "${RUN_ROOT}/bin/e2e-diagnostics-mokka/kind-export.txt" ]
+    [ -s "${RUN_ROOT}/bin/e2e-diagnostics-${LANE}/pods.txt" ] &&
+        [ -s "${RUN_ROOT}/bin/e2e-diagnostics-${LANE}/events.txt" ] &&
+        [ -s "${RUN_ROOT}/bin/e2e-diagnostics-${LANE}/kind-export.txt" ]
 }
 
-# A lane that failed to come up: the reason is in the cluster, so it is dumped
-# before the teardown removes it, and up.sh's code is still what the caller
-# sees.
-for up_rc in 1 5; do
-    run_target "up-${up_rc}" STUB_UP_RC="${up_rc}"
-    name="up.sh exit ${up_rc}"
-    exited "${up_rc}" "${name}"
-    if diagnostics_written; then
-        ok "${name}: diagnostics written"
+# Both lane targets, which are the same recipe twice over: bring a lane up,
+# run a suite against it, tear it down whichever way the suite ended. They are
+# checked together because the shapes that matter are the ones they share, and
+# a case that held for one and not the other is exactly the drift this catches.
+#
+# e2e-faults is the one that leaves state behind on disk, so it also has to
+# drop that state as the lane comes up; the case for it is below the loop.
+for target_lane in "e2e-mokka:mokka" "e2e-faults:faults"; do
+    TARGET="${target_lane%%:*}"
+    LANE="${target_lane##*:}"
+    echo "# ${TARGET}"
+
+    # A lane that failed to come up: the reason is in the cluster, so it is dumped
+    # before the teardown removes it, and up.sh's code is still what the caller
+    # sees.
+    for up_rc in 1 5; do
+        run_target "up-${up_rc}" STUB_UP_RC="${up_rc}"
+        name="up.sh exit ${up_rc}"
+        exited "${up_rc}" "${name}"
+        if diagnostics_written; then
+            ok "${name}: diagnostics written"
+        else
+            nope "${name}: no diagnostics under ${RUN_ROOT}/bin"
+        fi
+        if [ "$(calls stub-down)" -eq 1 ]; then
+            ok "${name}: teardown ran once"
+        else
+            nope "${name}: teardown ran $(calls stub-down) times, want 1"
+        fi
+        if [ "$(calls 'stub-go test')" -eq 0 ]; then
+            ok "${name}: the suite was not run"
+        else
+            nope "${name}: the suite ran against a lane that is not up"
+        fi
+    done
+
+    # A cluster of that name was already there. up.sh says it touched nothing, and
+    # neither may this target: it is somebody else's lane.
+    run_target "up-4" STUB_UP_RC=4
+    exited 4 "up.sh exit 4"
+    if [ "$(calls stub-down)" -eq 0 ]; then
+        ok "up.sh exit 4: no teardown of a lane we did not create"
     else
-        nope "${name}: no diagnostics under ${RUN_ROOT}/bin"
+        nope "up.sh exit 4: teardown ran against a pre-existing lane"
     fi
-    if [ "$(calls stub-down)" -eq 1 ]; then
-        ok "${name}: teardown ran once"
+    if diagnostics_written; then
+        nope "up.sh exit 4: dumped a lane we were told was not touched"
     else
-        nope "${name}: teardown ran $(calls stub-down) times, want 1"
+        ok "up.sh exit 4: nothing dumped"
     fi
     if [ "$(calls 'stub-go test')" -eq 0 ]; then
-        ok "${name}: the suite was not run"
+        ok "up.sh exit 4: the suite was not run"
     else
-        nope "${name}: the suite ran against a lane that is not up"
+        nope "up.sh exit 4: the suite ran against somebody else's lane"
     fi
-done
 
-# A cluster of that name was already there. up.sh says it touched nothing, and
-# neither may this target: it is somebody else's lane.
-run_target "up-4" STUB_UP_RC=4
-exited 4 "up.sh exit 4"
-if [ "$(calls stub-down)" -eq 0 ]; then
-    ok "up.sh exit 4: no teardown of a lane we did not create"
-else
-    nope "up.sh exit 4: teardown ran against a pre-existing lane"
-fi
-if diagnostics_written; then
-    nope "up.sh exit 4: dumped a lane we were told was not touched"
-else
-    ok "up.sh exit 4: nothing dumped"
-fi
-if [ "$(calls 'stub-go test')" -eq 0 ]; then
-    ok "up.sh exit 4: the suite was not run"
-else
-    nope "up.sh exit 4: the suite ran against somebody else's lane"
-fi
-
-# A failing suite over a lane that came up fine.
-run_target "test-3" STUB_TEST_RC=3
-exited 3 "suite exit 3"
-if diagnostics_written; then
-    ok "suite exit 3: diagnostics written"
-else
-    nope "suite exit 3: no diagnostics"
-fi
-if [ "$(calls stub-down)" -eq 1 ]; then
-    ok "suite exit 3: teardown ran once"
-else
-    nope "suite exit 3: teardown ran $(calls stub-down) times, want 1"
-fi
-
-# The passing run: torn down, nothing dumped, exit 0.
-run_target "pass"
-exited 0 "passing suite"
-if [ "$(calls stub-down)" -eq 1 ]; then
-    ok "passing suite: teardown ran once"
-else
-    nope "passing suite: teardown ran $(calls stub-down) times, want 1"
-fi
-if diagnostics_written; then
-    nope "passing suite: dumped diagnostics for a run that passed"
-else
-    ok "passing suite: nothing dumped"
-fi
-
-# A cancelled run. The signal has to leave exactly one teardown behind: a trap
-# on both the signal and EXIT runs the teardown twice, and the second kind
-# delete reports a cluster that is already gone.
-for signal in TERM INT; do
-    case "${signal}" in
-    TERM) want=143 ;;
-    INT) want=130 ;;
-    esac
-    run_target "signal-${signal}" STUB_TEST_SIGNAL="${signal}"
-    name="SIG${signal} during the suite"
+    # A failing suite over a lane that came up fine.
+    run_target "test-3" STUB_TEST_RC=3
+    exited 3 "suite exit 3"
+    if diagnostics_written; then
+        ok "suite exit 3: diagnostics written"
+    else
+        nope "suite exit 3: no diagnostics"
+    fi
     if [ "$(calls stub-down)" -eq 1 ]; then
-        ok "${name}: teardown ran exactly once"
+        ok "suite exit 3: teardown ran once"
     else
-        nope "${name}: teardown ran $(calls stub-down) times, want 1"
+        nope "suite exit 3: teardown ran $(calls stub-down) times, want 1"
     fi
-    exited "${want}" "${name}"
+
+    # The passing run: torn down, nothing dumped, exit 0.
+    run_target "pass"
+    exited 0 "passing suite"
+    if [ "$(calls stub-down)" -eq 1 ]; then
+        ok "passing suite: teardown ran once"
+    else
+        nope "passing suite: teardown ran $(calls stub-down) times, want 1"
+    fi
+    if diagnostics_written; then
+        nope "passing suite: dumped diagnostics for a run that passed"
+    else
+        ok "passing suite: nothing dumped"
+    fi
+
+    # A cancelled run. The signal has to leave exactly one teardown behind: a trap
+    # on both the signal and EXIT runs the teardown twice, and the second kind
+    # delete reports a cluster that is already gone.
+    for signal in TERM INT; do
+        case "${signal}" in
+        TERM) want=143 ;;
+        INT) want=130 ;;
+        esac
+        run_target "signal-${signal}" STUB_TEST_SIGNAL="${signal}"
+        name="SIG${signal} during the suite"
+        if [ "$(calls stub-down)" -eq 1 ]; then
+            ok "${name}: teardown ran exactly once"
+        else
+            nope "${name}: teardown ran $(calls stub-down) times, want 1"
+        fi
+        exited "${want}" "${name}"
+    done
 done
+
+# e2e-faults drops the saved state of a lane of the same name that is gone.
+# The values in it were read off a cluster that no longer exists, and writing
+# an image version or a replica count from one cluster into another is the
+# accident the whole saved-state mechanism exists to avoid.
+TARGET="e2e-faults"
+LANE="faults"
+RUN_ROOT="${WORK}/faults-stale-state"
+scaffold "${RUN_ROOT}"
+RUN_LOG="${RUN_ROOT}/calls.log"
+: > "${RUN_LOG}"
+STALE="${RUN_ROOT}/hack/mokka/bin/faults-state/kubectl-nv-faults/NV-OP-002/worker"
+mkdir -p "${STALE}"
+echo "stale" > "${STALE}/label"
+
+env -u STUB_UP_RC -u STUB_TEST_RC -u STUB_DOWN_RC -u STUB_TEST_SIGNAL \
+    STUB_LOG="${RUN_LOG}" \
+    PATH="${RUN_ROOT}/stubbin:${PATH}" \
+    make -C "${RUN_ROOT}" --no-print-directory e2e-faults \
+    > "${RUN_ROOT}/out.log" 2>&1
+RUN_RC=$?
+
+exited 0 "e2e-faults with stale state"
+if [ -e "${STALE}/label" ]; then
+    nope "e2e-faults: the stale saved state survived the lane coming up"
+else
+    ok "e2e-faults: the stale saved state was dropped before the suite ran"
+fi
 
 # The e2e target refuses a kubeconfig pointing somewhere that is not a lane of
 # ours, because the suite it runs gathers from whatever it is pointed at.

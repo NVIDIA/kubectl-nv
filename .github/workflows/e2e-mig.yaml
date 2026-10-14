@@ -1,0 +1,202 @@
+# Copyright 2026 NVIDIA CORPORATION
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Runs the end to end suite against the MIG lane: a kind cluster whose workers
+# each carry two simulated H100 boards carved into seven 1g.10gb partitions, so
+# each worker advertises fourteen nvidia.com/gpu.
+#
+# Nightly and on demand, not on every pull request, which is where it differs
+# from e2e-mokka. This lane builds the nvml-mock container image from source
+# before it can start: a Go compile, three cgo shim builds and an apt install,
+# around ten minutes on a runner, with nothing cached between runs. Paying that
+# on every push would make the pull request queue slower for a lane whose
+# subject (MIG partitioning) changes rarely. A change to the lane itself can be
+# run on demand with workflow_dispatch.
+#
+# Every action is pinned to a commit, not to a tag: a tag is moved by whoever
+# owns the action, and this job has a checkout and a Docker daemon in reach.
+
+name: e2e MIG
+
+on:
+  schedule:
+    # 04:30 UTC, after the nightly queue has drained and well before the
+    # working day in either of the time zones this is maintained from.
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-mig-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The upstream commit this lane is built from, in full. It is NVIDIA/
+  # k8s-test-infra main at 2026-10-09, chart version 0.5.0-dev.
+  #
+  # Never a branch and never "latest": this job builds and then runs a
+  # container image out of whatever this names. hack/mokka/mig/lib.sh holds the
+  # same SHA and refuses to proceed if the checkout below is at any other
+  # commit, so the two cannot drift silently.
+  #
+  # Why an unreleased commit at all: MIG layouts landed in
+  # NVIDIA/k8s-test-infra#829 on 2026-09-29, after the v0.4.0 tag of
+  # 2026-09-23, and no release carries them. Every other lane stays on 0.4.0.
+  MIG_UPSTREAM_SHA: 4ce11e5ae533416415e223ab43da58435d0df48c
+
+jobs:
+  mig:
+    name: a partitioned lane
+    runs-on: ubuntu-latest
+    # Every wait this job can sit in, added up, has to fit inside this with
+    # room to spare: a job killed by timeout-minutes reports a job timeout
+    # instead of whichever wait actually ran out.
+    #
+    #   image build                                about 12m
+    #   runner setup, kind create, node image pull about  6m
+    #   2 x MOKKA_HELM_TIMEOUT (12m)                     24m
+    #   1 x MOKKA_READY_TIMEOUT (420s)                    7m
+    #   the suite, at its own -timeout                   15m
+    #   teardown and the diagnostics dump          about  3m
+    #                                                   -----
+    #                                                    67m   against 75m
+    #
+    # MOKKA_READY_TIMEOUT is counted ONCE and not twice. up.sh computes a
+    # single deadline before the operand rollout and carries it through the
+    # per-worker assertions, so the two waits share it: a lane that spends the
+    # whole budget rolling out has none left for the assertions and fails
+    # there immediately. Counting it per wait inflated the earlier figure.
+    #
+    # Each line is a ceiling, not an estimate. The first live run of this lane
+    # reached ready in 349s all in, of which the GPU Operator install was 276s.
+    timeout-minutes: 75
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The job runs this repository's own code. It has no reason to hold
+          # a credential that can write to the repository.
+          persist-credentials: false
+
+      # A second checkout, of the repository the chart, the device-plugin
+      # manifest and the container image all come from. It is pinned by the
+      # full SHA above; hack/mokka/mig/lib.sh reads this checkout's HEAD and
+      # refuses anything else, so a hand edit here that names a branch fails
+      # the job rather than quietly building something different.
+      - name: Checkout NVIDIA/k8s-test-infra at the pinned commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: NVIDIA/k8s-test-infra
+          ref: ${{ env.MIG_UPSTREAM_SHA }}
+          path: k8s-test-infra
+          persist-credentials: false
+
+      - name: Confirm the upstream checkout is at the pinned commit
+        working-directory: k8s-test-infra
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          echo "k8s-test-infra HEAD is ${head}"
+          # Stated here as well as inside the lane scripts: this step is what a
+          # reader of a failed run sees first, and it fails before a Docker
+          # daemon is handed a tree nobody checked.
+          test "${head}" = "${MIG_UPSTREAM_SHA}"
+
+      - name: Get Golang version
+        id: go_version
+        run: |
+          GOLANG_VERSION=$(./hack/golang-version.sh)
+          echo "GOLANG_VERSION=${GOLANG_VERSION##GOLANG_VERSION := }" >> "$GITHUB_OUTPUT"
+
+      - name: Install Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: ${{ steps.go_version.outputs.GOLANG_VERSION }}
+
+      - name: Install kind
+        env:
+          # The release the Mokka node image's base, kindest/node:v1.35.0, is
+          # built and tested against.
+          KIND_VERSION: v0.31.0
+          # The digest of that release's linux-amd64 binary, written out here
+          # rather than fetched. A checksum file downloaded next to the binary
+          # it describes is signed by nothing and served by whoever served the
+          # binary, so it cannot witness for it; this line is reviewed, and a
+          # binary that stops matching it stops the job.
+          KIND_SHA256: eb244cbafcc157dff60cf68693c14c9a75c4e6e6fedaf9cd71c58117cb93e3fa
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cd "${workdir}"
+          curl -fsSLo kind \
+            "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          # The binary creates the cluster everything after it trusts, so it is
+          # checked before it is installed, not after.
+          echo "${KIND_SHA256}  kind" | sha256sum -c -
+          sudo install -m 0755 kind /usr/local/bin/kind
+          kind version
+
+      - name: Install helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          # Pinned rather than "latest": the lane scripts are verified against
+          # this release, and a helm that changes under them turns an unrelated
+          # run red.
+          version: v4.3.0
+
+      - name: Report the runner's disk and memory
+        run: |
+          df -h
+          free -m
+
+      # Built in a step of its own, before the lane, so that a build failure is
+      # reported as a build failure and the cluster is never created for a run
+      # that cannot install anything into it. make e2e-mig calls the same
+      # script, which is a no-op once the tag is in the daemon.
+      - name: Build the nvml-mock image from the pinned commit
+        env:
+          MIG_UPSTREAM_DIR: ${{ github.workspace }}/k8s-test-infra
+        run: hack/mokka/mig/build-image.sh
+
+      - name: Run the e2e suite against the MIG lane
+        env:
+          MIG_UPSTREAM_DIR: ${{ github.workspace }}/k8s-test-infra
+          # Both of these are ceilings in the arithmetic above timeout-minutes.
+          MOKKA_HELM_TIMEOUT: 12m
+          # Longer than the whole-GPU lane's 300s: this lane waits for a
+          # privileged DaemonSet that first waits, itself, for the node agent
+          # to finish staging the MIG capability table, which the manifest
+          # gives up on after 180s.
+          MOKKA_READY_TIMEOUT: "420"
+        run: make e2e-mig
+
+      # The lane is deleted by the make target as soon as the suite returns, so
+      # the pod list, the node objects, the device plugin's logs, the events
+      # and the kind logs are collected by that target while the cluster is
+      # still up. This step only ships what it left behind. hack/mokka/bin
+      # holds the lane's kubeconfig and is never uploaded.
+      #
+      # Cancelled as well as failed: a run cancelled by the concurrency group
+      # above, or by the job timeout, is exactly when the dump is worth having,
+      # and failure() alone does not cover either.
+      - name: Upload the diagnostics of a failed lane
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-mig-diagnostics
+          path: bin/e2e-diagnostics-mig/
+          if-no-files-found: warn
+          retention-days: 7

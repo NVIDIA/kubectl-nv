@@ -95,6 +95,23 @@ var leafFixtures = map[string]leafFixture{
 		// hinted node rather than refusing.
 		args: func(*testing.T) []string { return []string{"gpu-node-1"} },
 	},
+	"explain": {
+		args: func(*testing.T) []string { return []string{"NV-NODE-002"} },
+	},
+	"health": {
+		// The fixture cluster's node is hinted and its driver pod reports no
+		// container statuses, so it is not ready: NV-NODE-002 and NV-DRV-001
+		// both fire, and a run with a finding at or above --fail-on exits
+		// non-zero by design.
+		//
+		// The error is asserted rather than avoided, because this leaf has to
+		// run to the end for the guard to prove anything about what it would
+		// have written, and the one thing that must not happen is the command
+		// stopping early. The text is the findings error's own, so a run that
+		// failed for some other reason still fails here.
+		args:    func(*testing.T) []string { return nil },
+		wantErr: "--fail-on is error",
+	},
 	"debug": {
 		// The same hinted node, and a directory of its own: debug runs the
 		// whole gather after the inventory read, so this leaf walks both the
@@ -108,7 +125,16 @@ var leafFixtures = map[string]leafFixture{
 // readOptional lists the leaves that have no business talking to a cluster.
 // Every other leaf has to issue at least one read, or the run proved nothing
 // about what it would have written.
-var readOptional = map[string]bool{"version": true, "schema": true, "mcp": true}
+//
+// explain is one of them: it reads a catalog compiled into the binary, which
+// is the point of it, because a support engineer looking up a finding code has
+// no reason to have a working kubeconfig.
+var readOptional = map[string]bool{
+	"version": true,
+	"schema":  true,
+	"mcp":     true,
+	"explain": true,
+}
 
 // TestEveryCommandIsReadOnly executes every leaf of the command tree against
 // clients that fail the test on any write. The fakes cover the typed and

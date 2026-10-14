@@ -40,3 +40,28 @@ jobs:
 
   golang:
     uses: ./.github/workflows/golang.yaml
+
+  # The shell harnesses: hack/mokka's lane scripts and the fault injections,
+  # and the Makefile target tests beside them. They need no cluster and no
+  # Docker, which is the point of the shims they run against, and until
+  # 2026-10-11 nothing ran them: the scripts that write to live clusters were
+  # the only code in this repository whose tests were developer-run.
+  shell-scripts:
+    name: Shell harnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install shellcheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes shellcheck
+          shellcheck --version
+
+      - name: Run the shell harnesses
+        run: make test-scripts

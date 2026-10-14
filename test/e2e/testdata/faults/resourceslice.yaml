@@ -1,0 +1,30 @@
+# A gpu.nvidia.com ResourceSlice naming a worker, for the NV-DRA-001
+# reproduction.
+#
+# The node already advertises nvidia.com/gpu through the device plugin, so a
+# slice published for it as well is the "both" mode the rule is about: a
+# cluster part way through a migration, advertising the same devices twice, in
+# two schedulers' accounting.
+#
+# resource.k8s.io/v1 because that is what pkg/source reads and what the lane's
+# API server serves; a lane on an older Kubernetes would need the version here
+# and in pkg/source to move together, which is why neither guesses.
+#
+# Nothing owns this object. The real publisher is a DRA driver's kubelet
+# plugin, which this lane does not run, so it stays exactly as written until
+# the recovery deletes it.
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: nv-faults-dra-slice
+  labels:
+    nv.example/faults-fixture: "nv-dra-001"
+spec:
+  driver: gpu.nvidia.com
+  nodeName: __NODE__
+  pool:
+    name: __NODE__
+    generation: 1
+    resourceSliceCount: 1
+  devices:
+    - name: gpu-0

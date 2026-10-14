@@ -1,0 +1,21 @@
+# One ComputeDomain whose status names the node, for the NV-CD-001
+# reproduction.
+#
+# The spec is the smallest the CRD accepts: channel.resourceClaimTemplate.name
+# and numNodes are both required, and the spec is immutable once created.
+#
+# The status is NOT here. It is a subresource, so an apply never writes it;
+# nv-cd-001.sh patches it with --subresource=status after the object exists.
+# That patch is the injection: a node entry of NotReady is what the rule reads.
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: nv-faults-compute-domain
+  namespace: __NAMESPACE__
+  labels:
+    nv.example/faults-fixture: "nv-cd-001"
+spec:
+  numNodes: 1
+  channel:
+    resourceClaimTemplate:
+      name: nv-faults-compute-domain-channel

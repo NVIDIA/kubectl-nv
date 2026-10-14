@@ -1,0 +1,35 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind topology for the MIG lane: one control plane and two workers, the same
+# shape as hack/mokka/kind-mokka.yaml and for the same reason. The per-worker
+# assertions exist to catch a lane where only one node got partitioned, and a
+# single-worker cluster cannot catch that.
+#
+# The containerdConfigPatches block is copied verbatim from
+# docs/guides/kind.yaml in NVIDIA/k8s-test-infra at 4ce11e5. NRI has to be
+# enabled before the node starts, which is why it lives here rather than in a
+# chart value.
+#
+# One difference from the whole-GPU lane: the workers carry
+# mokka.nvidia.com/type=sgpu and the control plane does not. That label is the
+# nodeSelector in device-plugin-mock-mig.yaml, and it is the only thing keeping
+# Mokka's device plugin off the control plane: the DaemonSet tolerates every
+# taint, so the control-plane taint does not. A control plane running the
+# plugin would advertise fourteen partitions that no workload should land on.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.nri.v1.nri"]
+      disable = false
+      disable_connections = false
+      socket_path = "/var/run/nri/nri.sock"
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      mokka.nvidia.com/type: sgpu

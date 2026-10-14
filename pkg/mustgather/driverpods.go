@@ -26,22 +26,15 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
+
+	"github.com/NVIDIA/kubectl-nv/pkg/inventory"
 )
 
-// driverLabels are the four selectors a driver pod can carry. Each one is a
-// different way of installing the driver, and dropping any one of them loses
-// the bug report of every cluster installed that way with nothing in the
-// bundle to say so.
-//
-// Three are the ones the gpu-operator script uses, at lines 337 to 339 of
-// hack/must-gather.sh. The fourth, app=nvidia-driver-daemonset, is kubectl-nv's
-// own: the script does not look under it, and this plugin always has.
-var driverLabels = []string{
-	"app=nvidia-driver-daemonset",
-	"app.kubernetes.io/component=nvidia-driver",
-	"app=nvidia-vgpu-manager-daemonset",
-	"openshift.driver-toolkit",
-}
+// driverLabels are the four selectors a driver pod can carry, served from
+// pkg/inventory so that this collection and the NV-DRV-001 health rule cannot
+// drift apart: a selector added there reaches both at once. See
+// inventory.DriverSelectors for what each one is and why none may be dropped.
+var driverLabels = inventory.DriverSelectors()
 
 // defaultContainerAnnotation is the annotation kubectl reads to decide which
 // container of a pod a command without --container runs in. A driver pod
