@@ -2,10 +2,10 @@
 
 kubectl-nv is a kubectl plugin. Installed on your `PATH` it runs as
 `kubectl nv <command>`; the binary also runs on its own as
-`kubectl-nv <command>`. Every command reads from the cluster and none writes
-to it. Two of them, `debug` and `adm must-gather`, run commands inside the
-NVIDIA driver pods to collect a bug report and the GPU device usage, unless
-`--no-exec` says not to.
+`kubectl-nv <command>`. No command writes to the cluster, and `explain`,
+`schema` and `version` work without one. Two commands, `debug` and
+`adm must-gather`, run commands inside the NVIDIA driver pods to collect a bug
+report and the GPU device usage, unless `--no-exec` says not to.
 
 `kubectl nv --help` lists the commands, and `kubectl nv <command> --help`
 prints the flags of one.
@@ -30,8 +30,8 @@ logging, and `--no-color` keeps colour out of the progress output.
 
 ## Output
 
-`list`, `info` and `debug` print a table by default and take `-o` to choose
-the format:
+`list`, `info`, `debug` and `health` print a table by default and take `-o` to
+choose the format:
 
 | `-o` | Prints |
 |---|---|
@@ -40,25 +40,25 @@ the format:
 | `json`, `yaml` | the full object, with `apiVersion: kubectl-nv.nvidia.com/v1alpha1` and a `kind` |
 | `name` | one `<kind>/<name>` per line, the kind in lower case, for instance `gpunode/gpu-worker-1` |
 
-The kinds are `GPUNodeList` (`list`), `GPUNode` (`info`) and `DebugReport`
-(`debug`); `adm must-gather` writes a `BundleManifest` into the bundle it
-collects.
+The kinds are `GPUNodeList` (`list`), `GPUNode` (`info`), `DebugReport`
+(`debug`) and `HealthReport` (`health`); `adm must-gather` writes a
+`BundleManifest` into the bundle it collects.
 
 Two flags bound what is printed. `--fields` keeps only the dotted JSON paths
 it is given, for instance `--fields status.ready`; `apiVersion`, `kind` and
 `metadata.name` are always kept. `--limit N` prints at most N items, after
 sorting; 0 prints every item.
 
-`list`, `info` and `debug` print to standard output, and progress and errors go
-to standard error. On this release `version` and `mcp --list-tools` print to
-standard error as well.
+`list`, `info`, `debug` and `health` print to standard output, and progress and
+errors go to standard error. On this release `explain`, `version` and
+`mcp --list-tools` print to standard error as well.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | The command ran and completed. |
-| 1 | The command found something it reports as a finding. No command on this release reports findings, so none exits 1. |
+| 1 | `health` found something at or above its `--fail-on` severity. |
 | 2 | The command line or the configuration was wrong, for instance an unknown flag or a node the cluster does not have. |
 | 3 | The command ran over less than it was asked for, for instance a read the cluster denied in part or a collector that failed; what it printed covers the rest. |
 | 4 | The command could not run, for instance because the API server was unreachable. |
@@ -143,6 +143,56 @@ no GPUs, exits 2 before anything is collected.
 ```console
 kubectl nv debug gpu-worker-1
 kubectl nv debug gpu-worker-1 --no-exec --since 2h
+```
+
+### kubectl nv health
+
+```console
+kubectl nv health [flags]
+```
+
+Runs every GPU health check over the cluster and reports what it found: the
+node labels and capacity, the GPU Operator's ClusterPolicy, and the operand
+pods on each node. The report opens with a summary of the nodes checked and
+their GPU capacity, allocatable and requested, then lists the findings. Each
+finding carries a stable code such as `NV-NODE-002`, a severity (`error`,
+`warning` or `info`), the node and component it is about, the evidence it was
+concluded from and the command to run next. `kubectl nv explain <code>` prints
+the code's catalog entry; [findings](findings/) holds all sixteen.
+
+| Flag | Meaning |
+|---|---|
+| `--fail-on` | exit 1 when a finding is at or above this severity: `error`, `warning` or `info` (default `error`) |
+| `--node NODE` | report on one node only; the cluster-scoped findings are kept |
+| `--summary` | print the summary line only, without the findings |
+| `--upgrade-stuck-after` | report a node stuck in a driver upgrade step once it has been there this long (default 30m) |
+| `--from-bundle DIR` | read a must-gather directory instead of a cluster |
+| `-o`, `--fields`, `--limit` | see [Output](#output) |
+
+`--fail-on` decides only the exit code: `-o json` always carries every finding.
+
+```console
+kubectl nv health
+kubectl nv health --fail-on info
+kubectl nv health --node gpu-worker-1 -o json
+kubectl nv health --from-bundle /tmp/support
+```
+
+### kubectl nv explain
+
+```console
+kubectl nv explain CODE
+```
+
+Prints the catalog entry for a finding code: what it means, what the evidence
+is, which GPU Operator versions it applies to, what to run next, and how to
+reproduce it. The catalog is built into the binary, so `explain` needs no
+cluster and no network. Codes are not case sensitive, and an unknown code exits
+2.
+
+```console
+kubectl nv explain NV-NODE-002
+kubectl nv explain nv-dp-001
 ```
 
 ### kubectl nv adm must-gather
