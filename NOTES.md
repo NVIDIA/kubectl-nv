@@ -168,6 +168,40 @@ gates M2 lists, `make test-scripts` (seven harnesses; M6 adds the eighth and rai
 e2e-mokka` (16 tests, 53.0 s), `make e2e-faults` (27 tests, 307.7 s) and `make e2e-mig` (`TestMIGLane`, 3.1 s); on top
 of M3's gb300 fix, `make e2e-mokka` passed on t4 (16 tests, 41.4 s) and on gb300 (16 tests, 32.4 s).
 
+## M6: topology and the compute-domain lane (2026-10-11)
+
+Track G adds `kubectl nv topology`, which groups the GPU nodes at every level the cluster is labelled with and, given
+`--for job/<name>`, names the narrowest level the Job fits in. Levels run narrowest first
+(`pkg/topology/group.go:325`): the node, `nvidia.com/gpu.clique`, Topograph's `accelerator.topograph.run/sub-domain`
+and `/domain`, `fabric.topograph.run/tier-0` upwards by number, the Kueue Topology levels from the last declared to
+the first (Kueue declares them widest first and requires `kubernetes.io/hostname` last), and the cluster; a Kueue
+level on a label already listed is absorbed rather than repeated, and a label no node carries is left out. Each group
+carries its nodes, allocatable, requested and free GPUs and its largest free node, with free clamped at zero per node
+and zero while a node's pods are unknown (`pkg/topology/group.go:573`), and the nodes carrying only some of the
+cluster's Topograph labels are listed as `partialNodes`. The Job is read with a Get (`pkg/source/jobs.go:44`), its pod
+count is parallelism capped by completions (`pkg/topology/job.go:95`) and its GPUs per pod come from the inventory's
+`PodSpecGPURequest`; a fit places whole pods on nodes (`pkg/topology/fit.go:209`), so three nodes with three free GPUs
+each hold three pods of two, not four, and leaves out cordoned and not-Ready nodes. Kueue is read as unstructured
+objects, with no Kueue module dependency, at whichever version discovery reports served, chosen per resource
+(`pkg/source/kueue.go:134`): Topology is v1alpha1 through v0.13 and v1beta1 from v0.14, v1beta2 is served from v0.15
+and stored from v0.16, v1beta1 is unserved at v0.20.1, and ResourceFlavor has no v1alpha1. A missing Job is exit 2
+naming it and its namespace (`pkg/cmd/topology/topology.go:208`), a denied Kueue read is partial (exit 3), and any
+other failed Kueue read is exit 4. G1 ran 33 mutants, all killed. G2's compute-domain lane
+(`.github/workflows/e2e-compute-domain.yaml:37`, nightly and on dispatch, CI only) is a gb200 kind cluster of four
+workers in two cliques of two, one sub-domain per clique, one accelerator domain and two fabric tiers, with Kueue
+v0.18.11 pinned by the sha256 of its release manifest (`hack/mokka/compute-domain/lib.sh:84`). The Topograph keys are
+static kind node labels: Topograph v1.0.0 cannot write fabric tiers on kind without InfiniBand switches, has removed
+`useGpuCliqueLabel`, and its `test` provider loads only embedded models. The lane's e2e tests pin the walk `node,
+clique, accelerator-sub-domain, accelerator-domain, tier-0, tier-1, cluster` (`test/e2e/topology_test.go:289`), an
+8-GPU Job inside one clique (`:323`) and a 12-GPU Job, three pods of four, at the accelerator domain and nowhere
+narrower (`:401`). `hack/mokka/compute-domain/up_test.sh` passes 118 cases through PATH shims, and a stand-in binary
+printing nine wrong reports fails the Go assertions on every one. The workflow has not run: its schedule and dispatch
+fire only from the default branch. The milestone is 17 commits on 09d7c66f, its usage section included and its
+NOTES.md record not: 29 files, 8101 insertions and 8 deletions outside `vendor/`. Its code is byte-identical to the
+integration branch after E3 merged, where the gates M2 lists and `make e2e-faults` (27 tests, 393.3 s) passed on
+2026-10-12, apart from M3's device-name fix to two e2e tests; its `make e2e-mokka` suite is M4's, which passed on t4
+and gb300 with that fix. The compute-domain lane runs only in CI.
+
 ## Facts observed
 
 - Toolchain on the build Mac: go 1.27.2, golangci-lint 2.14.0 (0 issues), goreleaser 2.18.3, kind v0.33.0,

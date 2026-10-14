@@ -1,0 +1,109 @@
+# Copyright 2026 NVIDIA CORPORATION
+# SPDX-License-Identifier: Apache-2.0
+#
+# Kind topology for the compute domain lane: one control plane and four
+# workers, which is what lets the lane hold two cliques of two nodes and a job
+# that needs three nodes and therefore fits in neither.
+#
+# The containerd patches enable CDI and NRI. CDI is what the GPU Operator
+# values overlay drives; NRI is what carries the per node fabric identity into
+# containers, so that the simulated GPUs a GPU Feature Discovery pod reads
+# answer nvmlDeviceGetGpuFabricInfo with this node's clique rather than with
+# the gb200 profile's placeholder. Both have to be set before the node starts,
+# which is why they live here and not in a chart value. The CDI block is kept
+# even though the pinned node image already enables it: a node image bump that
+# dropped it would otherwise turn the whole lane red for an unrelated reason.
+# Copied from tests/e2e/kind-compute-domain-config.yaml in
+# NVIDIA/k8s-test-infra at tag v0.4.0.
+#
+# Every worker carries its topology labels statically. What that does and does
+# not buy is worth being exact about, because getting it wrong once already
+# produced a false claim that this lane does not depend on GFD.
+#
+#   1. nvidia.com/gpu.clique IS NOT guaranteed by the label below. GFD owns
+#      that key at runtime: it publishes through the NFD NodeFeature API
+#      (k8s-device-plugin internal/lm/output.go), and nfd-master then writes
+#      what GFD said onto the node, over whatever the kubelet set at
+#      registration. The gb200 profile is fabric attached whichever way NRI
+#      goes (its device_defaults.fabric.state is "auto" and the fabricmanager
+#      simulator runs for this profile), so GFD always has a clique to report.
+#      Which clique depends on whether NRI reached it with NODE_NAME and
+#      MOCK_TOPOLOGY_CONFIG: with them, the value below; without them, the
+#      profile's placeholder 00000000-0000-0000-0000-000000000001.0 on every
+#      worker. The label below is therefore the value GFD is expected to agree
+#      with, and up.sh asserts that agreement per worker rather than assuming
+#      it. It is a declaration of intent and a fallback for the window before
+#      GFD first reports, not a guarantee.
+#   2. The Topograph keys ARE guaranteed by the labels below, because nothing
+#      else writes them. Topograph v1.0.0 can take an accelerator domain from
+#      a node label through the k8s engine's acceleratorDomainSourceLabel, but
+#      its fabric tiers come from a provider, and no v1.0.0 provider can
+#      discover a fabric on kind: infiniband-k8s walks it by running
+#      ibnetdiscover in a node-data-broker pod
+#      (pkg/providers/infiniband/k8s.go) and Mokka simulates no InfiniBand
+#      switch (docs/index.md at v0.4.0), while the test provider only loads
+#      models embedded into its own binary (tests/model.go go:embed models/*,
+#      and pkg/providers/test/test.go rejects any path), none of which
+#      describes a kind cluster. So the tier labels are fixtures, and a fixture
+#      belongs with the node it describes.
+#   3. The kubelet may set all of them. NodeRestriction limits a kubelet to an
+#      allowlist only within kubernetes.io and k8s.io; these keys are in
+#      third party domains. Mokka's own developer cluster does the same thing,
+#      at local/kind/compute-domain.kind.yaml in k8s-test-infra v0.4.0.
+#
+# The hierarchy the labels describe, narrowest first:
+#
+#   clique      ab.0 = worker, worker2      ab.1 = worker3, worker4
+#   sub-domain  nvl-partition-0 = the same two    nvl-partition-1 = the other two
+#   domain      nvl-domain-0 = all four
+#   tier-0      ib-leaf-0 = worker, worker2  ib-leaf-1 = worker3, worker4
+#   tier-1      ib-spine-0 = all four
+#
+# A domain that spans both cliques is what makes the walk observable: a job
+# needing three of the four nodes fits at the domain and nowhere narrower, so
+# an implementation that reported the first level wider than the clique would
+# answer sub-domain and be caught.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri"]
+      enable_cdi = true
+    [plugins."io.containerd.nri.v1.nri"]
+      disable = false
+      disable_connections = false
+      socket_path = "/var/run/nri/nri.sock"
+nodes:
+  - role: control-plane
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.0"
+      accelerator.topograph.run/sub-domain: nvl-partition-0
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-0
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.0"
+      accelerator.topograph.run/sub-domain: nvl-partition-0
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-0
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.1"
+      accelerator.topograph.run/sub-domain: nvl-partition-1
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-1
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu
+  - role: worker
+    labels:
+      nvidia.com/gpu.clique: "00000000-0000-0000-0000-0000000000ab.1"
+      accelerator.topograph.run/sub-domain: nvl-partition-1
+      accelerator.topograph.run/domain: nvl-domain-0
+      fabric.topograph.run/tier-0: ib-leaf-1
+      fabric.topograph.run/tier-1: ib-spine-0
+      mokka.nvidia.com/type: sgpu

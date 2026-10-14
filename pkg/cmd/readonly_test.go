@@ -95,6 +95,14 @@ var leafFixtures = map[string]leafFixture{
 		// hinted node rather than refusing.
 		args: func(*testing.T) []string { return []string{"gpu-node-1"} },
 	},
+	// The job lookup is the one read this command makes that is a Get
+	// rather than a List, so the fixture asks about a job that is not
+	// there: the guard then covers the Get as well, and the leaf still
+	// reaches the end of its work before failing.
+	"topology": {
+		args:    func(*testing.T) []string { return []string{"--for", "job/x"} },
+		wantErr: "no job",
+	},
 	"explain": {
 		args: func(*testing.T) []string { return []string{"NV-NODE-002"} },
 	},
