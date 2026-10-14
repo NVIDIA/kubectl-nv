@@ -30,8 +30,8 @@ logging, and `--no-color` keeps colour out of the progress output.
 
 ## Output
 
-`list`, `info`, `debug` and `health` print a table by default and take `-o` to
-choose the format:
+`list`, `info`, `debug`, `health` and `topology` print a table by default and
+take `-o` to choose the format:
 
 | `-o` | Prints |
 |---|---|
@@ -41,17 +41,17 @@ choose the format:
 | `name` | one `<kind>/<name>` per line, the kind in lower case, for instance `gpunode/gpu-worker-1` |
 
 The kinds are `GPUNodeList` (`list`), `GPUNode` (`info`), `DebugReport`
-(`debug`) and `HealthReport` (`health`); `adm must-gather` writes a
-`BundleManifest` into the bundle it collects.
+(`debug`), `HealthReport` (`health`) and `TopologyReport` (`topology`);
+`adm must-gather` writes a `BundleManifest` into the bundle it collects.
 
 Two flags bound what is printed. `--fields` keeps only the dotted JSON paths
 it is given, for instance `--fields status.ready`; `apiVersion`, `kind` and
 `metadata.name` are always kept. `--limit N` prints at most N items, after
 sorting; 0 prints every item.
 
-`list`, `info`, `debug` and `health` print to standard output, and progress and
-errors go to standard error. On this release `explain`, `version` and
-`mcp --list-tools` print to standard error as well.
+`list`, `info`, `debug`, `health` and `topology` print to standard output, and
+progress and errors go to standard error. On this release `explain`,
+`version` and `mcp --list-tools` print to standard error as well.
 
 ## Exit codes
 
@@ -193,6 +193,36 @@ cluster and no network. Codes are not case sensitive, and an unknown code exits
 ```console
 kubectl nv explain NV-NODE-002
 kubectl nv explain nv-dp-001
+```
+
+### kubectl nv topology
+
+```console
+kubectl nv topology [flags]
+```
+
+Groups the GPU nodes at every level the cluster is labelled with, narrowest
+first: the node, the NVLink clique (`nvidia.com/gpu.clique`), Topograph's
+accelerator sub-domain and domain (`accelerator.topograph.run/sub-domain` and
+`/domain`), its fabric tiers (`fabric.topograph.run/tier-0` upwards), the
+levels a Kueue Topology declares, and the cluster. A level no node carries is
+left out. Each group reports its nodes, the GPUs it has, the GPUs already
+requested and the GPUs left. [labels.md](labels.md) lists the labels it reads.
+
+`--for job/NAME` names the narrowest level where every pod of that Job fits,
+placing whole pods on nodes and leaving out cordoned and not-Ready ones. The
+Job is read in the namespace `-n` names. A Job that does not exist exits 2, a
+Kueue read the cluster denies exits 3, and any other failed Kueue read exits 4.
+
+| Flag | Meaning |
+|---|---|
+| `--for job/NAME` | answer where every pod of this Job would fit |
+| `-o`, `--fields`, `--limit` | see [Output](#output) |
+
+```console
+kubectl nv topology
+kubectl nv topology -o wide
+kubectl nv topology --for job/train -n team-a
 ```
 
 ### kubectl nv adm must-gather
