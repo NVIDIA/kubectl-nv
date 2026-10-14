@@ -9,16 +9,12 @@ hand.
 Everything below is run by a maintainer on their own machine, except where it
 says the workflow does it.
 
-## 1. Bump the version
+## 1. Check the version
 
-The version is hard coded in `cmd/main.go`:
-
-```go
-c.Version = "0.1.0"
-```
-
-Set it to the version you are about to tag, without the leading `v`, and commit
-that on its own.
+There is nothing to bump. The version comes from the tag: GoReleaser stamps it
+into the binary with `-X main.version={{.Version}}` (`.goreleaser.yaml`), so a
+binary built from `vX.Y.Z` reports `X.Y.Z`. `make build` stamps the Makefile's
+`VERSION` instead, which only labels a local build.
 
 ## 2. Check the tree
 
@@ -56,8 +52,8 @@ git tag -s vX.Y.Z -m "vX.Y.Z"
 git push upstream vX.Y.Z
 ```
 
-The tag must match the version you put in `cmd/main.go`. The workflow only runs
-on `NVIDIA/kubectl-nv`, so a tag pushed to a fork builds nothing.
+The workflow only runs on `NVIDIA/kubectl-nv`, so a tag pushed to a fork builds
+nothing.
 
 ## 4. Review the draft
 
@@ -144,7 +140,6 @@ A release candidate is tagged `vX.Y.0-rc.N`, starting at `rc.1`, on the branch
 the release itself will come from. `release.prerelease` is `auto` in
 `.goreleaser.yaml`, which reads the prerelease part off the tag, so the draft
 is marked as a prerelease and GitHub does not offer it as the latest release.
-Set the version in `cmd/main.go` to `X.Y.0-rc.N` to match the tag.
 
 A release candidate has patch number 0, so its header carries the same
 Highlights, Breaking changes and Upgrade notes sections as the release it leads
