@@ -163,10 +163,13 @@ run_target() {
 
 # recipe_rc is the code the recipe itself exited with. make has an exit status
 # of its own, 2 for any failed recipe, so asking $? what the target returned
-# answers for make instead; the code make prints in "*** [e2e-mig] Error N"
-# is the recipe's.
+# answers for make instead; the code make prints in its error line is the
+# recipe's. GNU make 3.81, the one macOS ships, prints "*** [e2e-mig] Error N";
+# GNU make 4 names the makefile and line inside the brackets,
+# "*** [Makefile:LINE: e2e-mig] Error N", so the target is matched after either
+# the bracket or a space.
 recipe_rc() {
-    sed -n 's/.*\[e2e-mig\] Error \([0-9][0-9]*\).*/\1/p' "${RUN_ROOT}/out.log" | tail -1
+    sed -n 's/.*[[ ]e2e-mig\] Error \([0-9][0-9]*\).*/\1/p' "${RUN_ROOT}/out.log" | tail -1
 }
 
 exited() {
