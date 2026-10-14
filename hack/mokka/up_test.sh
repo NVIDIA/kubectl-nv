@@ -289,9 +289,13 @@ make_tool_dir() {
     done
 }
 
-# file_mode <path> -- octal permission bits, BSD and GNU stat.
+# file_mode <path> -- octal permission bits, BSD and GNU stat. GNU stat is
+# asked first: given BSD's -f, it reads the format as a second file name and
+# prints the file system of the first before failing on the second, so the
+# fallback runs with that already on stdout. BSD stat has no -c and fails
+# cleanly, printing nothing, so asking it second is safe.
 file_mode() {
-    stat -f '%Lp' "$1" 2> /dev/null || stat -c '%a' "$1"
+    stat -c '%a' "$1" 2> /dev/null || stat -f '%Lp' "$1"
 }
 
 # run_subject <script> <args...>
