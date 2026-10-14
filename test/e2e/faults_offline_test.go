@@ -490,3 +490,124 @@ func TestEveryFaultCaseHasACatalogueEntry(t *testing.T) {
 		}
 	}
 }
+
+// ctkCase is NV-CTK-001's entry in the fault table, looked up rather than
+// copied so that these tests judge the case the live suite runs.
+func ctkCase(t *testing.T) faultCase {
+	t.Helper()
+
+	for _, tc := range faultCases {
+		if tc.code == "NV-CTK-001" {
+			return tc
+		}
+	}
+	t.Fatal("faultCases has no NV-CTK-001 entry")
+
+	return faultCase{}
+}
+
+// ctkFinding is an NV-CTK-001 finding for the toolkit-validation stand-in,
+// with the evidence given.
+func ctkFinding(evidence map[string]string) finding {
+	return finding{
+		Code:      "NV-CTK-001",
+		Severity:  "error",
+		Node:      offlineNode,
+		Component: "nvidia-container-toolkit-daemonset",
+		Message:   "the toolkit-validation init container of the validator pod exited non-zero",
+		Evidence:  evidence,
+		Docs:      "docs/findings/NV-CTK-001.md",
+	}
+}
+
+// TestCTKAcceptsBothShapesTheRuleReports pins the two forms NV-CTK-001 takes on
+// a live lane. Between restarts the kubelet reports the init container Waiting
+// in CrashLoopBackOff, and the rule reads the exit from the last termination,
+// which is when it adds lastTerminationAt. Right after a run, and for as long
+// as the kubelet keeps it so, the current state is the termination itself,
+// reason Error, and the rule reports that exit with no lastTerminationAt. How
+// long the second form lasts is the kubelet's, not the rule's: 11 s to 1m32s
+// on the build Mac, and longer than the two minute bound on a CI runner
+// (NVIDIA/kubectl-nv#82, 2026-10-14).
+func TestCTKAcceptsBothShapesTheRuleReports(t *testing.T) {
+	tc := ctkCase(t)
+
+	for name, evidence := range map[string]map[string]string{
+		"waiting in CrashLoopBackOff": {
+			"pod":               "nv-faults-ctk-validator",
+			"initContainer":     "toolkit-validation",
+			"exitCode":          "1",
+			"reason":            "CrashLoopBackOff",
+			"lastTerminationAt": "2026-10-14T11:16:30Z",
+		},
+		"terminated right after a run": {
+			"pod":           "nv-faults-ctk-validator",
+			"initContainer": "toolkit-validation",
+			"exitCode":      "1",
+			"reason":        "Error",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := healthReport{Findings: []finding{ctkFinding(evidence)}}
+			if _, why := matchFinding(report, tc, offlineNode, tc.exact(4)); why != "" {
+				t.Errorf("matchFinding rejected the %s shape: %s", name, why)
+			}
+		})
+	}
+}
+
+// TestCTKRejectsWhatTheRuleNeverReports holds the two shapes apart: each is
+// accepted only whole, so a regression that dropped the last termination from
+// the waiting shape, or a finding for an exit that was not a failure, still
+// fails.
+func TestCTKRejectsWhatTheRuleNeverReports(t *testing.T) {
+	tc := ctkCase(t)
+
+	cases := []struct {
+		name     string
+		evidence map[string]string
+		want     string
+	}{
+		{
+			name: "waiting without its termination",
+			evidence: map[string]string{
+				"pod": "nv-faults-ctk-validator", "initContainer": "toolkit-validation",
+				"exitCode": "1", "reason": "CrashLoopBackOff",
+			},
+			want: `NV-CTK-001 is waiting in CrashLoopBackOff but carries no lastTerminationAt`,
+		},
+		{
+			name: "a termination that also claims a last one",
+			evidence: map[string]string{
+				"pod": "nv-faults-ctk-validator", "initContainer": "toolkit-validation",
+				"exitCode": "1", "reason": "Error", "lastTerminationAt": "2026-10-14T11:16:30Z",
+			},
+			want: `NV-CTK-001 reports a current termination (reason Error) and a lastTerminationAt, which the rule never sets together`,
+		},
+		{
+			name: "any other reason",
+			evidence: map[string]string{
+				"pod": "nv-faults-ctk-validator", "initContainer": "toolkit-validation",
+				"exitCode": "1", "reason": "Completed",
+			},
+			want: `NV-CTK-001 evidence reason = "Completed", want CrashLoopBackOff or Error`,
+		},
+		{
+			name: "an exit that was not a failure",
+			evidence: map[string]string{
+				"pod": "nv-faults-ctk-validator", "initContainer": "toolkit-validation",
+				"exitCode": "0", "reason": "Error",
+			},
+			want: `NV-CTK-001 evidence exitCode = "0", want "1"`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			report := healthReport{Findings: []finding{ctkFinding(c.evidence)}}
+			_, why := matchFinding(report, tc, offlineNode, tc.exact(4))
+			if why != c.want {
+				t.Errorf("matchFinding said %q, want %q", why, c.want)
+			}
+		})
+	}
+}

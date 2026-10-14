@@ -114,6 +114,12 @@ type faultCase struct {
 	// more than the capacity, whatever the profile puts on a worker.
 	exact func(capacity int64) map[string]string
 
+	// shape judges evidence whose form depends on when it is read rather than
+	// on the rule, and returns the name of the form it is in or why it is in
+	// none. Nil where every read has one form. It runs after exact, so a
+	// pinned value that is wrong is reported as that.
+	shape func(evidence map[string]string) (name, problem string)
+
 	// appear and clear bound the polls. They come from the live run recorded
 	// in NOTES.md, with margin: the measured times are a fraction of these,
 	// and the margin is what keeps a loaded CI runner from failing a run that
@@ -154,24 +160,23 @@ var faultCases = []faultCase{
 		script:       "nv-ctk-001.sh",
 		severity:     "error",
 		component:    "nvidia-container-toolkit-daemonset",
-		evidenceKeys: []string{"pod", "initContainer", "exitCode", "reason", "lastTerminationAt"},
+		evidenceKeys: []string{"pod", "initContainer", "exitCode", "reason"},
 		exact: func(int64) map[string]string {
 			// The pod name is pinned because the rule takes the FIRST
 			// validator pod on the node and the lane runs a real one too: a
 			// day when the fixture stops sorting first is a failure here
 			// rather than a pass against the operator's own validator.
 			//
-			// CrashLoopBackOff and not a termination reason: under a restart
-			// policy of Always the init container sits Waiting, and the exit
-			// code of the run that failed is in the last termination, which
-			// is why lastTerminationAt is required above.
+			// The reason is not pinned here: which of two reasons a read sees
+			// is the kubelet's timing, and ctkShape holds each to its own
+			// evidence.
 			return map[string]string{
 				"pod":           "nv-faults-ctk-validator",
 				"initContainer": "toolkit-validation",
 				"exitCode":      "1",
-				"reason":        "CrashLoopBackOff",
 			}
 		},
+		shape:  ctkShape,
 		appear: faultAppear,
 		clear:  faultClear,
 	},
@@ -480,6 +485,10 @@ func runFaultCase(t *testing.T, tc faultCase, node string) {
 
 	found := waitForFinding(t, tc, node, tc.exactEvidence(t, node), injectedAt)
 	t.Logf("%s appeared %s after inject: %s", tc.code, time.Since(injectedAt).Round(time.Second), found)
+	if tc.shape != nil {
+		name, _ := tc.shape(found.Evidence)
+		t.Logf("%s was read %s", tc.code, name)
+	}
 
 	recoveredAt := time.Now()
 	runFaultScript(t, tc.script, "recover", node)
@@ -585,6 +594,11 @@ func candidateProblem(f finding, tc faultCase, exact map[string]string) string {
 	for key, want := range exact {
 		if got := f.Evidence[key]; got != want {
 			return fmt.Sprintf("%s evidence %s = %q, want %q", tc.code, key, got, want)
+		}
+	}
+	if tc.shape != nil {
+		if _, why := tc.shape(f.Evidence); why != "" {
+			return why
 		}
 	}
 	// Every finding links to its own catalogue entry, which is the one thing a
@@ -781,4 +795,36 @@ func formatFindings(report healthReport) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// ctkShape names the form NV-CTK-001's evidence is in. Under a restart policy
+// of Always the toolkit-validation stand-in fails, is restarted and fails
+// again, and a read lands in one of two states. Between restarts the kubelet
+// reports the init container Waiting in CrashLoopBackOff, and the rule reads
+// the exit from the last termination, which is when it sets lastTerminationAt.
+// Right after a run the current state is the termination itself, reason
+// Error, and the rule reports that exit with no lastTerminationAt. How long
+// the second state lasts is the kubelet's: 11 s to 1m32s on the build Mac, and
+// longer than the two minute bound on a CI runner (#82, 2026-10-14). Each
+// shape is accepted only whole.
+func ctkShape(evidence map[string]string) (string, string) {
+	last, hasLast := evidence["lastTerminationAt"]
+
+	switch reason := evidence["reason"]; reason {
+	case "CrashLoopBackOff":
+		if last == "" {
+			return "", "NV-CTK-001 is waiting in CrashLoopBackOff but carries no lastTerminationAt"
+		}
+
+		return "waiting in CrashLoopBackOff", ""
+	case "Error":
+		if hasLast {
+			return "", "NV-CTK-001 reports a current termination (reason Error) and a lastTerminationAt, " +
+				"which the rule never sets together"
+		}
+
+		return "in its current termination", ""
+	default:
+		return "", fmt.Sprintf("NV-CTK-001 evidence reason = %q, want CrashLoopBackOff or Error", reason)
+	}
 }
