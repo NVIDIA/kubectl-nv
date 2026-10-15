@@ -350,9 +350,10 @@ func TestJobNeedingEightGPUsFitsInOneClique(t *testing.T) {
 
 	// Both cliques hold it, in fact, since each has eight free GPUs on two
 	// nodes. What must not happen is the level naming a group that cannot
-	// host the pods, or naming none.
+	// host the pods, or naming none. The groups are sorted before the
+	// comparison, so want is written in sorted order.
 	level := fitLevelByName(t, fit, cliqueLevelName)
-	want := []string{cliqueOne, cliqueZero}
+	want := []string{cliqueZero, cliqueOne}
 	if got := sortedCopy(level.Groups); !equalStrings(got, want) {
 		t.Errorf("clique groups that fit = %v, want %v", got, want)
 	}
