@@ -108,9 +108,14 @@ case "${args}" in
             *podCIDR*)
                 # The pod CIDR query: one line per node, name and CIDR. An
                 # empty FAKE_POD_CIDR is a node the IPAM controller had no
-                # room left for.
+                # room left for. FAKE_CIDR_PER_POLL is an allocator still
+                # working through its queue: each query after the first finds
+                # that many more nodes with a CIDR.
+                q="$(bump podcidr_query)"
+                missing=$(( ${FAKE_NO_CIDR_NODES:-0} - (q - 1) * ${FAKE_CIDR_PER_POLL:-0} ))
+                [ "${missing}" -ge 0 ] || missing=0
                 while [ "${n}" -le "${FAKE_READY_COUNT:-0}" ]; do
-                    if [ "${n}" -le "${FAKE_NO_CIDR_NODES:-0}" ]; then
+                    if [ "${n}" -le "${missing}" ]; then
                         printf 'kwok-gpu-%s \n' "${n}"
                     else
                         printf 'kwok-gpu-%s %s\n' "${n}" "${FAKE_POD_CIDR:-10.240.0.0/24}"
@@ -361,7 +366,7 @@ printf 'apiVersion: v1\ncurrent-context: %s\n' "${CONTEXT}" > "${MOKKA_BIN_DIR}/
 reset_fixtures() {
     unset FAKE_KWOK_INSTALLED FAKE_CORRUPT_MANIFEST FAKE_CURL_RC
     unset FAKE_KUBECTL_RC FAKE_KUBECTL_APPLY_RC FAKE_NODE_LINE
-    unset MOKKA_CONTEXT FAKE_SERVER FAKE_POD_CIDR FAKE_NO_CIDR_NODES
+    unset MOKKA_CONTEXT FAKE_SERVER FAKE_POD_CIDR FAKE_NO_CIDR_NODES FAKE_CIDR_PER_POLL
     unset FAKE_EXISTING_COUNT FAKE_KWOK_STAGES
     unset KWOK_GPU_PRODUCT KWOK_GPU_FAMILY KWOK_GPU_MEMORY KWOK_DRIVER_VERSION
     export FAKE_MANIFEST_CACHE="${CACHE_DIR}"
@@ -659,6 +664,11 @@ assert_rc 5 "nodes that advertise GPUs but are not Ready"
 # somewhere past 253 nodes and the ones after that come up Ready with no
 # spec.podCIDR at all. A lane that is quietly missing its last 1,700 CIDRs is
 # not a lane anybody should be timing against.
+#
+# The allocator is also not instant: kube-controller-manager writes one
+# podCIDR per node at its client rate limit, so seconds after 2000 nodes turn
+# Ready a third of them can still be waiting for theirs. The check waits for
+# the allocator and fails only on CIDRs that never arrive.
 
 reset_fixtures
 export FAKE_READY_COUNT=5
@@ -666,7 +676,22 @@ export FAKE_NO_CIDR_NODES=2
 run_subject 5
 assert_rc 5 "nodes that came up Ready with no pod CIDR"
 assert_says "2 of 5" "the failure says how many nodes have no pod CIDR"
+assert_says "after 2s" "the failure says how long it waited for the allocator"
 assert_says "podSubnet" "the failure points at the pod subnet"
+
+reset_fixtures
+export FAKE_READY_COUNT=5
+export FAKE_NO_CIDR_NODES=2
+export FAKE_CIDR_PER_POLL=1
+export MOKKA_READY_TIMEOUT=10
+run_subject 5
+assert_rc 0 "pod CIDRs the allocator writes after the first look are waited for"
+cidr_queries="$(grep -c 'podCIDR' "${MOKKA_CALL_LOG}" | tr -d ' ')"
+if [ "${cidr_queries}" -eq 3 ]; then
+    ok "the pod CIDRs were read until the last node had one (3 queries)"
+else
+    nope "the pod CIDRs were read ${cidr_queries} times, want 3" "calls:" "$(cat "${MOKKA_CALL_LOG}")"
+fi
 
 reset_fixtures
 export FAKE_READY_COUNT=5
