@@ -717,7 +717,10 @@ fi
 reset_fixtures
 export FAKE_READY_COUNT=5
 export FAKE_NO_CIDR_NODES=5
-export FAKE_CIDR_FAIL_FROM=3
+# The first read sees all five without a CIDR and every read after it fails.
+# Failing from the second read rather than a later one keeps a failed read
+# ahead of the 2s deadline wherever in the second the run starts.
+export FAKE_CIDR_FAIL_FROM=2
 run_subject 5
 assert_rc 5 "nodes still without a pod CIDR are not passed by a read that failed"
 assert_says "5 of 5" "the failure counts the nodes the last good read found without a CIDR"
