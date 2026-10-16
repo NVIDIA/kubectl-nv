@@ -495,20 +495,52 @@ done
 # that is quietly missing the pod CIDRs of three quarters of its nodes is not
 # the lane the numbers would be attributed to. hack/mokka/kind-scale.yaml is
 # the answer, through MOKKA_KIND_CONFIG.
+#
+# The allocator is not instant either. kube-controller-manager writes one
+# podCIDR per node at its client rate limit, about 20 a second, and KWOK marks
+# a node Ready long before that: the first nightly run on main found 1262 of
+# 2000 nodes still waiting five seconds after all were Ready, on a /12 with
+# room for 4096. So the check polls, and fails only on CIDRs that have not
+# arrived by the deadline the Ready wait set: one MOKKA_READY_TIMEOUT covers
+# both waits, which is what the workflows' time budgets assume.
 
-mokka::phase "check every fake node was given a pod CIDR"
-cidrs="$(k get nodes --selector "${KWOK_OWNER_LABEL}=true" \
-    -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.podCIDR}{"\n"}{end}' \
-    2> /dev/null || true)"
-# A line with a name and no second field is a node the allocator had no room
-# left for.
-without="$(printf '%s\n' "${cidrs}" | awk 'NF > 0 && $2 == "" { print $1 }')"
-if [ -n "${without}" ]; then
-    without_count="$(printf '%s\n' "${without}" | grep -c . | tr -d ' ')"
-    printf '%s\n' "kwok-nodes.sh: ${without_count} of ${COUNT} fake nodes have no spec.podCIDR:" >&2
-    printf '%s\n' "${without}" | head -5 >&2
-    mokka::die 5 "kwok-nodes.sh: the lane's podSubnet has no room for ${COUNT} nodes; bring the lane up with MOKKA_KIND_CONFIG=kind-scale.yaml, which widens it to 10.240.0.0/12"
-fi
+mokka::phase "wait for every fake node to be given a pod CIDR"
+# Nodes with a CIDR are counted, rather than nodes without one looked for: a
+# read that failed or came back short lists no node without a CIDR, and would
+# otherwise pass a lane whose CIDRs are never coming. kubectl exits 1 with an
+# empty stdout on a timeout or a refused connection, and a 2,000 node lane is
+# read about eighty times here, so a failed read is "not yet" and the numbers
+# reported at the deadline are those of the last read that worked.
+with_cidr=0
+without=""
+read_failed=0
+while :; do
+    if cidrs="$(k get nodes --selector "${KWOK_OWNER_LABEL}=true" \
+        -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.spec.podCIDR}{"\n"}{end}' \
+        2> /dev/null)"; then
+        read_failed=0
+        with_cidr="$(printf '%s\n' "${cidrs}" | awk 'NF >= 2 { n++ } END { print n + 0 }')"
+        # A line with a name and no second field is a node the allocator has
+        # not reached, or had no room left for.
+        without="$(printf '%s\n' "${cidrs}" | awk 'NF == 1 { print $1 }')"
+        if [ "${with_cidr}" -ge "${COUNT}" ]; then
+            break
+        fi
+    else
+        read_failed=1
+    fi
+    if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
+        printf '%s\n' "kwok-nodes.sh: $(( COUNT - with_cidr )) of ${COUNT} fake nodes have no spec.podCIDR after ${MOKKA_READY_TIMEOUT}s of waiting:" >&2
+        if [ -n "${without}" ]; then
+            printf '%s\n' "${without}" | head -5 >&2
+        fi
+        if [ "${read_failed}" -eq 1 ]; then
+            printf '%s\n' "kwok-nodes.sh: the last read of the nodes failed; the count is from the last read that worked" >&2
+        fi
+        mokka::die 5 "kwok-nodes.sh: the allocator stopped short of ${COUNT} nodes; if the lane's podSubnet is kind's default /16 it has room for 256, so bring the lane up with MOKKA_KIND_CONFIG=kind-scale.yaml, which widens it to 10.240.0.0/12"
+    fi
+    sleep "${MOKKA_POLL_INTERVAL}"
+done
 
 mokka::phase
 
