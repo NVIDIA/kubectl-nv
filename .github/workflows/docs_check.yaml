@@ -35,7 +35,10 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.5'
+          # '3.5' only ever resolved to 3.5.0-preview1: the series was released
+          # as 4.0, and ubuntu-26.04 has no build of the preview. '4.0' follows
+          # the latest 4.0.x, which ruby-builder ships for 26.04.
+          ruby-version: '4.0'
 
       - name: Install mdl
         run: gem install mdl -v 0.13.0
