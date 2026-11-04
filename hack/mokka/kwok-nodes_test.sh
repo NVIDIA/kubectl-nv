@@ -48,6 +48,29 @@ export MOKKA_STATE_DIR="${WORK}/state"
 export MOKKA_BIN_DIR="${WORK}/kubeconfigs"
 
 # ---------------------------------------------------------------------------
+# The network tripwire
+# ---------------------------------------------------------------------------
+#
+# The subject runs on a PATH of shims and a list of system tools with no curl
+# in it, but the harness itself runs on the caller's PATH, where a curl is the
+# real one. This curl goes first on that PATH: it records what it was asked to
+# fetch and fails the way curl does when it cannot connect, and the last check
+# below fails if it recorded anything. A case that needs a download tests
+# GitHub's availability rather than the script, and it fails or stalls
+# wherever outbound network is closed.
+TRIPWIRE_DIR="${WORK}/tripwire"
+export MOKKA_NETWORK_LOG="${WORK}/network.log"
+mkdir -p "${TRIPWIRE_DIR}"
+cat > "${TRIPWIRE_DIR}/curl" <<'SHIM'
+#!/bin/bash
+echo "curl $*" >> "${MOKKA_NETWORK_LOG}"
+exit 7
+SHIM
+chmod +x "${TRIPWIRE_DIR}/curl"
+: > "${MOKKA_NETWORK_LOG}"
+export PATH="${TRIPWIRE_DIR}:${PATH}"
+
+# ---------------------------------------------------------------------------
 # Shims
 # ---------------------------------------------------------------------------
 
@@ -500,7 +523,7 @@ if [ "${have_manifests}" = true ]; then
     export FAKE_READY_COUNT=5
     run_subject 5
     assert_rc 0 "the pinned manifests are accepted and installed"
-    assert_logged "kwok/releases/download/${KWOK_VERSION_UNDER_TEST}/kwok.yaml" "the pinned release is the one fetched"
+    assert_logged "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION_UNDER_TEST}/kwok.yaml" "the pinned release is the one fetched"
     assert_logged "apply -f" "the manifests are applied"
     assert_says "${KWOK_VERSION_UNDER_TEST}" "the run names the KWOK release it installed"
 else
@@ -926,6 +949,16 @@ else
 fi
 assert_logged "--kubeconfig ${MOKKA_BIN_DIR}/kubeconfig-${LANE}" "every call names the lane kubeconfig"
 assert_logged "--context ${CONTEXT}" "every call names the lane context"
+
+# ---------------------------------------------------------------------------
+# The network
+# ---------------------------------------------------------------------------
+
+if [ -s "${MOKKA_NETWORK_LOG}" ]; then
+    nope "the harness ran curl outside the shims" "calls:" "$(cat "${MOKKA_NETWORK_LOG}")"
+else
+    ok "the harness never ran curl outside the shims"
+fi
 
 # ---------------------------------------------------------------------------
 # Static analysis
