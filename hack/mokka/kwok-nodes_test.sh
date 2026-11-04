@@ -42,10 +42,36 @@ trap 'rm -rf "${WORK}"' EXIT
 SHIM_DIR="${WORK}/bin"
 TOOL_DIR="${WORK}/systools"
 FAKE_HOME="${WORK}/home"
-CACHE_DIR="${WORK}/manifest-cache"
+# The KWOK release the subject pins, and where that release's manifests are
+# vendored; "The pinned KWOK release" below says why they are not downloaded.
+KWOK_VERSION_UNDER_TEST="$(sed -n 's/^KWOK_VERSION="\(.*\)"$/\1/p' "${SUBJECT}" 2> /dev/null | head -1)"
+MANIFEST_DIR="${SCRIPT_DIR}/testdata/kwok/${KWOK_VERSION_UNDER_TEST}"
 export MOKKA_CALL_LOG="${WORK}/calls.log"
 export MOKKA_STATE_DIR="${WORK}/state"
 export MOKKA_BIN_DIR="${WORK}/kubeconfigs"
+
+# ---------------------------------------------------------------------------
+# The network tripwire
+# ---------------------------------------------------------------------------
+#
+# The subject runs on a PATH of shims and a list of system tools with no curl
+# in it, but the harness itself runs on the caller's PATH, where a curl is the
+# real one. This curl goes first on that PATH: it records what it was asked to
+# fetch and fails the way curl does when it cannot connect, and the last check
+# below fails if it recorded anything. A case that needs a download tests
+# GitHub's availability rather than the script, and it fails or stalls
+# wherever outbound network is closed.
+TRIPWIRE_DIR="${WORK}/tripwire"
+export MOKKA_NETWORK_LOG="${WORK}/network.log"
+mkdir -p "${TRIPWIRE_DIR}"
+cat > "${TRIPWIRE_DIR}/curl" <<'SHIM'
+#!/bin/bash
+echo "curl $*" >> "${MOKKA_NETWORK_LOG}"
+exit 7
+SHIM
+chmod +x "${TRIPWIRE_DIR}/curl"
+: > "${MOKKA_NETWORK_LOG}"
+export PATH="${TRIPWIRE_DIR}:${PATH}"
 
 # ---------------------------------------------------------------------------
 # Shims
@@ -385,7 +411,7 @@ reset_fixtures() {
     unset FAKE_CIDR_FAIL_FROM FAKE_CIDR_FAIL_UNTIL FAKE_CIDR_LINES FAKE_READY_AFTER
     unset FAKE_EXISTING_COUNT FAKE_KWOK_STAGES
     unset KWOK_GPU_PRODUCT KWOK_GPU_FAMILY KWOK_GPU_MEMORY KWOK_DRIVER_VERSION
-    export FAKE_MANIFEST_CACHE="${CACHE_DIR}"
+    export FAKE_MANIFEST_CACHE="${MANIFEST_DIR}"
     export FAKE_READY_COUNT=0
     export MOKKA_READY_TIMEOUT=2
     export MOKKA_POLL_INTERVAL=1
@@ -459,21 +485,19 @@ assert_not_logged "delete" "a refused --delete deletes nothing"
 # ---------------------------------------------------------------------------
 
 # The good install path needs the real manifests, because the pins are in the
-# subject and nothing here can forge them. They are fetched once; with no
-# network the install assertions are skipped rather than reported as passes.
-KWOK_VERSION_UNDER_TEST="$(sed -n 's/^KWOK_VERSION="\(.*\)"$/\1/p' "${SUBJECT}" 2> /dev/null | head -1)"
-mkdir -p "${CACHE_DIR}"
-have_manifests=true
-if [ -n "${KWOK_VERSION_UNDER_TEST}" ]; then
-    for m in kwok.yaml stage-fast.yaml; do
-        if [ ! -s "${CACHE_DIR}/${m}" ]; then
-            command curl -fsSLo "${CACHE_DIR}/${m}" \
-                "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION_UNDER_TEST}/${m}" \
-                2> /dev/null || have_manifests=false
-        fi
-    done
+# subject and nothing here can forge them. They are not downloaded: both
+# release assets are vendored, unmodified, under testdata/kwok/<version>, and
+# the curl shim serves them by name. A KWOK_VERSION bump has to bring the new
+# release's assets into that directory, and until it does this check says so.
+missing=""
+for m in kwok.yaml stage-fast.yaml; do
+    [ -s "${MANIFEST_DIR}/${m}" ] || missing="${missing} ${m}"
+done
+if [ -z "${missing}" ]; then
+    ok "the KWOK ${KWOK_VERSION_UNDER_TEST} manifests are vendored"
 else
-    have_manifests=false
+    nope "the KWOK '${KWOK_VERSION_UNDER_TEST}' manifests are not vendored:${missing}" \
+        "copy the release assets into ${MANIFEST_DIR}"
 fi
 
 reset_fixtures
@@ -484,28 +508,24 @@ assert_rc 6 "a manifest that does not match its pinned sha256"
 assert_says "kwok.yaml does not match its pinned sha256" "the refusal names the manifest"
 assert_not_logged "apply -f" "a bad checksum applies nothing"
 
-if [ "${have_manifests}" = true ]; then
-    # Only reachable with the real kwok.yaml in the cache: the first manifest
-    # has to pass its pin before the second one is ever looked at.
-    reset_fixtures
-    export FAKE_KWOK_INSTALLED=0
-    export FAKE_CORRUPT_MANIFEST="stage-fast.yaml"
-    run_subject 5
-    assert_rc 6 "the second manifest is checked too"
-    assert_says "stage-fast.yaml does not match its pinned sha256" "the second refusal names the manifest"
-    assert_not_logged "apply -f" "a bad checksum in the second manifest applies neither"
+# The real kwok.yaml is served here: the first manifest has to pass its pin
+# before the second one is ever looked at.
+reset_fixtures
+export FAKE_KWOK_INSTALLED=0
+export FAKE_CORRUPT_MANIFEST="stage-fast.yaml"
+run_subject 5
+assert_rc 6 "the second manifest is checked too"
+assert_says "stage-fast.yaml does not match its pinned sha256" "the second refusal names the manifest"
+assert_not_logged "apply -f" "a bad checksum in the second manifest applies neither"
 
-    reset_fixtures
-    export FAKE_KWOK_INSTALLED=0
-    export FAKE_READY_COUNT=5
-    run_subject 5
-    assert_rc 0 "the pinned manifests are accepted and installed"
-    assert_logged "kwok/releases/download/${KWOK_VERSION_UNDER_TEST}/kwok.yaml" "the pinned release is the one fetched"
-    assert_logged "apply -f" "the manifests are applied"
-    assert_says "${KWOK_VERSION_UNDER_TEST}" "the run names the KWOK release it installed"
-else
-    echo "SKIP - the pinned KWOK manifests could not be fetched; the install path was not exercised"
-fi
+reset_fixtures
+export FAKE_KWOK_INSTALLED=0
+export FAKE_READY_COUNT=5
+run_subject 5
+assert_rc 0 "the pinned manifests are accepted and installed"
+assert_logged "https://github.com/kubernetes-sigs/kwok/releases/download/${KWOK_VERSION_UNDER_TEST}/kwok.yaml" "the pinned release is the one fetched"
+assert_logged "apply -f" "the manifests are applied"
+assert_says "${KWOK_VERSION_UNDER_TEST}" "the run names the KWOK release it installed"
 
 # ---------------------------------------------------------------------------
 # Node manifest content
@@ -926,6 +946,16 @@ else
 fi
 assert_logged "--kubeconfig ${MOKKA_BIN_DIR}/kubeconfig-${LANE}" "every call names the lane kubeconfig"
 assert_logged "--context ${CONTEXT}" "every call names the lane context"
+
+# ---------------------------------------------------------------------------
+# The network
+# ---------------------------------------------------------------------------
+
+if [ -s "${MOKKA_NETWORK_LOG}" ]; then
+    nope "the harness ran curl outside the shims" "calls:" "$(cat "${MOKKA_NETWORK_LOG}")"
+else
+    ok "the harness never ran curl outside the shims"
+fi
 
 # ---------------------------------------------------------------------------
 # Static analysis
