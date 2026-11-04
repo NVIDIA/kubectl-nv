@@ -142,6 +142,15 @@ jobs:
           df -h
           free -m
 
+      # Every kind node runs as root on the runner, so all of them draw on one
+      # per-user pool of inotify instances. ubuntu-26.04 no longer applies the
+      # limits the runner image sets for kind (they go to /etc/sysctl.conf,
+      # which its procps does not read), and on the kernel default of 128 the
+      # device plugin cannot start. The script sets them, reads them back, and
+      # fails here rather than as a helm timeout once the lane is half up.
+      - name: Raise the inotify limits kind needs
+        run: sudo hack/ci/inotify-limits.sh
+
       - name: Build the binary under test
         run: make build
 
