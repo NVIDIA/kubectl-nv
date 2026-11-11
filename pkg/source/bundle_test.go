@@ -272,6 +272,68 @@ func TestBundleClusterPolicies(t *testing.T) {
 	}
 }
 
+// TestBundleClusterPoliciesReadsAList covers a cluster with more than one
+// ClusterPolicy. The gather writes the single document only when there is one
+// policy and the list it read otherwise, so the file is then a
+// ClusterPolicyList, and its items are what the live read returns. Read as one
+// object, the list is a policy with no name and no status, and NV-OP-001
+// reports the ready policy beside an ignored duplicate as an operator that
+// never reconciled.
+func TestBundleClusterPoliciesReadsAList(t *testing.T) {
+	dir := t.TempDir()
+	writeBundleFile(t, dir, fileClusterPolicy, `apiVersion: nvidia.com/v1
+items:
+- apiVersion: nvidia.com/v1
+  kind: ClusterPolicy
+  metadata:
+    name: cluster-policy
+  spec:
+    dcgmExporter:
+      enabled: false
+  status:
+    state: ready
+- apiVersion: nvidia.com/v1
+  kind: ClusterPolicy
+  metadata:
+    name: cluster-policy-copy
+kind: ClusterPolicyList
+metadata:
+  continue: ""
+  resourceVersion: "3"
+`)
+
+	b, err := NewBundle(dir)
+	if err != nil {
+		t.Fatalf("NewBundle() error = %v", err)
+	}
+	got, err := b.ClusterPolicies(context.Background())
+	if err != nil {
+		t.Fatalf("ClusterPolicies() error = %v, want nil", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ClusterPolicies() returned %d objects, want the 2 policies of the list", len(got))
+	}
+
+	names := []string{got[0].GetName(), got[1].GetName()}
+	if names[0] != "cluster-policy" || names[1] != "cluster-policy-copy" {
+		t.Errorf("names = %q, want cluster-policy and cluster-policy-copy in the order of the file", names)
+	}
+	for i := range got {
+		if got[i].GetKind() != "ClusterPolicy" {
+			t.Errorf("item %d has kind %q, want ClusterPolicy", i, got[i].GetKind())
+		}
+	}
+
+	state, found, err := unstructured.NestedString(got[0].Object, "status", "state")
+	if err != nil || !found || state != "ready" {
+		t.Errorf("status.state of %s = %q (found %v, err %v), want ready", names[0], state, found, err)
+	}
+	enabled, found, err := unstructured.NestedBool(got[0].Object, "spec", "dcgmExporter", "enabled")
+	if err != nil || !found || enabled {
+		t.Errorf("spec.dcgmExporter.enabled of %s = %v (found %v, err %v), want false", names[0], enabled, found, err)
+	}
+}
+
 func TestBundleResourceSlices(t *testing.T) {
 	b, err := NewBundle(filepath.Join("testdata", "bundle-min"))
 	if err != nil {
