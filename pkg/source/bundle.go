@@ -496,6 +496,11 @@ func (b *Bundle) markerReason(ctx context.Context, name string, absent error) (e
 // A bundle from a cluster that never applied the CRD carries a marker instead,
 // and that is ErrNotInstalled rather than a partial read: the caller treats it
 // as the answer it is.
+//
+// The file is one document only while the cluster has one ClusterPolicy. With
+// more than one the gather writes the list it read, and the items of that list
+// are the policies: the list itself has no name, no spec and no status, and
+// reading it as a policy reports a cluster whose operator never reconciled.
 func (b *Bundle) ClusterPolicies(ctx context.Context) ([]unstructured.Unstructured, error) {
 	var obj map[string]any
 	if err := b.readYAML(ctx, fileClusterPolicy, &obj); err != nil {
@@ -512,5 +517,15 @@ func (b *Bundle) ClusterPolicies(ctx context.Context) ([]unstructured.Unstructur
 		}
 	}
 
-	return []unstructured.Unstructured{{Object: obj}}, nil
+	policy := unstructured.Unstructured{Object: obj}
+	if !policy.IsList() {
+		return []unstructured.Unstructured{policy}, nil
+	}
+
+	list, err := policy.ToList()
+	if err != nil {
+		return nil, &PartialError{Resource: fileClusterPolicy, Err: err}
+	}
+
+	return list.Items, nil
 }
